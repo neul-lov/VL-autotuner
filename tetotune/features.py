@@ -77,10 +77,11 @@ def analyze(y, sr, f0_hz, voiced):
     }
 
 
-def noisy_voiced(voiced, feats, min_len=0.12):
-    """유성으로 잡혔지만 실제로는 잡음인 구간 (숨 · 바람 소리) → 마스크.
-    합성한 숨 샘플(UTAU 息 · 吸)이나 크게 들이쉰 숨은 Harvest가 음높이를 찾아 버려서 음표가 된다.
-    스펙트럼이 평탄하고(배음이 없고) 높은 대역이 대부분이며 비주기성이 거의 최대인 구간이 숨 길이(120ms) 넘게 이어질 때만."""
+def noisy_voiced(voiced, feats, min_len=0.05):
+    """유성으로 잡혔지만 실제로는 잡음인 구간 (숨 · ㅅ · ㅎ 같은 바람 소리) → 마스크.
+    합성한 숨 샘플(UTAU 息 · 吸), 크게 들이쉰 숨, WORLD로 다시 만든 자음은 Harvest가 음높이를 찾아 버려서
+    따로 음표가 되고 가사가 한 칸씩 밀린다. 스펙트럼이 평탄하고(배음이 없고) 높은 대역이 대부분이며
+    비주기성이 거의 최대인 구간이 50ms 넘게 이어질 때만 (사람 노래의 숨 섞인 모음은 배음이 남아 있어 걸리지 않는다)."""
     noisy = voiced & (feats["flatness"] > 0.015) & (feats["high_ratio"] > 0.6)
     for a, b in _runs(~noisy):  # 20ms 이하 틈은 메운다
         if 0 < a and b < len(noisy) and b - a <= 4 and voiced[a:b].all():
