@@ -95,6 +95,7 @@ jobs:
               if curl -sf -H "X-TetoTune-Token: $token" "http://127.0.0.1:$port/api/status" > status.json; then
                 cat status.json; echo; grep -h "^\[TetoTune\]" "$sup/setup.log" || true
                 ls -l "$sup/server.json"
+                echo "::add-mask::$token"
                 echo "port=$port" >> "$GITHUB_ENV"; echo "token=$token" >> "$GITHUB_ENV"
                 # 비밀값 없는 요청은 막혀야 한다
                 code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/api/results")
