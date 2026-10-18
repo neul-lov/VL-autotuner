@@ -8,6 +8,9 @@ import re
 from pathlib import Path
 
 TETO = ("テト", "Teto", "teto", "TETO", "테토")
+# 테토 음원이 여럿이면 기본 목소리를 먼저 (속삭임 · 영어 · 힘 준 소리 같은 특수 음원은 뒤로)
+SPECIAL = ("囁", "ささやき", "sasayaki", "whisper", "English", "english", "力", "rikimi", "叫", "sakebi", "弱", "jaku",
+           "エッジ", "edge", "滑", "nameraka", "extra", "Extra", "Lite", "lite", "beta", "ameya", "tetovoice")
 # 숨소리 별칭 (음원마다 다름). 들숨을 먼저 찾는다.
 INHALE = ("吸", "息吸", "br_in", "breath_in", "inhale")
 EXHALE = ("息", "br", "breath", "R息", "hh", "Breath", "息1")
@@ -66,7 +69,10 @@ def list_singers(roots=None):
         for c in root.rglob("character.txt"):
             folder = c.parent
             out.append({"id": str(folder.relative_to(root)), "name": _name(folder), "path": str(folder), "root": str(root)})
-    out.sort(key=lambda s: (not any(k in s["name"] or k in s["id"] for k in TETO), s["name"]))
+    def rank(s):
+        text = s["name"] + " " + s["id"]
+        return (not any(k in text for k in TETO), any(k in text for k in SPECIAL), s["name"])
+    out.sort(key=rank)
     return out
 
 

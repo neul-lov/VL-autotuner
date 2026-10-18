@@ -4,11 +4,18 @@
 읽어서 **OpenUtau의 카사네 테토가 그대로 따라 부르는 프로젝트(.ustx)** 를 만들어 주는 Mac 앱이에요. 모든 처리는 내 컴퓨터에서 돌아가요.
 
 ## 설치와 실행
-1. OpenUtau(Mac)와 테토 UTAU 음원(단독음 또는 연속음)을 설치해 둬요. 음원은 OpenUtau 가수 폴더(`~/Library/OpenUtau/Singers`)에 있으면 저절로 찾아요.
-2. 이 폴더의 `start-mac.command` 를 더블클릭해요. 처음 한 번 필요한 프로그램(`.venv`)을 설치하고, Xcode 도구가 있으면 `/Applications/TetoTune.app` 도 만들어요.
-   앱만 다시 만들려면 `mac/build.sh --install`.
+1. OpenUtau(Mac)와 테토 음원을 설치해 둬요. 음원이 OpenUtau 가수 폴더(`~/Library/OpenUtau/Singers`)에 있으면 저절로 찾아요
+   (테토 음원이 여럿이면 기본 목소리를 먼저 골라요. 다른 음원은 앱 오른쪽 위 ⋯ 메뉴에서).
+2. 앱 받기 (둘 중 하나)
+   - **빌드된 앱**: 저장소의 Actions → 최근 빌드 → `TetoTune-mac` 을 받아 풀고 `TetoTune.app` 을 응용 프로그램 폴더로 옮겨요.
+     인터넷에서 받은 서명 없는 앱이라 처음 한 번은 막혀요. 시스템 설정 → 개인정보 보호 및 보안 → "그래도 열기"를 누르거나,
+     터미널에서 `xattr -dr com.apple.quarantine /Applications/TetoTune.app` 를 실행해요.
+   - **직접 빌드**: 이 폴더의 `start-mac.command` 를 더블클릭하면 `.venv` 를 만들고 `/Applications/TetoTune.app` 도 만들어요
+     (Xcode 또는 Command Line Tools 필요). 앱만 다시 만들려면 `mac/build.sh --install`.
 3. TetoTune을 열면 조교 엔진(`server.py`)이 같이 켜지고, 앱을 끄면 같이 꺼져요.
-   앱은 이 폴더의 `.venv` 와 `server.py` 를 쓰니, 폴더를 옮기면 `mac/build.sh --install` 을 다시 실행해요.
+   - 빌드된 앱은 엔진을 앱 안에 갖고 있고, 처음 켤 때 한 번 필요한 Python 패키지를 `~/Library/Application Support/TetoTune` 에 설치해요
+     (인터넷 필요, 몇 분). Python 3.9 이상이 없으면 앱이 Apple 개발자 도구 설치를 안내해요.
+   - 직접 빌드한 앱은 이 폴더의 `server.py` 와 `.venv` 를 쓰니, 폴더를 옮기면 `mac/build.sh --install` 을 다시 실행해요.
 
 ## 쓰는 법
 - **보컬 고르기**: 보컬만 있는 파일(wav · flac · mp3 · m4a)을 창에 끌어다 놓거나 왼쪽 위 칸을 눌러 골라요.
@@ -18,6 +25,8 @@
 - **음표 파일**(선택): ustx · ust · mid · StemMixer 음표 파일을 주면 음표는 그걸 쓰고, 음 높이 · 크기 · 숨만 보컬에서 읽어요.
 - **조교 설정**: 음 높이 따라가기, 비브라토, 음정 보정, 셈여림, 숨 섞인 소리, 힘 준 소리, 숨소리 크기, 숨소리 방식, 음역(자동이면 남자 목소리는 한 옥타브 올림), 빠르기.
 - **자동 조교 시작**(⌘⏎) → 끝나면 오른쪽에 미리보기(원래 음 높이 파랑 · 테토 음 높이 빨강 · 음표 · 숨)가 나오고, "OpenUtau에서 열기"로 바로 열어요.
+  OpenUtau는 켜질 때만 프로젝트를 받아서, 이미 켜져 있으면 Finder에서 파일을 보여 줘요 (OpenUtau의 파일 → 열기로 열어요).
+- 가사는 보컬마다 따로 기억해요. StemMixer 곡에 가사가 있으면 가사 칸을 비워 둘 때 그 가사를 써요.
 - 결과는 `~/Music/TetoTune/<곡 이름 날짜>/` 에 저장돼요.
   - `project.ustx`: 테토 트랙, 원래 보컬 트랙(**음소거**, 비교용), 반주(있으면), 숨소리 트랙(음원에 숨소리가 없을 때)
   - `guide_vocals.wav`, `preview.json`, `report.json`
