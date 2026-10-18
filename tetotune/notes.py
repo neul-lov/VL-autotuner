@@ -156,7 +156,10 @@ def segment(midi, voiced, db, novelty=None, auto_split_db=6.0, noise=None, hiban
         out = []
         for note in phrase:
             fa, fb = int(round(note.start / HOP)), int(round(note.end / HOP))
-            cuts = _cuts(db_s, nov_z, fa, fb)
+            fv = fb  # 끝의 메운 무성 틈(다음 음절 자음)에서는 나누지 않는다: 자음 앞 크기 꺼짐이 새 음절로 보이지 않게
+            while fv > fa and not voiced[fv - 1]:
+                fv -= 1
+            cuts = _cuts(db_s, nov_z, fa, fv)
             strong = [i for i, sc, d in cuts if d >= auto_split_db]
             note.dips = [(i * HOP, sc) for i, sc, d in cuts if d < auto_split_db]
             if not strong:
@@ -504,8 +507,9 @@ def read_file(path):
             continue
         if notes and s < notes[-1].end:  # 겹치면 앞 음표를 자른다
             notes[-1].end = s
-            if s - notes[-1].start < 0.03:  # 거의 남지 않으면 버린다 (가사는 이 음표가 받는다)
-                lyric = lyric or notes.pop().lyric
+            if s - notes[-1].start < 0.03:  # 거의 남지 않으면 버린다 (가사가 없으면 이 음표가 받는다)
+                dropped = notes.pop()
+                lyric = lyric or dropped.lyric
         gap = s - notes[-1].end if notes else 99
         notes.append(Note(s, e, tone, lyric, strength=10.0 if gap > REST_GAP else 5.0))
     return notes, bpm

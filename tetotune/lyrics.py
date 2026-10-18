@@ -69,11 +69,22 @@ def kanji_to_kana(text):
         elif KANJI.search(surface):
             if kana and kana != "*":
                 surface = kata_to_hira(kana)
-        elif surface in ("は", "へ") and pos(i) == "助詞" and i and not word.white_space \
-                and pos(i - 1) not in ("補助記号", "空白", "感動詞") and pron and pron != "*":
-            surface = kata_to_hira(pron)
+        elif kata_to_hira(surface) in ("は", "へ") and i and not word.white_space \
+                and pos(i - 1) not in ("補助記号", "空白", "感動詞") and pron and pron != "*" \
+                and (pos(i) == "助詞" or _katakana_particle(words, i, pos)):
+            surface = "わ" if kata_to_hira(surface) == "は" else "え"
+        elif len(surface) > 1 and surface[-1] in "はへ" and pron and len(pron) == len(surface) \
+                and kata_to_hira(pron)[:-1] == surface[:-1] and kata_to_hira(pron)[-1] in "わえ":
+            surface = kata_to_hira(pron)  # こんにちは · こんばんは · あるいは (한 낱말 끝의 は)
         out.append(word.white_space + surface)  # 띄어쓰기 · 줄 바꿈은 white_space에 있다
     return "".join(out), True
+
+
+def _katakana_particle(words, i, pos):
+    """가타카나 가사의 ハ (ワタシハ): unidic은 조사가 아니라 記号로 읽는다. 앞이 낱말이고 뒤가 낱말 끝이면 조사로 본다
+    (キミハ처럼 앞도 記号 조각이면 모르니 그대로)."""
+    return pos(i) == "記号" and pos(i - 1) not in ("記号", None) \
+        and (pos(i + 1) != "記号" or bool(words[i + 1].white_space))
 
 
 def language(text):
@@ -113,14 +124,17 @@ def split(text):
     elif KANJI.search(text):
         warnings.append(f"한자 {''.join(dict.fromkeys(KANJI.findall(text)))}의 읽는 법을 찾지 못했어요. 히라가나로 써 주세요")
     lines, digits = [], False
-    for raw in re.split(r"[\n\r]+", text):
+    for raw in text.splitlines():  # \n · \r 말고 Pages · Word의 줄 나눔(U+2028)도 (빈 줄은 아래에서 빠진다)
         syl, word = [], ""
         for c in kata_to_hira(raw) + " ":
             if c.isalpha() and c not in LONG and not SYLLABLE.match(c):
                 word += c  # 영어 · 로마자는 글자를 모아 한 음절
                 continue
+            if word and c in "'’":  # don't · I’m은 한 낱말 (맥의 둥근 따옴표도)
+                word += "'"
+                continue
             if word:
-                syl.append(word)
+                syl.append(word.rstrip("'"))
                 word = ""
             if c in LONG:
                 syl.append("+")

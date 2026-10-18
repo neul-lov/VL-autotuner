@@ -28,6 +28,7 @@ LIMITS = {
 }
 CHOICES = {"breaths": ("auto", "voicebank", "original", "off"), "pitch_method": ("auto", "harvest", "rmvpe")}
 MAX_JOBS = 50
+INCOMPLETE = ".incomplete"  # 조교 중인 폴더 표시 (엔진 pid). 끝나면 지우고, 엔진이 중간에 꺼졌으면 다음 실행 때 폴더를 치운다
 
 PORT = int(os.environ.get("TETOTUNE_PORT", 8766))
 TOKEN = os.environ.get("TETOTUNE_TOKEN") or None
@@ -47,7 +48,9 @@ async def only_this_computer(request, call_next):
     origin = request.headers.get("origin")
     if name not in LOCAL_HOSTS or (origin is not None and origin != f"http://{host}"):
         return JSONResponse({"detail": "이 컴퓨터의 TetoTune에서 보낸 요청만 받아요"}, status_code=403)
-    if TOKEN and not hmac.compare_digest(request.headers.get("x-tetotune-token", ""), TOKEN):
+    # 머리글은 latin-1로 풀려 오니 바이트로 비교한다 (글자로 비교하면 ASCII가 아닌 값에서 오류가 난다)
+    sent = request.headers.get("x-tetotune-token", "").encode("latin-1")
+    if TOKEN and not hmac.compare_digest(sent, TOKEN.encode()):
         return JSONResponse({"detail": "이 엔진을 켠 TetoTune에서 보낸 요청만 받아요"}, status_code=403)
     return await call_next(request)
 
@@ -150,17 +153,22 @@ def _run(job_id, vocal, song, lyrics, notes, backing, opts):
             if song:
                 job.update(step="StemMixer 곡 불러오는 중", progress=0.01)
                 tmp = OUTPUT / ".work" / job_id
+                _mark(tmp)
                 vocal, sm_notes, sm_backing, title = stemmixer.prepare(song, tmp)
                 notes = notes or (str(sm_notes) if sm_notes else None)
                 backing = backing or (str(sm_backing) if sm_backing else None)
             out = OUTPUT / _folder_name(title)
+            _mark(out)
             res = tune(vocal, out, lyrics or "", notes or None, backing or None, opts,
                        progress=lambda p, s: job.update(step=s, progress=round(p, 3)), title=title)
+            (out / INCOMPLETE).unlink(missing_ok=True)
             job.update(status="done", progress=1.0, step="끝", result=asdict(res))
     except Exception as e:
         traceback.print_exc()
         if out is not None and out.exists() and not (out / "project.ustx").exists():
             shutil.rmtree(out, ignore_errors=True)
+        elif out is not None:
+            (out / INCOMPLETE).unlink(missing_ok=True)
         job.update(status="error", error=str(e) if isinstance(e, ValueError) else f"조교하지 못했어요: {e}")
     finally:
         shutil.rmtree(OUTPUT / ".work" / job_id, ignore_errors=True)
@@ -203,6 +211,33 @@ def preview(name: str):
 # 결과 지우기는 앱이 직접 휴지통으로 옮긴다 (OpenUtau에서 고친 project.ustx도 되살릴 수 있게)
 
 
+def _mark(folder):
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / INCOMPLETE).write_text(str(os.getpid()))
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # 다른 사용자의 프로그램이 그 번호를 쓰는 중
+        return True
+    return True
+
+
+def sweep_unfinished():
+    """앱을 끄거나 강제로 꺼서 끝나지 못한 조교의 폴더(결과 · StemMixer 작업)를 치운다.
+    표시(INCOMPLETE)가 있고 그 엔진이 이미 꺼진 폴더만: 사용자가 만든 폴더 · 다른 엔진이 쓰는 중인 폴더는 그대로."""
+    for m in list(OUTPUT.glob(f"*/{INCOMPLETE}")) + list((OUTPUT / ".work").glob(f"*/{INCOMPLETE}")):
+        try:
+            pid = int(m.read_text().strip() or 0)
+        except (OSError, ValueError):
+            pid = 0
+        if pid != os.getpid() and not (pid and _alive(pid)):
+            shutil.rmtree(m.parent, ignore_errors=True)
+
+
 def _exit_with_parent(pid):
     """앱이 강제로 꺼지거나 멈춰도 엔진이 혼자 남지 않게: 부모가 바뀌면(launchd가 받으면) 끝낸다."""
     while True:
@@ -215,6 +250,7 @@ if __name__ == "__main__":
     import uvicorn
 
     OUTPUT.mkdir(parents=True, exist_ok=True)
+    sweep_unfinished()
     parent = os.environ.get("TETOTUNE_PARENT_PID")
     if parent and parent.isdigit():
         threading.Thread(target=_exit_with_parent, args=(int(parent),), daemon=True).start()

@@ -68,7 +68,7 @@ def write(path, y, sr=SR):
 # OpenUtau가 그대로 읽는 형식 (Wave.OpenFile: 머리가 RIFF · fLaC인 파일, 확장자가 .aiff인 파일 → NAudio가 푸는 PCM · float)
 _PCM = {"PCM_S8", "PCM_U8", "PCM_16", "PCM_24", "PCM_32"}
 _AS_IS = {"WAV": (".wav", b"RIFF", _PCM | {"FLOAT", "DOUBLE"}), "WAVEX": (".wav", b"RIFF", _PCM | {"FLOAT", "DOUBLE"}),
-          "FLAC": (".flac", b"fLaC", _PCM), "AIFF": (".aiff", b"FORM", _PCM)}
+          "FLAC": (".flac", b"fLaC", _PCM), "AIFF": (".aiff", b"FORM", {"PCM_16", "PCM_24", "PCM_32"})}
 
 
 def save_copy(path, dest):
@@ -78,11 +78,14 @@ def save_copy(path, dest):
     try:
         info = sf.info(str(path))
         with open(path, "rb") as fp:
-            magic = fp.read(4)
+            head12 = fp.read(12)
+        magic = head12[:4]
     except Exception:
-        info = magic = None
+        info = magic = head12 = None
     ext, head, subtypes = _AS_IS.get(info.format if info else None, (None, None, ()))
-    if ext and magic == head and info.subtype in subtypes:
+    # AIFF-C(sowt 등 압축 표시가 있는 것)와 8비트 AIFF는 OpenUtau가 못 읽을 수 있어서 wav로 푼다
+    plain = info is not None and (info.format != "AIFF" or head12[8:12] == b"AIFF")
+    if ext and magic == head and info.subtype in subtypes and plain:
         out = dest.with_suffix(ext)
         if not (out.exists() and out.samefile(path)):
             shutil.copyfile(path, out)

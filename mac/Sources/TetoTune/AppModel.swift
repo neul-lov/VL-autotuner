@@ -260,17 +260,31 @@ final class AppModel: ObservableObject {
 
     func useStemSong(_ song: StemSong) {
         withAnimation(.easeOut(duration: 0.15)) {
+            // Same rule as useFile: only another song's files are cleared.
+            if let old = source, old != .stem(song), notesFile != nil || backingFile != nil {
+                notesFile = nil
+                backingFile = nil
+                show("새 보컬이라 음표 · 반주 파일은 비웠어요", success: false)
+            }
             source = .stem(song)
-            notesFile = nil
-            backingFile = nil
             jobError = nil
         }
     }
 
+    /// The X on the vocal card: the notes and backing were picked for that vocal, so they go too.
+    func clearSource() {
+        withAnimation {
+            source = nil
+            notesFile = nil
+            backingFile = nil
+        }
+    }
+
     func resetOptions() {
-        let singer = options.singer
-        options = TuneOptions()
-        options.singer = singer
+        // One assignment with the same singer: no extra status requests that could arrive out of order.
+        var fresh = TuneOptions()
+        fresh.singer = options.singer
+        options = fresh
     }
 
     private static func savedLyrics() -> [String: String] {

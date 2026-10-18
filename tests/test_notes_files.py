@@ -129,6 +129,12 @@ def test_near_simultaneous_note_keeps_lyric(tmp_path):
     assert notes[1].strength == 5.0 and notes[1].end == 1.0  # 너무 짧은 음(70)은 앞 음표를 자르지 않는다
 
 
+def test_chord_with_lyric_on_upper_note_drops_lower(tmp_path):
+    raw = [[0, 0.5, 60, 100], [0.5, 1.0, 59, 100], [0.5, 1.0, 64, 100, "き"], [1.0, 1.5, 65, 100]]
+    notes, _ = nt.read_file(_json(tmp_path / "u.json", raw))
+    assert [(n.tone, n.lyric) for n in notes] == [(60, ""), (64, "き"), (65, "")]
+
+
 # ---------------------------------------------------------------- _distribute
 def _utility_old(ev, k):
     top = ev[:max(0, k - 1)]

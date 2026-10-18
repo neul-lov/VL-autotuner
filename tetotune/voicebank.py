@@ -189,6 +189,7 @@ def inspect(folder):
             info["breath_gap_db"] = round(lb - lv, 1)
     info["phonemizer"] = phonemizer or (PRESAMP if any(re.search(r"[぀-ゟ]", a) for a in aliases) else DEFAULT)
     info["japanese"] = any(re.search(r"[぀-ゟ]", a) for a in aliases)
+    info["korean"] = any(re.search(r"[가-힣]", a) for a in aliases)
     return info
 
 
