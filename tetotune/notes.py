@@ -223,10 +223,15 @@ def _evidence(notes):
     return sorted(ev, key=lambda e: -e[0])
 
 
-def _utility(ev, k):
-    """음절 k개를 이 프레이즈에 넣을 때의 그럴듯함 (센 경계 k−1개를 고른 합)."""
-    top = ev[:max(0, k - 1)]
-    return sum(e[0] - NEUTRAL for e in top) - 6.0 * max(0, k - 1 - len(ev))
+def _utilities(ev, n):
+    """음절 k개(0..n)를 이 프레이즈에 넣을 때의 그럴듯함 (센 경계 k−1개를 고른 합, 경계가 모자라면 하나에 −6).
+    누적합도 sum()으로 구한다 (sum()은 소수 오차를 보정하며 더해서, 하나씩 더하면 값이 조금 달라진다)."""
+    d = [e[0] - NEUTRAL for e in ev]
+    top = np.array([sum(d[:j]) for j in range(len(d) + 1)], dtype=float)
+    k = np.arange(n + 1)
+    u = top[np.clip(k - 1, 0, len(d))] - 6.0 * np.maximum(0, k - 1 - len(d))
+    u[0] = -np.inf  # 프레이즈마다 1개 이상
+    return u
 
 
 def _align_group(notes, syls):
@@ -298,29 +303,30 @@ def _mark_rest(g):
 
 
 def _distribute(groups, total):
-    """음절 total개를 프레이즈마다 몇 개씩 넣을지. 프레이즈마다 1개 이상."""
-    evs = [_evidence(g) for g in groups]
+    """음절 total개를 프레이즈마다 몇 개씩 넣을지. 프레이즈마다 1개 이상.
+    best[j] = 지금 프레이즈까지 (프레이즈 수 + j)개를 썼을 때 가장 좋은 점수. 프레이즈마다 k를 하나씩 늘리며
+    j 전체를 numpy로 한꺼번에 넓힌다. 점수가 같으면 큰 k (= 앞 프레이즈들에 적게)."""
     G = len(groups)
-    NEG = -1e18
-    best = [[NEG] * (total + 1) for _ in range(G + 1)]
-    back = [[0] * (total + 1) for _ in range(G + 1)]
-    best[0][0] = 0.0
-    for g in range(G):
-        for used in range(total + 1):
-            if best[g][used] == NEG:
-                continue
-            for k in range(1, total - used + 1):
-                v = best[g][used] + _utility(evs[g], k)
-                if v > best[g + 1][used + k]:
-                    best[g + 1][used + k] = v
-                    back[g + 1][used + k] = k
-    if best[G][total] == NEG:  # 음절이 프레이즈보다 적다: 앞에서부터 하나씩
+    if G == 0 or total < G:  # 음절이 프레이즈보다 적다: 앞에서부터 하나씩
         return [1 if i < total else 0 for i in range(G)]
-    counts, used = [], total
-    for g in range(G, 0, -1):
-        k = back[g][used]
-        counts.append(k)
-        used -= k
+    n = total - G + 1  # 한 프레이즈에 넣을 수 있는 최대 개수 (남은 프레이즈에 1개씩 남긴다)
+    best = np.full(n, -np.inf)
+    best[0] = 0.0
+    backs = []
+    for g in groups:
+        u = _utilities(_evidence(g), n)
+        nxt, back = np.full(n, -np.inf), np.zeros(n, dtype=np.int64)
+        for k in range(1, n + 1):  # k개를 넣으면 j → j + k − 1
+            v = best[:n - k + 1] + u[k]
+            cur = nxt[k - 1:]
+            back[k - 1:][v >= cur] = k
+            np.maximum(cur, v, out=cur)
+        best = nxt
+        backs.append(back)
+    counts, j = [], n - 1
+    for back in reversed(backs):
+        counts.append(int(back[j]))
+        j -= counts[-1] - 1
     return counts[::-1]
 
 
@@ -372,20 +378,24 @@ def read_file(path):
         bpm = float(d.get("tempo") or 120)
     else:
         raise ValueError("음표 파일은 MIDI(.mid) · OpenUtau(.ustx) · UTAU(.ust) · StemMixer 음표만 돼요")
-    raw.sort()
+    # 같은 때 시작하는 음(화음 · 겹친 음)은 하나만 남긴다: 높은 음이 뒤에 오게 놓아서 그것이 남는다 (보통 맨 위가 멜로디)
+    raw.sort(key=lambda r: (r[0], r[2], r[1]))
     notes = []
     for s, e, tone, lyric in raw:
-        if notes and s < notes[-1].end:
+        if e - s < 0.03:
+            continue
+        if notes and s < notes[-1].end:  # 겹치면 앞 음표를 자른다
             notes[-1].end = s
-        if e - s >= 0.03:
-            gap = s - notes[-1].end if notes else 99
-            notes.append(Note(s, e, tone, lyric, strength=10.0 if gap > REST_GAP else 5.0))
+            if s - notes[-1].start < 0.03:  # 거의 남지 않으면 버린다 (가사는 이 음표가 받는다)
+                lyric = lyric or notes.pop().lyric
+        gap = s - notes[-1].end if notes else 99
+        notes.append(Note(s, e, tone, lyric, strength=10.0 if gap > REST_GAP else 5.0))
     return notes, bpm
 
 
 def _read_ust(path):
     data = path.read_bytes()
-    text = data.decode("utf-8") if b"Charset=UTF-8" in data[:400] else data.decode("shift_jis", errors="replace")
+    text = data.decode("utf-8") if b"Charset=UTF-8" in data[:400] else data.decode("cp932", errors="replace")
     sections, cur = [], None
     for line in text.splitlines():
         line = line.strip()
@@ -411,42 +421,58 @@ def _read_ust(path):
     return raw, first
 
 
+VOCAL_TRACK = ("vocal", "vox", "melody", "voice", "歌", "ボーカル", "보컬")
+
+
+def _midi_text(t):
+    """mido는 글자를 latin-1로 읽는다 → UTF-8, 아니면 cp932 (일본 MIDI)."""
+    for enc in ("utf-8", "cp932"):
+        try:
+            return t.encode("latin-1").decode(enc)
+        except Exception:
+            continue
+    return t
+
+
 def _read_midi(path):
-    """MIDI → 음표 (가장 음표가 많은 트랙). 빠르기가 중간에 바뀌어도 초를 맞게 센다."""
+    """MIDI → 음표. (트랙, 채널)마다 모아서 노래 파트를 고른다: 가사가 붙은 음표가 많은 것 → 이름이 보컬 · 멜로디인 것 →
+    음표가 많은 것 (채널 10 = 드럼은 뺀다). 빠르기가 중간에 바뀌어도 초를 맞게 센다."""
     import mido
 
     mid = mido.MidiFile(str(path))
-    tempos, tracks = [], []
-    for tr in mid.tracks:
-        tick, on, lyric, notes = 0, {}, "", []
+    tempos, names, parts = [], {}, {}  # parts: (트랙, 채널) → [(시작 틱, 끝 틱, 음, 가사)]
+    for ti, tr in enumerate(mid.tracks):
+        tick, lyric, name = 0, "", ""
+        on = {}  # (채널, 음) → [(시작 틱, 가사)] 먼저 누른 것부터
         for msg in tr:
             tick += msg.time
             if msg.type == "set_tempo":
                 tempos.append((tick, msg.tempo))
+            elif msg.type in ("track_name", "instrument_name"):
+                name += " " + _midi_text(msg.name)
             elif msg.type == "lyrics":
-                t = msg.text
-                try:
-                    t = t.encode("latin-1").decode("utf-8")
-                except Exception:
-                    try:
-                        t = t.encode("latin-1").decode("shift_jis")
-                    except Exception:
-                        pass
-                lyric = t.strip()
+                lyric = _midi_text(msg.text).strip()
+            elif msg.type not in ("note_on", "note_off") or msg.channel == 9:
+                continue
             elif msg.type == "note_on" and msg.velocity > 0:
-                on[msg.note] = (tick, lyric)
+                on.setdefault((msg.channel, msg.note), []).append((tick, lyric))
                 lyric = ""
-            elif msg.type in ("note_off", "note_on") and msg.note in on:
-                t0, ly = on.pop(msg.note)
-                notes.append((t0, tick, msg.note, ly))
-        if notes:
-            tracks.append(notes)
+            elif on.get((msg.channel, msg.note)):
+                # 먼저 누른 음부터 닫는다: 같은 음을 이어 부르면 다음 note_on이 앞 note_off보다 먼저 올 수 있다 (같은 틱 · 겹침).
+                # 이 틱에 막 누른 음뿐이면 길이 0인 음이라 버린다 (pretty_midi와 같게). 겹친 곳은 read_file이 자른다
+                t0, ly = on[(msg.channel, msg.note)].pop(0)
+                if t0 < tick:
+                    parts.setdefault((ti, msg.channel), []).append((t0, tick, msg.note, ly))
+        names[ti] = name.lower()
     tempos = sorted(tempos) or [(0, 500000)]
     if tempos[0][0] > 0:
         tempos.insert(0, (0, tempos[0][1]))
     conv = _tick_to_sec([(t * TICKS / mid.ticks_per_beat, 60_000_000 / us) for t, us in tempos])
     raw = []
-    if tracks:
-        for t0, t1, p, ly in max(tracks, key=len):
+    if parts:
+        def rank(key):
+            notes = parts[key]
+            return (sum(1 for n in notes if n[3]), any(w in names[key[0]] for w in VOCAL_TRACK), len(notes))
+        for t0, t1, p, ly in parts[max(parts, key=rank)]:
             raw.append((conv(t0 * TICKS / mid.ticks_per_beat), conv(t1 * TICKS / mid.ticks_per_beat), p, ly))
     return raw, 60_000_000 / tempos[0][1]
