@@ -134,6 +134,13 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
         raise ValueError("노래하는 소리를 찾지 못했어요 (보컬만 분리한 파일인지 확인해 주세요)")
     progress(0.35, "목소리 특징 읽는 중 (크기 · 숨 · 힘)")
     feats = features.analyze(y, sr, np.where(voiced, pitch.midi_to_hz(np.nan_to_num(midi, nan=60)), 0), voiced)
+    # 음높이가 잡힌 숨소리는 노래가 아니다: 무성으로 돌려서 음표가 아니라 숨으로 찾게 한다
+    noise = features.noisy_voiced(voiced, feats)
+    if noise.any():
+        voiced = voiced & ~noise
+        midi = np.where(voiced, midi, np.nan)
+        for k in ("breathiness", "tension"):
+            feats[k] = np.where(voiced, feats[k], np.nan)
 
     # 조옮김: 테토 음역(대략 C4~C6)에 맞게
     med = float(np.nanmedian(midi[voiced]))

@@ -77,6 +77,23 @@ def analyze(y, sr, f0_hz, voiced):
     }
 
 
+def noisy_voiced(voiced, feats, min_len=0.12):
+    """유성으로 잡혔지만 실제로는 잡음인 구간 (숨 · 바람 소리) → 마스크.
+    합성한 숨 샘플(UTAU 息 · 吸)이나 크게 들이쉰 숨은 Harvest가 음높이를 찾아 버려서 음표가 된다.
+    스펙트럼이 평탄하고(배음이 없고) 높은 대역이 대부분이며 비주기성이 거의 최대인 구간이 숨 길이(120ms) 넘게 이어질 때만."""
+    noisy = voiced & (feats["flatness"] > 0.015) & (feats["high_ratio"] > 0.6)
+    for a, b in _runs(~noisy):  # 20ms 이하 틈은 메운다
+        if 0 < a and b < len(noisy) and b - a <= 4 and voiced[a:b].all():
+            noisy[a:b] = True
+    out = np.zeros_like(voiced)
+    for a, b in _runs(noisy):
+        ap = feats["breathiness"][a:b]
+        ap = ap[np.isfinite(ap)]
+        if (b - a) * HOP >= min_len and len(ap) and np.median(ap) > -3:
+            out[a:b] = True
+    return out
+
+
 def find_breaths(db, voiced, feats, min_len=0.12, max_len=1.4):
     """노래하지 않는 곳에서 숨소리를 찾는다 → [(시작초, 끝초, 크기dB, 들숨인지)].
     숨은 잡음처럼 넓게 퍼진 소리라서: 바닥 잡음보다 충분히 크고, 높은 대역 비율 · 평탄도가 높다.
@@ -86,7 +103,8 @@ def find_breaths(db, voiced, feats, min_len=0.12, max_len=1.4):
         return []
     floor = np.percentile(db, 3)
     sing = np.median(db[voiced])
-    cand = (~voiced) & (db > floor + 6) & (db < sing - 4) & (feats["high_ratio"] > 0.25) & (feats["flatness"] > 0.02)
+    # 크기 위쪽은 노래만큼까지: 마이크 가까이에서 들이쉰 숨이나 합성한 숨은 노래와 크기가 비슷하다
+    cand = (~voiced) & (db > floor + 6) & (db < sing + 1) & (feats["high_ratio"] > 0.25) & (feats["flatness"] > 0.02)
     # 30ms 이하 틈은 메운다
     for a, b in _runs(~cand):
         if 0 < a and b < n and b - a <= 6:
