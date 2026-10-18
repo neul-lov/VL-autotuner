@@ -6,6 +6,16 @@ on:
   pull_request:
   workflow_dispatch:
 
+# 같은 브랜치에 새로 올리면 앞의 실행은 멈춰요
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    # pipefail: `… | tee` 앞의 명령이 실패해도 단계가 실패로 보이게
+    shell: bash
+
 jobs:
   engine:
     name: 엔진 시험 (Python ${{ matrix.python }})
@@ -65,11 +75,19 @@ jobs:
       - name: 앱 켜기
         run: |
           ditto -x -k TetoTune-mac.zip .
-          open TetoTune.app
+          ls /opt/homebrew/bin/python3* /usr/local/bin/python3* 2>/dev/null || true
+          /opt/homebrew/bin/python3 --version || true
+          open --stdout "$PWD/app.out" --stderr "$PWD/app.err" TetoTune.app
       - name: 엔진이 뜰 때까지 (처음 실행 설치 포함)
         run: |
-          for i in $(seq 1 240); do
+          sup="$HOME/Library/Application Support/TetoTune"
+          for i in $(seq 1 180); do
             if curl -sf http://127.0.0.1:8766/api/status > status.json; then cat status.json; exit 0; fi
+            if (( i % 12 == 0 )); then
+              echo "--- $((i * 5))초: $(pgrep -lf 'TetoTune|server.py|pip' | tr '\n' ' ')"
+              tail -n 2 "$sup/setup.log" 2>/dev/null || true
+              tail -n 5 "$sup/server-app.log" 2>/dev/null || true
+            fi
             sleep 5
           done
           echo "엔진이 뜨지 않았어요"; exit 1
@@ -92,9 +110,14 @@ jobs:
       - name: 기록 모으기
         if: always()
         run: |
+          sup="$HOME/Library/Application Support/TetoTune"
           mkdir -p smoke
-          cp -R ~/Library/Application\ Support/TetoTune/*.log smoke/ 2>/dev/null || true
-          cp screen.png status.json smoke/ 2>/dev/null || true
+          cp "$sup"/*.log smoke/ 2>/dev/null || true
+          cp screen.png status.json app.out app.err smoke/ 2>/dev/null || true
+          ls -la "$sup" "$sup/venv" 2>/dev/null || true
+          for f in "$sup/setup.log" "$sup/server-app.log" app.out app.err; do
+            echo "===== $f"; tail -n 80 "$f" 2>/dev/null || true
+          done
       - uses: actions/upload-artifact@v4
         if: always()
         with:
