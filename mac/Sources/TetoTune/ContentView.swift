@@ -38,7 +38,7 @@ struct ContentView: View {
             VStack(spacing: 10) {
                 Image(systemName: "waveform.badge.plus")
                     .font(.system(size: 38, weight: .light))
-                Text("보컬 파일이나 음표 파일(ustx · ust · mid)을 놓으세요")
+                Text("보컬 파일이나 음표 파일(ustx · ust · mid · json)을 놓으세요")
                     .font(.system(size: 15, weight: .semibold))
             }
             .foregroundStyle(Color.teto)

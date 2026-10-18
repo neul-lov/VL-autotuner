@@ -113,5 +113,5 @@ def prepare(song_id, work):
             work = Path(work)
             work.mkdir(parents=True, exist_ok=True)
             backing = work / "backing_from_stemmixer.wav"
-            sf.write(backing, np.clip(mix, -1, 1), sr, subtype="PCM_16")
+            sf.write(backing, np.clip(mix, -1, 1), sr, subtype="PCM_24")  # 반주 음질은 그대로 (16비트로 줄이지 않게)
     return vocal, (notes if notes.exists() else None), backing, meta.get("title") or song_id
