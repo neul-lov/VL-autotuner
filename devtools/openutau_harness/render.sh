@@ -19,5 +19,14 @@ if [[ ! -f "$work/OpenUtau.dll" || ! -f "$work/.harness" ]]; then
   cp "$work/Harness.dll" "$work/OpenUtau.dll"
   touch "$work/.harness"
 fi
-# 런타임 목록을 바꿔 둔 OpenUtau 실행 파일은 dotnet처럼 dll을 실행한다
-cd "$work" && ./OpenUtau Harness.dll "$ustx" "$out" 40
+# 런타임 목록을 바꿔 둔 OpenUtau 실행 파일은 dotnet처럼 dll을 실행한다.
+# OpenUtau가 가끔 소리 없는 wav를 내보내서, 그러면 렌더 캐시를 비우고 두 번까지 다시 렌더한다 (CI 로그에 남김)
+cd "$work"
+for attempt in 1 2 3; do
+  ./OpenUtau Harness.dll "$ustx" "$out" 40
+  if python3 "$here/check_render.py" "$out"; then exit 0; fi
+  echo "render.sh: 소리 없는 렌더 ($attempt번째), 캐시를 비우고 다시 해요: $ustx" >&2
+  rm -rf "$HOME/Library/Caches/OpenUtau" "${XDG_CACHE_HOME:-$HOME/.cache}/OpenUtau"
+done
+echo "render.sh: 세 번 렌더해도 소리가 없어요: $ustx" >&2
+exit 3
