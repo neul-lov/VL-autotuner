@@ -259,7 +259,7 @@ struct Sidebar: View {
         case .needsPython:
             VStack(spacing: 0) {
                 placeholder(icon: "shippingbox", title: "Python 3이 필요해요",
-                            text: "Apple의 개발자 도구(Command Line Tools)를 설치하면 같이 들어와요. 설치가 끝나면 다시 시도를 눌러 주세요.")
+                            text: "Apple의 개발자 도구(Command Line Tools)를 설치하면 같이 들어와요. 설치가 끝나면 다시 시도를 눌러 주세요. (python.org의 3.9~3.14도 돼요. 3.15는 아직 필요한 프로그램이 없어요)")
                 HStack(spacing: 8) {
                     Button("개발자 도구 설치") { model.installCommandLineTools() }
                     Button("다시 시도") { model.start() }

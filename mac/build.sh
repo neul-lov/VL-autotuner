@@ -18,7 +18,7 @@ cp "$(swift build -c release --show-bin-path)/TetoTune" "$APP/Contents/MacOS/Tet
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 ENGINE="$APP/Contents/Resources/engine"
-cp ../server.py ../requirements.txt "$ENGINE/"
+cp ../server.py ../requirements.txt ../requirements-extra.txt "$ENGINE/"
 cp ../tetotune/*.py "$ENGINE/tetotune/"
 # pyworld wheels built by CI (PyPI has none for Mac), used on first launch so no compiler is needed.
 if ls wheels/*.whl >/dev/null 2>&1; then

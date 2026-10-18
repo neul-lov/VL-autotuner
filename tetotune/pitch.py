@@ -26,7 +26,11 @@ def midi_to_hz(m):
 
 # ---------------------------------------------------------------- RMVPE (있으면)
 def rmvpe_model_path():
-    """OpenUtau 의존성 폴더에 설치된 rmvpe.onnx (OpenUtau → 도구 → 의존성 설치)."""
+    """OpenUtau 의존성 폴더에 설치된 rmvpe.onnx (OpenUtau → 도구 → 의존성 설치). onnxruntime이 없으면 못 쓰니 None."""
+    import importlib.util
+
+    if importlib.util.find_spec("onnxruntime") is None:
+        return None
     homes = [Path.home() / "Library" / "OpenUtau", Path.home() / ".local" / "share" / "OpenUtau"]
     for home in homes:
         for sub in ("rmvpe", "RMVPE"):

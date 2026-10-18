@@ -190,15 +190,20 @@ final class Backend {
     var log: URL { (bundled ? support : folder).appendingPathComponent("server-app.log") }
     var setupLog: URL { support.appendingPathComponent("setup.log") }
     private var requirements: URL { folder.appendingPathComponent("requirements.txt") }
-    /// The requirements.txt the app's packages were installed from (reinstall when an update changes it).
+    /// Packages the engine works without (RMVPE · kanji readings): a failure there only leaves a note in the log.
+    private var extras: URL { folder.appendingPathComponent("requirements-extra.txt") }
+    /// The requirement files the app's packages were installed from (reinstall when an update changes them).
     private var stamp: URL { support.appendingPathComponent("venv/.tetotune-requirements") }
+    private var requirementsStamp: Data {
+        [requirements, extras].compactMap { try? Data(contentsOf: $0) }.reduce(Data(), +)
+    }
 
     var isInstalled: Bool {
         let fm = FileManager.default
         guard fm.isExecutableFile(atPath: python.path),
               fm.fileExists(atPath: folder.appendingPathComponent("server.py").path) else { return false }
         guard bundled else { return true }
-        return (try? Data(contentsOf: stamp)) == (try? Data(contentsOf: requirements))
+        return (try? Data(contentsOf: stamp)) == requirementsStamp
     }
 
     func launch() throws {
@@ -228,18 +233,40 @@ final class Backend {
 
     // MARK: First-run setup (engine inside the app)
 
-    /// Python 3.9+ on this Mac: Homebrew, python.org, or Apple's Command Line Tools.
+    /// Python versions the engine's packages have Mac wheels for, best first. The app carries pyworld wheels for
+    /// 3.9–3.14; a newer Python (Homebrew's python3 is 3.15 now) has no onnxruntime and would have to compile pyworld.
+    static let pythonVersions = ["3.13", "3.12", "3.11", "3.10", "3.14", "3.9"]
+
+    /// The best Python on this Mac: Homebrew, python.org, or Apple's Command Line Tools (3.9).
     /// /usr/bin/python3 is skipped because without the tools it only pops up an install dialog.
-    func findPython() async -> URL? {
-        let candidates = ["/opt/homebrew/bin/python3", "/usr/local/bin/python3",
-                          "/Library/Frameworks/Python.framework/Versions/Current/bin/python3",
-                          "/Library/Developer/CommandLineTools/usr/bin/python3",
-                          "/Applications/Xcode.app/Contents/Developer/usr/bin/python3"]
-        for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
-            let ok = await run(path, ["-c", "import sys, venv; sys.exit(0 if sys.version_info >= (3, 9) else 1)"])
-            if ok == 0 { return URL(fileURLWithPath: path) }
+    func findPython() async -> (url: URL, version: String)? {
+        var candidates: [String] = []
+        for v in Self.pythonVersions {
+            candidates += ["/opt/homebrew/bin/python\(v)", "/usr/local/bin/python\(v)",
+                           "/Library/Frameworks/Python.framework/Versions/\(v)/bin/python\(v)"]
         }
-        return nil
+        candidates += ["/opt/homebrew/bin/python3", "/usr/local/bin/python3",
+                       "/Library/Frameworks/Python.framework/Versions/Current/bin/python3",
+                       "/Library/Developer/CommandLineTools/usr/bin/python3",
+                       "/Applications/Xcode.app/Contents/Developer/usr/bin/python3"]
+        var best: (rank: Int, url: URL, version: String)?
+        var seen = Set<String>()
+        for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
+            guard seen.insert((path as NSString).resolvingSymlinksInPath).inserted,
+                  let v = await pythonVersion(path), let rank = Self.pythonVersions.firstIndex(of: v) else { continue }
+            if best.map({ rank < $0.rank }) ?? true { best = (rank, URL(fileURLWithPath: path), v) }
+            if rank == 0 { break }
+        }
+        return best.map { (url: $0.url, version: $0.version) }
+    }
+
+    /// "3.13" for a Python that also has venv, nil otherwise.
+    private func pythonVersion(_ path: String) async -> String? {
+        let out = Output()
+        let code = await run(path, ["-c", "import sys, venv; print('%d.%d' % sys.version_info[:2])"]) { out.append($0) }
+        // The last line: a warning printed on stderr comes through the same pipe.
+        let v = out.text.split(whereSeparator: \.isNewline).last.map(String.init) ?? ""
+        return code == 0 && !v.isEmpty ? v : nil
     }
 
     /// Makes the Python environment and installs the engine's packages (a few minutes, once).
@@ -247,30 +274,52 @@ final class Backend {
         let fm = FileManager.default
         try fm.createDirectory(at: support, withIntermediateDirectories: true)
         fm.createFile(atPath: setupLog.path, contents: nil)
-        guard let py = await findPython() else { throw BackendError(message: "Python 3이 필요해요", needsPython: true) }
-        if !fm.isExecutableFile(atPath: python.path) {
-            step("Python 환경 만드는 중", py.path)
-            guard await run(py.path, ["-m", "venv", support.appendingPathComponent("venv").path]) == 0 else {
+        // An environment made with a Python the packages don't support (or whose Python was removed) is made again.
+        var current: String?
+        if fm.isExecutableFile(atPath: python.path) { current = await pythonVersion(python.path) }
+        if current.map({ !Self.pythonVersions.contains($0) }) ?? true {
+            guard let py = await findPython() else {
+                throw BackendError(message: "Python 3.9~3.14가 필요해요", needsPython: true)
+            }
+            note("Python \(py.version): \(py.url.path)")
+            step("Python 환경 만드는 중", "Python \(py.version)")
+            // --clear: a venv whose Python was removed (e.g. a Homebrew upgrade) keeps dangling links otherwise
+            guard await run(py.url.path, ["-m", "venv", "--clear", support.appendingPathComponent("venv").path]) == 0 else {
                 throw BackendError(message: "Python 환경을 만들지 못했어요. 설치 기록을 확인해 주세요.")
             }
         }
         step("설치 도구 준비 중", "pip")
         _ = await run(python.path, ["-m", "pip", "install", "--upgrade", "pip", "--disable-pip-version-check"])
         step("필요한 프로그램 받는 중", "처음 한 번만 · 인터넷으로 몇 분 걸려요")
-        var args = ["-m", "pip", "install", "--disable-pip-version-check", "--progress-bar", "off", "-r", requirements.path]
-        // pyworld has no Mac wheels on PyPI; the app ships ones built for each Python version.
-        let wheels = folder.appendingPathComponent("wheels")
-        if fm.fileExists(atPath: wheels.path) { args += ["--find-links", wheels.path] }
-        let code = await run(python.path, args) { line in
+        let progress: @Sendable (String) -> Void = { line in
             let t = line.trimmingCharacters(in: .whitespaces)
             if t.hasPrefix("Collecting") || t.hasPrefix("Downloading") || t.hasPrefix("Building") || t.hasPrefix("Installing") {
                 step("필요한 프로그램 받는 중", t)
             }
         }
-        guard code == 0 else {
+        guard await run(python.path, pipArgs(requirements), line: progress) == 0 else {
             throw BackendError(message: "프로그램을 설치하지 못했어요. 인터넷 연결을 확인하고 다시 시도해 주세요.")
         }
-        try Data(contentsOf: requirements).write(to: stamp)
+        if fm.fileExists(atPath: extras.path), await run(python.path, pipArgs(extras), line: progress) != 0 {
+            note("추가 프로그램(RMVPE · 한자 읽기)은 설치하지 못했어요. 없어도 조교는 돼요.")
+        }
+        try requirementsStamp.write(to: stamp)
+    }
+
+    private func pipArgs(_ file: URL) -> [String] {
+        var args = ["-m", "pip", "install", "--disable-pip-version-check", "--progress-bar", "off", "-r", file.path]
+        // pyworld has no Mac wheels on PyPI; the app ships ones built for each Python version.
+        let wheels = folder.appendingPathComponent("wheels")
+        if FileManager.default.fileExists(atPath: wheels.path) { args += ["--find-links", wheels.path] }
+        return args
+    }
+
+    /// Adds a line of our own to the setup log.
+    private func note(_ text: String) {
+        guard let h = try? FileHandle(forWritingTo: setupLog) else { return }
+        _ = try? h.seekToEnd()
+        try? h.write(contentsOf: Data(("[TetoTune] " + text + "\n").utf8))
+        try? h.close()
     }
 
     /// Runs a program, appending its output to the setup log. `line` gets each output line. Returns the exit code.
@@ -288,22 +337,35 @@ final class Backend {
             p.standardError = pipe
             let logHandle = try? FileHandle(forWritingTo: logURL)
             _ = try? logHandle?.seekToEnd()
+            // Finish once the program has ended AND all its output is read (EOF), so the last lines are never lost.
+            let done = DispatchGroup()
+            done.enter()
+            done.enter()
+            let eof = Output()
             pipe.fileHandleForReading.readabilityHandler = { h in
                 let data = h.availableData
-                guard !data.isEmpty else { return }
+                guard !data.isEmpty else {
+                    h.readabilityHandler = nil
+                    if eof.markOnce() { done.leave() }
+                    return
+                }
                 try? logHandle?.write(contentsOf: data)
                 if let line, let text = String(data: data, encoding: .utf8) {
                     for l in text.split(whereSeparator: \.isNewline) { line(String(l)) }
                 }
             }
-            p.terminationHandler = { p in
-                pipe.fileHandleForReading.readabilityHandler = nil
-                try? logHandle?.close()
-                cont.resume(returning: p.terminationStatus)
-            }
+            p.terminationHandler = { _ in done.leave() }
             do { try p.run() } catch {
                 pipe.fileHandleForReading.readabilityHandler = nil
+                try? logHandle?.close()
+                done.leave()  // a group released with enters left open would crash
+                done.leave()
                 cont.resume(returning: -1)
+                return
+            }
+            done.notify(queue: .global()) {
+                try? logHandle?.close()
+                cont.resume(returning: p.terminationStatus)
             }
         }
     }
@@ -364,6 +426,17 @@ final class Backend {
         let (data, response) = try await URLSession.shared.data(for: req)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw error(from: data, "지우지 못했어요") }
     }
+}
+
+/// Collects a program's output across the threads its lines arrive on.
+private final class Output: @unchecked Sendable {
+    private let lock = NSLock()
+    private var buffer = ""
+    private var marked = false
+    func append(_ line: String) { lock.lock(); buffer += line + "\n"; lock.unlock() }
+    var text: String { lock.lock(); defer { lock.unlock() }; return buffer }
+    /// True the first time only.
+    func markOnce() -> Bool { lock.lock(); defer { lock.unlock() }; if marked { return false }; marked = true; return true }
 }
 
 struct BackendError: LocalizedError {

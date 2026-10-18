@@ -1,0 +1,6 @@
+# 없어도 조교는 돼요. 앱은 이 파일 설치가 실패해도 계속해요.
+# RMVPE 음 높이 읽기 (OpenUtau의 rmvpe.onnx가 있을 때)
+onnxruntime>=1.17
+# 일본어 한자 가사를 히라가나로 읽을 때
+fugashi>=1.3
+unidic-lite>=1.0.8
