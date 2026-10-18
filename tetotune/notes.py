@@ -319,17 +319,25 @@ def _match_lines(groups, lines, most=4):
     best = [[NEG] * (L + 1) for _ in range(G + 1)]
     back = [[None] * (L + 1) for _ in range(G + 1)]
     best[0][0] = 0.0
-    evs = [_evidence(g) for g in groups]
+    size = [len(line) for line in lines]
+    cap = max(sum(size[l:l + most]) for l in range(L))
+    us = [_utilities(_evidence(g), cap) for g in groups]  # 프레이즈마다 음절 0..cap개의 그럴듯함
+
+    def split_value(g0, g1, k):
+        """프레이즈 g0..g1에 음절 k개를 (하나 이상씩) 나눠 넣을 때 가장 좋은 점수 (_distribute와 같은 계산)."""
+        best = us[g0][:k + 1].copy()
+        for g in range(g0 + 1, g1):
+            nxt = np.full(k + 1, -np.inf)
+            for c in range(1, k + 1):
+                np.maximum(nxt[c:], best[:k + 1 - c] + us[g][c], out=nxt[c:])
+            best = nxt
+        return float(best[k])
 
     def score(g0, g1, l0, l1):
-        k = sum(len(line) for line in lines[l0:l1])
-        if g1 - g0 == 1:
-            v = float(_utilities(evs[g0], k)[k])
-        elif k < g1 - g0:
+        k = sum(size[l0:l1])
+        if k < g1 - g0:
             return NEG
-        else:
-            counts = _distribute(groups[g0:g1], k)
-            v = sum(float(_utilities(evs[g], c)[c]) for g, c in zip(range(g0, g1), counts))
+        v = float(us[g0][k]) if g1 - g0 == 1 else split_value(g0, g1, k)
         # 합칠수록 조금씩 덜 그럴듯하다 (보통은 한 줄 = 한 프레이즈)
         return v - 2.0 * ((g1 - g0 - 1) + (l1 - l0 - 1))
 
