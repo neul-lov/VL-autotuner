@@ -9,7 +9,8 @@ struct PreviewView: View {
 
     var body: some View {
         GeometryReader { geo in
-            let width = max(geo.size.width, preview.duration * zoom)
+            // Capped so a long song zoomed in doesn't make one huge drawing layer.
+            let width = max(geo.size.width, min(preview.duration * zoom, 16000))
             ScrollView(.horizontal) {
                 Canvas { context, size in draw(context, size) }
                     .frame(width: width, height: geo.size.height)
