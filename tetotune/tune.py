@@ -135,7 +135,7 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
     progress(0.35, "목소리 특징 읽는 중 (크기 · 숨 · 힘)")
     feats = features.analyze(y, sr, np.where(voiced, pitch.midi_to_hz(np.nan_to_num(midi, nan=60)), 0), voiced)
     # 음높이가 잡힌 숨소리는 노래가 아니다: 무성으로 돌려서 음표가 아니라 숨으로 찾게 한다
-    noise = features.noisy_voiced(voiced, feats)
+    noise = features.noisy_voiced(voiced, feats, db)
     if noise.any():
         voiced = voiced & ~noise
         midi = np.where(voiced, midi, np.nan)

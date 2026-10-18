@@ -77,11 +77,12 @@ def analyze(y, sr, f0_hz, voiced):
     }
 
 
-def noisy_voiced(voiced, feats, min_len=0.05):
-    """유성으로 잡혔지만 실제로는 잡음인 구간 (숨 · ㅅ · ㅎ 같은 바람 소리) → 마스크.
-    합성한 숨 샘플(UTAU 息 · 吸), 크게 들이쉰 숨, WORLD로 다시 만든 자음은 Harvest가 음높이를 찾아 버려서
-    따로 음표가 되고 가사가 한 칸씩 밀린다. 스펙트럼이 평탄하고(배음이 없고) 높은 대역이 대부분이며
-    비주기성이 거의 최대인 구간이 50ms 넘게 이어질 때만 (사람 노래의 숨 섞인 모음은 배음이 남아 있어 걸리지 않는다)."""
+def noisy_voiced(voiced, feats, db=None, min_len=0.12):
+    """유성으로 잡혔지만 실제로는 잡음인 구간 (숨 · 바람 소리) → 마스크.
+    합성한 숨 샘플(UTAU 息 · 吸), 크게 들이쉰 숨은 Harvest가 음높이를 찾아 버려서 따로 음표가 되고
+    가사가 한 칸씩 밀린다. 스펙트럼이 평탄하고(배음이 없고) 높은 대역이 대부분이며 비주기성이 거의 최대인
+    구간이 숨 길이(120ms) 넘게 이어질 때 (사람 노래의 숨 섞인 모음은 배음이 남아 있어 걸리지 않는다).
+    50ms까지 줄이면 테토 렌더의 비음 경계까지 잡혀서 프레이즈가 쪼개지고 가사가 다음 줄로 밀렸다."""
     noisy = voiced & (feats["flatness"] > 0.015) & (feats["high_ratio"] > 0.6)
     for a, b in _runs(~noisy):  # 20ms 이하 틈은 메운다
         if 0 < a and b < len(noisy) and b - a <= 4 and voiced[a:b].all():
@@ -92,6 +93,13 @@ def noisy_voiced(voiced, feats, min_len=0.05):
         ap = ap[np.isfinite(ap)]
         if (b - a) * HOP >= min_len and len(ap) and np.median(ap) > -3:
             out[a:b] = True
+    if db is not None and voiced.any():
+        # 사람이 작게 들이쉰 숨: 높은 대역은 덜하지만 유성 조각 전체가 평탄하고 노래보다 훨씬 작다
+        # (vocadito에서 노래 조각은 평탄도 0.015 이하 · 숨 조각은 0.09 이상, 크기 −20dB 이하)
+        sing = np.median(db[voiced])
+        for a, b in _runs(voiced):
+            if np.median(feats["flatness"][a:b]) > 0.05 and np.percentile(db[a:b], 90) < sing - 12:
+                out[a:b] = True
     return out
 
 
