@@ -11,6 +11,8 @@ from .pitch import HOP, _runs
 
 TICKS = 480
 REST_GAP = 0.15  # 이보다 긴 무성 구간은 쉼표 (숨 · 프레이즈 사이)
+CONSONANT_GAP = 0.22  # 바람 소리(자음)로 찬 틈은 이만큼까지 프레이즈 안 (features.CONSONANT_MAX와 같게)
+LINE_MATCH = True  # 가사 줄 수 ≠ 프레이즈 수일 때 줄 경계를 지키며 짝짓기 (끄면 음절 수만 나눈다)
 
 
 class Note:
@@ -81,8 +83,10 @@ def _cuts(db_s, nov_z, a, b, edge_sec=0.1):
     return sorted(out)
 
 
-def segment(midi, voiced, db, novelty=None, auto_split_db=6.0):
-    """음높이 → 음표 목록. 프레이즈(쉼표로 나뉜 덩어리)마다 음 높이가 머무는 곳을 찾는다 (비터비)."""
+def segment(midi, voiced, db, novelty=None, auto_split_db=6.0, noise=None):
+    """음높이 → 음표 목록. 프레이즈(쉼표로 나뉜 덩어리)마다 음 높이가 머무는 곳을 찾는다 (비터비).
+    noise: 음높이가 잡혔지만 바람 소리라서 무성으로 돌린 곳 (features.noisy_voiced). 그런 틈이나 노래만큼 큰 틈은
+    ㅅ · ㅎ 같은 자음이라 REST_GAP보다 조금 길어도 프레이즈를 끊지 않는다."""
     from scipy.ndimage import uniform_filter1d
 
     offset = tuning_offset(midi, voiced)
@@ -97,8 +101,11 @@ def segment(midi, voiced, db, novelty=None, auto_split_db=6.0):
     gaps = []
     bridged = voiced.copy()
     runs = _runs(voiced)
+    sing = np.median(db[voiced]) if voiced.any() else 0.0
     for (a0, b0), (a1, b1) in zip(runs, runs[1:]):
-        if (a1 - b0) * HOP <= REST_GAP:
+        consonant = (a1 - b0) * HOP <= CONSONANT_GAP and (
+            (noise is not None and noise[b0:a1].mean() >= 0.5) or np.median(db[b0:a1]) > sing - 20)
+        if (a1 - b0) * HOP <= REST_GAP or consonant:
             bridged[b0:a1] = True
             gaps.append((b0, a1))
     filled = midi.copy()
@@ -279,21 +286,75 @@ def _phrases(notes):
 
 
 def align(notes, lines):
-    """가사 줄 수 = 프레이즈 수면 줄마다 그대로. 아니면 음절을 프레이즈에 나누는 방법 중
-    경계가 가장 그럴듯한 것을 고른다 (동적 계획법)."""
+    """가사 줄 수 = 프레이즈 수면 줄마다 그대로. 가사가 한 줄이면 음절을 프레이즈에 나누는 방법 중
+    경계가 가장 그럴듯한 것을 고른다 (동적 계획법). 줄이 여럿인데 프레이즈 수와 다르면 줄 경계를 지키며
+    줄과 프레이즈를 짝짓는다 (_match_lines): 숨 아닌 곳에서 프레이즈가 끊겨도 가사가 다음 줄로 밀리지 않게."""
     syls = [s for line in lines for s in line]
     if not syls:
         return notes
     groups = _phrases(notes)
-    if len(groups) == len(lines):
-        counts = [len(line) for line in lines]
-    else:
-        counts = _distribute(groups, len(syls))
+    if len(groups) == len(lines) or len(lines) == 1 or not LINE_MATCH:
+        counts = [len(line) for line in lines] if len(groups) == len(lines) else _distribute(groups, len(syls))
+        return _fill(groups, counts, syls)
+    out = []
+    for gs, ls in _match_lines(groups, lines):
+        line = [s for l in ls for s in l]
+        out.extend(_fill(gs, [len(line)] if len(gs) == 1 else _distribute(gs, len(line)), line))
+    return out
+
+
+def _fill(groups, counts, syls):
     out, s = [], 0
     for g, k in zip(groups, counts):
         out.extend(_align_group(g, syls[s:s + k]) if k else _mark_rest(g))
         s += k
     return out
+
+
+def _match_lines(groups, lines, most=4):
+    """프레이즈 묶음과 가사 줄 묶음을 순서대로 짝짓는다 → [(프레이즈들, 줄들)]. 한쪽은 늘 하나:
+    (프레이즈 여럿, 줄 하나) 또는 (프레이즈 하나, 줄 여럿). 음절이 경계에 가장 잘 맞는 짝을 고른다 (동적 계획법)."""
+    G, L = len(groups), len(lines)
+    NEG = -1e18
+    best = [[NEG] * (L + 1) for _ in range(G + 1)]
+    back = [[None] * (L + 1) for _ in range(G + 1)]
+    best[0][0] = 0.0
+    evs = [_evidence(g) for g in groups]
+
+    def score(g0, g1, l0, l1):
+        k = sum(len(line) for line in lines[l0:l1])
+        if g1 - g0 == 1:
+            v = float(_utilities(evs[g0], k)[k])
+        elif k < g1 - g0:
+            return NEG
+        else:
+            counts = _distribute(groups[g0:g1], k)
+            v = sum(float(_utilities(evs[g], c)[c]) for g, c in zip(range(g0, g1), counts))
+        # 합칠수록 조금씩 덜 그럴듯하다 (보통은 한 줄 = 한 프레이즈)
+        return v - 2.0 * ((g1 - g0 - 1) + (l1 - l0 - 1))
+
+    for g in range(G + 1):
+        for l in range(L + 1):
+            if best[g][l] == NEG:
+                continue
+            moves = [(g + m, l + 1) for m in range(1, most + 1)] + [(g + 1, l + m) for m in range(2, most + 1)]
+            for g2, l2 in moves:
+                if g2 > G or l2 > L:
+                    continue
+                v = score(g, g2, l, l2)
+                if v > NEG / 2 and best[g][l] + v > best[g2][l2]:
+                    best[g2][l2] = best[g][l] + v
+                    back[g2][l2] = (g, l)
+    if back[G][L] is None:  # 너무 어긋나면 모두 한 덩어리로 (음절 수만 나눈다)
+        return [(groups, lines)]
+    pairs, g, l = [], G, L
+    while (g, l) != (0, 0):
+        g0, l0 = back[g][l]
+        pairs.append((groups[g0:g], lines[l0:l]))
+        g, l = g0, l0
+    return pairs[::-1]
+
+
 
 
 def _mark_rest(g):
