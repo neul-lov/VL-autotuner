@@ -56,6 +56,12 @@ jobs:
       - run: swift --version
       - name: 앱 빌드
         run: cd mac && ./build.sh
+      - name: Apple Silicon · 인텔 Mac 둘 다 되는지
+        run: |
+          archs=$(lipo -archs mac/build/TetoTune.app/Contents/MacOS/TetoTune)
+          echo "$archs"; [[ "$archs" == *arm64* && "$archs" == *x86_64* ]]
+          cat mac/build/TetoTune.app/Contents/Resources/engine/wheels/constraints.txt
+          plutil -lint mac/build/TetoTune.app/Contents/Info.plist
       - name: 압축
         run: ditto -c -k --keepParent mac/build/TetoTune.app TetoTune-mac.zip
       - uses: actions/upload-artifact@v4
@@ -82,8 +88,22 @@ jobs:
         run: |
           sup="$HOME/Library/Application Support/TetoTune"
           for i in $(seq 1 180); do
-            if curl -sf http://127.0.0.1:8766/api/status > status.json; then
-              cat status.json; echo; grep -h "^\[TetoTune\]" "$sup/setup.log" || true; exit 0
+            # 앱이 엔진을 켤 때마다 고른 포트와 비밀값 (이 사용자만 읽을 수 있는 파일)
+            if [ -f "$sup/server.json" ]; then
+              port=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["port"])' "$sup/server.json")
+              token=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["token"])' "$sup/server.json")
+              if curl -sf -H "X-TetoTune-Token: $token" "http://127.0.0.1:$port/api/status" > status.json; then
+                cat status.json; echo; grep -h "^\[TetoTune\]" "$sup/setup.log" || true
+                ls -l "$sup/server.json"
+                echo "port=$port" >> "$GITHUB_ENV"; echo "token=$token" >> "$GITHUB_ENV"
+                # 비밀값 없는 요청은 막혀야 한다
+                code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/api/results")
+                echo "비밀값 없이: $code"; [ "$code" = "403" ] || exit 1
+                # 앱에 넣은 pyworld 휠을 썼는지 (컴파일했다면 컴파일러 없는 Mac에서는 설치가 실패한다)
+                if grep -q "Building wheel for pyworld" "$sup/setup.log"; then echo "앱에 넣은 pyworld 휠을 안 썼어요"; exit 1; fi
+                grep -E "Processing .*pyworld-|pyworld.*\.whl" "$sup/setup.log" | head -n 2 || true
+                exit 0
+              fi
             fi
             if (( i % 12 == 0 )); then
               echo "--- $((i * 5))초: $(pgrep -lf 'TetoTune|server.py|pip' | tr '\n' ' ')"
@@ -100,15 +120,24 @@ jobs:
       - name: 앱으로 조교 한 번
         run: |
           vocal="$PWD/devtools/testdata/vocadito_14.flac"
-          job=$(curl -sf -X POST http://127.0.0.1:8766/api/tune --data-urlencode "vocal=$vocal" \
+          job=$(curl -sf -H "X-TetoTune-Token: $token" -X POST "http://127.0.0.1:$port/api/tune" --data-urlencode "vocal=$vocal" \
                 --data-urlencode "lyrics=" --data-urlencode 'options={}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["job_id"])')
           for i in $(seq 1 120); do
-            s=$(curl -sf http://127.0.0.1:8766/api/jobs/$job)
+            s=$(curl -sf -H "X-TetoTune-Token: $token" "http://127.0.0.1:$port/api/jobs/$job")
             st=$(echo "$s" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')
             if [ "$st" != "running" ]; then echo "$s"; [ "$st" = "done" ] && exit 0 || exit 1; fi
             sleep 2
           done
           exit 1
+      - name: 앱이 갑자기 꺼지면 엔진도 꺼지는지
+        run: |
+          pgrep -lf "server.py" || { echo "엔진이 없어요"; exit 1; }
+          pkill -9 -x TetoTune
+          for i in $(seq 1 10); do
+            pgrep -f "server.py" > /dev/null || { echo "엔진도 꺼졌어요 (${i}초)"; exit 0; }
+            sleep 1
+          done
+          echo "앱이 꺼졌는데 엔진이 남아 있어요"; pgrep -lf server.py; exit 1
       - name: 기록 모으기
         if: always()
         run: |
@@ -181,6 +210,7 @@ jobs:
             grep -m1 phoneme_errors "$d/harness_tuned.txt"
             echo "== 시드 $seed: $(cat "$d/lyrics.txt" | tr '\n' ' ')"
             python devtools/eval_reference.py "$d/truth.json" "$d/tuned" | tee "$d/eval.txt"
+            python -c 'import json,sys; [print("경고:", w) for w in json.load(open(sys.argv[1]))["warnings"]]' "$d/tuned/report.json"
             python devtools/breath_report.py "$d/truth.json" "$d/ref_ref.wav" "$d/tuned" 2>/dev/null | tee "$d/breath_report.txt"
             python devtools/compare_render.py "$d/tuned" "$(ls "$d"/tuned/render_*.wav | head -1)" | tee "$d/compare.json"
           done

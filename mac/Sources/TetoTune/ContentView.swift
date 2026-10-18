@@ -231,7 +231,7 @@ struct Sidebar: View {
                 placeholder(icon: "exclamationmark.triangle", title: "엔진을 시작하지 못했어요", text: message)
                 HStack(spacing: 8) {
                     Button("다시 시도") { model.start() }
-                    Button("기록 보기") { NSWorkspace.shared.open(model.backend.bundled ? model.backend.setupLog : model.backend.log) }
+                    Button("기록 보기") { NSWorkspace.shared.open(model.failedLog ?? model.backend.log) }
                 }
                 .font(.system(size: 12, weight: .semibold))
                 .padding(.bottom, 40)
@@ -328,6 +328,7 @@ private struct ResultRow: View {
     let current: Bool
     @ObservedObject var model: AppModel
     @State private var hovering = false
+    @State private var confirmDelete = false
 
     var body: some View {
         HStack(spacing: 10) {
@@ -350,7 +351,7 @@ private struct ResultRow: View {
             if hovering {
                 RowAction(icon: "arrow.up.forward.app", help: "OpenUtau에서 열기") { model.openInOpenUtau(item) }
                 RowAction(icon: "folder", help: "Finder에서 보기") { model.reveal(item) }
-                RowAction(icon: "trash", help: "지우기", tint: .red) { model.delete(item) }
+                RowAction(icon: "trash", help: "휴지통으로", tint: .red) { confirmDelete = true }
             }
         }
         .padding(.horizontal, 8)
@@ -364,7 +365,12 @@ private struct ResultRow: View {
             Button("OpenUtau에서 열기") { model.openInOpenUtau(item) }
             Button("Finder에서 보기") { model.reveal(item) }
             Divider()
-            Button("지우기", role: .destructive) { model.delete(item) }
+            Button("휴지통으로 옮기기…", role: .destructive) { confirmDelete = true }
+        }
+        .confirmationDialog("‘\(item.title)’ 결과를 휴지통으로 옮길까요?", isPresented: $confirmDelete) {
+            Button("휴지통으로 옮기기", role: .destructive) { model.delete(item) }
+        } message: {
+            Text("OpenUtau에서 고친 project.ustx도 같이 옮겨져요. 휴지통에서 되살릴 수 있어요.")
         }
     }
 

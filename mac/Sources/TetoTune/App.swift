@@ -26,7 +26,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.start()
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    /// While a song is being tuned, closing the window keeps the app (and the job) running.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { model.job == nil }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard model.job != nil else { return .terminateNow }
+        let alert = NSAlert()
+        alert.messageText = "조교하는 중이에요"
+        alert.informativeText = "지금 끄면 이 곡의 조교가 멈추고 결과가 남지 않아요."
+        alert.addButton(withTitle: "계속 조교하기")
+        alert.addButton(withTitle: "끄기")
+        return alert.runModal() == .alertSecondButtonReturn ? .terminateNow : .terminateCancel
+    }
 
     func applicationWillTerminate(_ notification: Notification) {
         model.shutdown()

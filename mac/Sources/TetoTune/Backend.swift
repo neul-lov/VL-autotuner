@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 /// Settings sent with each tuning job (same names as `Options` in tetotune/tune.py).
 struct TuneOptions: Codable, Equatable {
@@ -157,7 +158,6 @@ struct Preview: Decodable, Equatable {
 /// `TetoTuneBackend` key), or the copy inside the app (`Resources/engine`), whose Python packages are
 /// installed once into ~/Library/Application Support/TetoTune.
 final class Backend {
-    static let port = 8766
     /// OpenUtau's bundle id (from its OpenUtau.csproj).
     static let openUtauID = "com.stakira.openutau"
     let folder: URL
@@ -165,7 +165,15 @@ final class Backend {
     let bundled: Bool
     let support: URL
     private var process: Process?
-    private let base = URL(string: "http://127.0.0.1:\(Backend.port)")!
+    /// Each launch gets a free port and a new secret, so this app only ever talks to the engine it started
+    /// (not another Mac user's, nor one left over from an older version), and nothing else can use it.
+    private(set) var port = 0
+    private let token = Backend.makeToken()
+    private var base: URL { URL(string: "http://127.0.0.1:\(port)")! }
+    /// Where the running engine's port and secret are written (only this Mac user can read it), for tools and tests.
+    var serverInfo: URL { support.appendingPathComponent("server.json") }
+    /// Called (on some thread) when the engine stops by itself.
+    var onExit: (@Sendable (Int32) -> Void)?
 
     init() {
         let fm = FileManager.default
@@ -207,9 +215,14 @@ final class Backend {
     }
 
     func launch() throws {
-        try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
-        FileManager.default.createFile(atPath: log.path, contents: nil)
+        stop()
+        let fm = FileManager.default
+        try fm.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fm.createDirectory(at: support, withIntermediateDirectories: true)
+        fm.createFile(atPath: log.path, contents: nil)
         let handle = try FileHandle(forWritingTo: log)
+        guard let free = Self.freePort() else { throw BackendError(message: "엔진에 쓸 빈 포트를 찾지 못했어요") }
+        port = free
         let p = Process()
         p.executableURL = python
         p.arguments = ["server.py"]
@@ -218,17 +231,64 @@ final class Backend {
         p.standardError = handle
         var env = ProcessInfo.processInfo.environment
         env["PYTHONUNBUFFERED"] = "1"
-        env["TETOTUNE_PORT"] = "\(Backend.port)"
+        env["TETOTUNE_PORT"] = "\(port)"
+        // In the environment, not the arguments: `ps` shows arguments to every user of the Mac.
+        env["TETOTUNE_TOKEN"] = token
+        // The engine quits by itself if the app is force-quit or crashes.
+        env["TETOTUNE_PARENT_PID"] = "\(ProcessInfo.processInfo.processIdentifier)"
         // Never write .pyc files into the app bundle (that would break its signature).
         if bundled { env["PYTHONPYCACHEPREFIX"] = support.appendingPathComponent("pycache").path }
         p.environment = env
+        let notify = onExit
+        p.terminationHandler = { proc in
+            try? handle.close()
+            notify?(proc.terminationStatus)
+        }
         try p.run()
         process = p
+        let info = ["port": port, "pid": Int(p.processIdentifier), "token": token] as [String: Any]
+        if let data = try? JSONSerialization.data(withJSONObject: info) {
+            fm.createFile(atPath: serverInfo.path, contents: data, attributes: [.posixPermissions: 0o600])
+        }
     }
 
     func stop() {
-        process?.terminate()
+        guard let p = process else { return }
+        p.terminationHandler = nil  // stopping on purpose is not a crash
+        p.terminate()
         process = nil
+        try? FileManager.default.removeItem(at: serverInfo)
+    }
+
+    /// The last lines of the engine's log (shown when it fails to start).
+    func logTail(_ lines: Int = 6) -> String {
+        guard let text = try? String(contentsOf: log, encoding: .utf8) else { return "" }
+        return text.split(whereSeparator: \.isNewline).suffix(lines).joined(separator: "\n")
+    }
+
+    private static func makeToken() -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        if SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) != errSecSuccess {
+            bytes = Array((UUID().uuidString + UUID().uuidString).utf8)
+        }
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// A port nobody is listening on right now (the system picks it).
+    private static func freePort() -> Int? {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        addr.sin_port = 0
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let ok = withUnsafeMutablePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, len) == 0 && getsockname(fd, $0, &len) == 0 }
+        }
+        return ok ? Int(UInt16(bigEndian: addr.sin_port)) : nil
     }
 
     // MARK: First-run setup (engine inside the app)
@@ -307,10 +367,16 @@ final class Backend {
     }
 
     private func pipArgs(_ file: URL) -> [String] {
-        var args = ["-m", "pip", "install", "--disable-pip-version-check", "--progress-bar", "off", "-r", file.path]
-        // pyworld has no Mac wheels on PyPI; the app ships ones built for each Python version.
+        // --prefer-binary: a newer source-only release on PyPI must not win over a ready-made wheel
+        // (building it needs a compiler, which a Mac with only python.org Python doesn't have).
+        var args = ["-m", "pip", "install", "--disable-pip-version-check", "--progress-bar", "off", "--prefer-binary",
+                    "-r", file.path]
+        // pyworld has no Mac wheels on PyPI; the app ships ones built for each Python version,
+        // and constraints.txt pins pyworld to exactly that version.
         let wheels = folder.appendingPathComponent("wheels")
         if FileManager.default.fileExists(atPath: wheels.path) { args += ["--find-links", wheels.path] }
+        let pins = wheels.appendingPathComponent("constraints.txt")
+        if FileManager.default.fileExists(atPath: pins.path) { args += ["-c", pins.path] }
         return args
     }
 
@@ -372,8 +438,20 @@ final class Backend {
 
     // MARK: Requests
 
-    private func get<T: Decodable>(_ path: String, as type: T.Type) async throws -> T {
-        let (data, response) = try await URLSession.shared.data(from: base.appendingPathComponent(path))
+    private func request(_ path: String, query: [URLQueryItem] = []) -> URLRequest {
+        var url = base.appendingPathComponent(path)
+        if !query.isEmpty, var c = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            c.queryItems = query
+            url = c.url ?? url
+        }
+        var req = URLRequest(url: url)
+        req.setValue(token, forHTTPHeaderField: "X-TetoTune-Token")
+        return req
+    }
+
+    private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = [], as type: T.Type) async throws -> T {
+        guard port != 0 else { throw URLError(.cannotConnectToHost) }
+        let (data, response) = try await URLSession.shared.data(for: request(path, query: query))
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw error(from: data, "불러오지 못했어요") }
         return try JSONDecoder().decode(T.self, from: data)
     }
@@ -381,7 +459,7 @@ final class Backend {
     private func post(_ path: String, _ items: [URLQueryItem]) async throws -> Data {
         var form = URLComponents()
         form.queryItems = items
-        var req = URLRequest(url: base.appendingPathComponent(path))
+        var req = request(path)
         req.httpMethod = "POST"
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         req.httpBody = form.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B").data(using: .utf8)
@@ -395,7 +473,11 @@ final class Backend {
         return BackendError(message: json?["detail"] as? String ?? fallback)
     }
 
-    func status() async throws -> ServerStatus { try await get("api/status", as: ServerStatus.self) }
+    /// `singer`: the voicebank folder chosen in the app ("" = find Teto).
+    func status(singer: String = "") async throws -> ServerStatus {
+        try await get("api/status", query: singer.isEmpty ? [] : [URLQueryItem(name: "singer", value: singer)],
+                      as: ServerStatus.self)
+    }
     func stemSongs() async throws -> [StemSong] { try await get("api/stemmixer/songs", as: [StemSong].self) }
     func results() async throws -> [ResultItem] { try await get("api/results", as: [ResultItem].self) }
     func job(_ id: String) async throws -> TuneJob { try await get("api/jobs/\(id)", as: TuneJob.self) }
@@ -420,12 +502,6 @@ final class Backend {
         return id
     }
 
-    func deleteResult(_ id: String) async throws {
-        var req = URLRequest(url: base.appendingPathComponent("api/results/\(id)"))
-        req.httpMethod = "DELETE"
-        let (data, response) = try await URLSession.shared.data(for: req)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw error(from: data, "지우지 못했어요") }
-    }
 }
 
 /// Collects a program's output across the threads its lines arrive on.

@@ -63,12 +63,22 @@ final class AppModel: ObservableObject {
     let backend = Backend()
 
     @Published var server: ServerState = .starting
+    /// The log that explains the current failure (install log or engine log).
+    @Published var failedLog: URL?
     @Published var status: ServerStatus?
     @Published var stemSongs: [StemSong] = []
     @Published var results: [ResultItem] = []
 
     @Published var source: VocalSource? {
-        didSet { if source != oldValue { lyrics = AppModel.savedLyrics()[source?.key ?? ""] ?? "" } }
+        didSet {
+            guard source != oldValue else { return }
+            let saved = AppModel.savedLyrics()[source?.key ?? ""]
+            if oldValue == nil, saved == nil, !lyrics.isEmpty {
+                saveLyrics()  // typed before a vocal was chosen: they belong to this one
+            } else {
+                lyrics = saved ?? ""
+            }
+        }
     }
     /// Lyrics are kept per vocal, so another song's lyrics never end up on this one.
     @Published var lyrics = "" {
@@ -77,7 +87,12 @@ final class AppModel: ObservableObject {
     @Published var notesFile: URL?
     @Published var backingFile: URL?
     @Published var options: TuneOptions = AppModel.loadOptions() {
-        didSet { saveOptions() }
+        didSet {
+            saveOptions()
+            if options.singer != oldValue.singer, server == .ready {
+                Task { if let s = try? await backend.status(singer: options.singer) { status = s } }
+            }
+        }
     }
 
     @Published var job: Job?
@@ -95,6 +110,8 @@ final class AppModel: ObservableObject {
     // MARK: Server
 
     private var observing = false
+    private var bootTask: Task<Void, Never>?
+    private var stopping = false
 
     func start() {
         if !observing {
@@ -109,37 +126,47 @@ final class AppModel: ObservableObject {
             }
         }
         server = .starting
-        Task { await boot() }
+        failedLog = nil
+        bootTask?.cancel()
+        bootTask = Task { await boot() }
     }
 
+    private func fail(_ message: String, log: URL) {
+        failedLog = log
+        server = .failed(message)
+    }
+
+    /// Always starts the app's own engine (a new port and secret each time); see Backend.
     private func boot() async {
-        // A server left over from an earlier run can be reused as is.
-        if (try? await backend.status()) == nil {
-            if !backend.isInstalled {
-                guard backend.bundled else {
-                    server = .missing
-                    return
-                }
-                do {
-                    try await backend.install { step, detail in
-                        Task { @MainActor in self.server = .installing(step: step, detail: detail) }
-                    }
-                } catch let error as BackendError where error.needsPython {
-                    server = .needsPython
-                    return
-                } catch {
-                    server = .failed(error.localizedDescription)
-                    return
-                }
-                server = .starting
-            }
-            do { try backend.launch() } catch {
-                server = .failed(error.localizedDescription)
+        if !backend.isInstalled {
+            guard backend.bundled else {
+                server = .missing
                 return
             }
+            do {
+                try await backend.install { step, detail in
+                    Task { @MainActor in self.server = .installing(step: step, detail: detail) }
+                }
+            } catch let error as BackendError where error.needsPython {
+                server = .needsPython
+                return
+            } catch {
+                fail(error.localizedDescription, log: backend.setupLog)
+                return
+            }
+            guard !Task.isCancelled else { return }
+            server = .starting
+        }
+        backend.onExit = { [weak self] code in
+            Task { @MainActor in self?.engineExited(code) }
+        }
+        do { try backend.launch() } catch {
+            fail(error.localizedDescription, log: backend.log)
+            return
         }
         for _ in 0..<240 {
-            if let s = try? await backend.status() {
+            guard !Task.isCancelled, server == .starting else { return }  // stopped, or the engine already quit
+            if let s = try? await backend.status(singer: options.singer) {
                 status = s
                 server = .ready
                 await refresh()
@@ -147,7 +174,15 @@ final class AppModel: ObservableObject {
             }
             try? await Task.sleep(for: .milliseconds(500))
         }
-        server = .failed("엔진이 응답하지 않아요. 로그를 확인해 주세요.")
+        guard !Task.isCancelled, server == .starting else { return }
+        fail("엔진이 응답하지 않아요. 로그를 확인해 주세요.", log: backend.log)
+    }
+
+    /// The engine quit by itself (it failed to start, crashed, or was stopped from outside).
+    private func engineExited(_ code: Int32) {
+        guard !stopping, server == .starting || server == .ready else { return }
+        let tail = backend.logTail(3)
+        fail("엔진이 멈췄어요 (종료 코드 \(code)). 다시 시도해 주세요." + (tail.isEmpty ? "" : "\n\n" + tail), log: backend.log)
     }
 
     /// Apple's installer for the Command Line Tools (brings python3).
@@ -159,11 +194,13 @@ final class AppModel: ObservableObject {
     }
 
     func shutdown() {
+        stopping = true
+        bootTask?.cancel()
         backend.stop()
     }
 
     func refresh() async {
-        if let s = try? await backend.status() { status = s }
+        if let s = try? await backend.status(singer: options.singer) { status = s }
         if let list = try? await backend.stemSongs() { stemSongs = list }
         if let list = try? await backend.results() {
             results = list
@@ -178,7 +215,8 @@ final class AppModel: ObservableObject {
     static let noteTypes: [UTType] = ["ustx", "ust", "mid", "midi", "json"].compactMap { UTType(filenameExtension: $0) }
 
     static func isNoteFile(_ url: URL) -> Bool {
-        ["ustx", "ust", "mid", "midi"].contains(url.pathExtension.lowercased())
+        // json = StemMixer's notes file (midi/vocals.json), the same types the note picker takes
+        ["ustx", "ust", "mid", "midi", "json"].contains(url.pathExtension.lowercased())
     }
 
     private func pick(_ types: [UTType], message: String) -> URL? {
@@ -207,6 +245,13 @@ final class AppModel: ObservableObject {
             if Self.isNoteFile(url) {
                 notesFile = url
             } else {
+                // Another song: the previous song's notes and backing don't belong to it
+                // (kept when no vocal was chosen yet, so dropping the notes first still works).
+                if let old = source, old != .file(url), notesFile != nil || backingFile != nil {
+                    notesFile = nil
+                    backingFile = nil
+                    show("새 보컬이라 음표 · 반주 파일은 비웠어요", success: false)
+                }
                 source = .file(url)
             }
             jobError = nil
@@ -350,23 +395,31 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: item.ustx)])
     }
 
+    /// Moves a result folder to the Trash (it can hold the user's OpenUtau edits, so it can be put back).
     func delete(_ item: ResultItem) {
-        Task {
-            do {
-                try await backend.deleteResult(item.id)
-                withAnimation(.easeOut(duration: 0.2)) {
-                    results.removeAll { $0.id == item.id }
-                    if selected?.id == item.id {
-                        selected = nil
-                        preview = nil
-                    }
-                }
-                if selected == nil, let first = results.first { select(first) }
-                show("지웠어요")
-            } catch {
-                show(error.localizedDescription, success: false)
+        let folder = URL(fileURLWithPath: item.folder).resolvingSymlinksInPath()
+        // Only folders right inside the output folder (the list comes from the engine).
+        guard let output = status.map({ URL(fileURLWithPath: $0.output).resolvingSymlinksInPath() }),
+              folder.deletingLastPathComponent().path == output.path,
+              FileManager.default.fileExists(atPath: folder.appendingPathComponent("report.json").path) else {
+            show("지우지 못했어요", success: false)
+            return
+        }
+        do {
+            try FileManager.default.trashItem(at: folder, resultingItemURL: nil)
+        } catch {
+            show("휴지통으로 옮기지 못했어요", success: false)
+            return
+        }
+        withAnimation(.easeOut(duration: 0.2)) {
+            results.removeAll { $0.id == item.id }
+            if selected?.id == item.id {
+                selected = nil
+                preview = nil
             }
         }
+        if selected == nil, let first = results.first { select(first) }
+        show("휴지통으로 옮겼어요")
     }
 
     func openOutputFolder() {

@@ -77,12 +77,12 @@ def analyze(y, sr, f0_hz, voiced):
     }
 
 
-def noisy_voiced(voiced, feats, db=None, min_len=0.12):
-    """유성으로 잡혔지만 실제로는 잡음인 구간 (숨 · 바람 소리) → 마스크.
-    합성한 숨 샘플(UTAU 息 · 吸), 크게 들이쉰 숨은 Harvest가 음높이를 찾아 버려서 따로 음표가 되고
-    가사가 한 칸씩 밀린다. 스펙트럼이 평탄하고(배음이 없고) 높은 대역이 대부분이며 비주기성이 거의 최대인
-    구간이 숨 길이(120ms) 넘게 이어질 때 (사람 노래의 숨 섞인 모음은 배음이 남아 있어 걸리지 않는다).
-    50ms까지 줄이면 테토 렌더의 비음 경계까지 잡혀서 프레이즈가 쪼개지고 가사가 다음 줄로 밀렸다."""
+def noisy_voiced(voiced, feats, db=None, min_len=0.05):
+    """유성으로 잡혔지만 실제로는 잡음인 구간 (숨 · ㅅ · ㅎ 같은 바람 소리) → 마스크.
+    합성한 숨 샘플(UTAU 息 · 吸), 크게 들이쉰 숨, WORLD로 다시 만든 자음은 Harvest가 음높이를 찾아 버려서
+    따로 음표가 되고 가사가 한 칸씩 밀린다. 스펙트럼이 평탄하고(배음이 없고) 높은 대역이 대부분이며
+    비주기성이 거의 최대인 구간이 50ms 넘게 이어질 때 (사람 노래의 숨 섞인 모음은 배음이 남아 있어 걸리지 않는다).
+    자음은 이렇게 무성이 되므로, 노래 사이에 끼인 짧은 무성 구간은 숨이나 쉼표로 보지 않는다 (consonant_gaps)."""
     noisy = voiced & (feats["flatness"] > 0.015) & (feats["high_ratio"] > 0.6)
     for a, b in _runs(~noisy):  # 20ms 이하 틈은 메운다
         if 0 < a and b < len(noisy) and b - a <= 4 and voiced[a:b].all():
@@ -103,6 +103,19 @@ def noisy_voiced(voiced, feats, db=None, min_len=0.12):
     return out
 
 
+CONSONANT_MAX = 0.22  # 두 소리 사이에 끼인 무성 구간이 이보다 짧으면 자음 (ㅅ · ㅎ · ㅊ). 숨은 대개 더 길거나 앞에 쉼이 있다
+
+
+def consonant_gaps(voiced, max_len=CONSONANT_MAX):
+    """앞뒤 모두 소리(유성)에 바로 붙은 짧은 무성 구간 → 마스크 (자음이지 숨 · 쉼표가 아니다)."""
+    out = np.zeros_like(voiced)
+    n = len(voiced)
+    for a, b in _runs(~voiced):
+        if 0 < a and b < n and (b - a) * HOP <= max_len:
+            out[a:b] = True
+    return out
+
+
 def find_breaths(db, voiced, feats, min_len=0.12, max_len=1.4):
     """노래하지 않는 곳에서 숨소리를 찾는다 → [(시작초, 끝초, 크기dB, 들숨인지)].
     숨은 잡음처럼 넓게 퍼진 소리라서: 바닥 잡음보다 충분히 크고, 높은 대역 비율 · 평탄도가 높다.
@@ -114,6 +127,7 @@ def find_breaths(db, voiced, feats, min_len=0.12, max_len=1.4):
     sing = np.median(db[voiced])
     # 크기 위쪽은 노래만큼까지: 마이크 가까이에서 들이쉰 숨이나 합성한 숨은 노래와 크기가 비슷하다
     cand = (~voiced) & (db > floor + 6) & (db < sing + 1) & (feats["high_ratio"] > 0.25) & (feats["flatness"] > 0.02)
+    cand &= ~consonant_gaps(voiced)
     # 30ms 이하 틈은 메운다
     for a, b in _runs(~cand):
         if 0 < a and b < n and b - a <= 6:
