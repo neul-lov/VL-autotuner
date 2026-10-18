@@ -215,6 +215,17 @@ jobs:
             python devtools/breath_report.py "$d/truth.json" "$d/ref_ref.wav" "$d/tuned" 2>/dev/null | tee "$d/breath_report.txt"
             python devtools/compare_render.py "$d/tuned" "$(ls "$d"/tuned/render_*.wav | head -1)" | tee "$d/compare.json"
           done
+      - name: 테토 정답 노래 여러 곡으로 설정 비교 (렌더는 정답 노래만)
+        run: |
+          export CSC=$(ls -d "$DOTNET_ROOT"/sdk/*/Roslyn/bincore/csc.dll | tail -1)
+          ou="$PWD/OpenUtau.app/Contents/MacOS"
+          for seed in 1 2 5 11 13 21; do
+            d="$PWD/out/ref$seed"; mkdir -p "$d"
+            python devtools/make_reference_song.py "$d/ref.ustx" "$d/truth.json" $seed --teto --lyrics "$d/lyrics.txt" > /dev/null
+            devtools/openutau_harness/render.sh "$ou" "$PWD/ourun" "$d/ref.ustx" "$d/ref.wav" > "$d/harness_ref.txt"
+          done
+          python -W ignore devtools/sweep_reference.py out/ref* | tee out/sweep.txt
+          cat out/sweep.txt >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
