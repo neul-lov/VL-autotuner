@@ -13,8 +13,9 @@ TICKS = 480
 REST_GAP = 0.15  # 이보다 긴 무성 구간은 쉼표 (숨 · 프레이즈 사이)
 CONSONANT_GAP = 0.22  # 바람 소리(자음)로 찬 틈은 이만큼까지 프레이즈 안 (features.CONSONANT_MAX와 같게)
 LINE_MATCH = True  # 가사 줄 수 ≠ 프레이즈 수일 때 줄 경계를 지키며 짝짓기 (끄면 음절 수만 나눈다)
-ONSET_MAX = 0.15  # 이보다 짧고 자음 같은 음표가 다음 음표 바로 앞에 붙어 있으면 자음 조각 (_merge_onsets, 0이면 끔)
-ONSET_ANY = False  # True면 자음 같은지 보지 않고 짧으면 모두 (빠른 노래의 짧은 음절까지 합쳐져서 기본은 끔)
+ONSET_MAX = 0.15  # 이보다 짧은 음표가 다음 음표 바로 앞에 붙어 있으면 앞 음표에 붙인다 (_merge_onsets, 0이면 끔)
+ONSET_ANY = True  # False면 자음 같은(무성 · 높은 대역) 짧은 음표만
+SYL_GAP = 0.12  # 음절 시작 후보 두 곳이 이보다 가까우면 약한 쪽은 마지막에 고른다 (_evidence, 0이면 끔)
 
 
 class Note:
@@ -222,9 +223,11 @@ def _merge_short(notes, min_len=0.09):
 
 
 def _merge_onsets(notes, consonant=lambda x: True, max_len=None):
-    """프레이즈 하나에서, 다음 음표 바로 앞에 붙은 짧고 자음 같은 음표는 자음 조각으로 본다.
-    자음 틈(무성)이나 테토(WORLDLINE-R)가 음높이를 실어 부른 ㅅ · ㅎ이 모음 앞 100ms쯤 따로 음표가 되는데,
-    UTAU에서는 자음이 음표 시작보다 먼저(선행발성) 나오고 음표는 모음에서 시작하니까 그 조각은 앞 음표 끝에 붙인다.
+    """프레이즈 하나에서, 다음 음표 바로 앞에 붙은 짧은 음표는 앞 음표에 붙인다.
+    자음 틈(무성)이나 테토(WORLDLINE-R)가 음높이를 실어 부른 ㅅ · ㅁ이 모음 앞 100ms쯤 따로 음표가 되는데,
+    UTAU에서는 자음이 음표 시작보다 먼저(선행발성) 나오고 음표는 모음에서 시작하니까 그 조각은 앞 음표 끝 몫이다.
+    사람 노래의 빠른 음표일 수도 있어서, 그 경계는 앞 음표 안 후보(dips)로 조금 약하게 남겨 둔다
+    (음절이 모자라면 가사 맞추기가 거기서 나눈다). 음 높이 선(PITD)은 그대로라 소리 높낮이는 바뀌지 않는다.
     프레이즈 첫 음이면 버리고 다음 음표가 프레이즈를 시작한다."""
     max_len = ONSET_MAX if max_len is None else max_len
     notes = list(notes)
@@ -239,7 +242,7 @@ def _merge_onsets(notes, consonant=lambda x: True, max_len=None):
             nxt.strength = max(nxt.strength, x.strength)
         else:
             notes[i - 1].end = x.end
-            notes[i - 1].dips += x.dips
+            notes[i - 1].dips += [(x.start, max(0.0, x.strength - 2.0))] + x.dips
         notes.pop(i)
     return notes
 
@@ -258,10 +261,22 @@ NEUTRAL = 2.5  # 이보다 약한 경계는 새 음절보다 "이어 부르기"�
 
 
 def _evidence(notes):
-    """한 프레이즈 안에서 새 음절이 시작될 수 있는 곳들 (센 순서): 음표 경계 + 음표 안 후보."""
+    """한 프레이즈 안에서 새 음절이 시작될 수 있는 곳들 (센 순서): 음표 경계 + 음표 안 후보.
+    이미 고른 센 후보와 SYL_GAP보다 가까운 후보는 NEUTRAL 아래로 낮춘다: 자음 시작(크기 꺼짐)과 모음 시작이
+    100ms 사이로 둘 다 후보가 되면 하나만 음절로 (음절이 모자랄 때만 나머지도)."""
     ev = [(n.strength, "b", i, n.start) for i, n in enumerate(notes) if i > 0]
     ev += [(d, "c", i, t) for i, n in enumerate(notes) for t, d in n.dips]
-    return sorted(ev, key=lambda e: -e[0])
+    ev.sort(key=lambda e: -e[0])
+    if SYL_GAP <= 0 or not notes:
+        return ev
+    picked, out = [notes[0].start], []
+    for e in ev:
+        if all(abs(e[3] - t) >= SYL_GAP for t in picked):
+            picked.append(e[3])
+            out.append(e)
+        else:
+            out.append((min(e[0], NEUTRAL - 0.5),) + e[1:])
+    return sorted(out, key=lambda e: -e[0])
 
 
 def _utilities(ev, n):
