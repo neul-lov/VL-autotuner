@@ -162,7 +162,7 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
         if not notes:
             raise ValueError("음표 파일에 음표가 없어요")
     else:
-        notes, _ = nt.segment(midi, voiced, db, feats["novelty"], noise=noise)
+        notes, _ = nt.segment(midi, voiced, db, feats["novelty"], noise=noise, hiband=feats["high_ratio"])
         if not notes:
             raise ValueError("음표를 만들지 못했어요")
     bpm = float(bpm or 120.0)

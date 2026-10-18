@@ -8,6 +8,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tetotune import audio, features, pitch  # noqa: E402
+from tetotune import notes as nt  # noqa: E402
 from tetotune.pitch import HOP  # noqa: E402
 
 
@@ -38,6 +39,21 @@ def main():
         stats(f"노래 {ly}", s, min(e, s + 0.3), db, voiced, feats, sing)
     voiced = voiced & ~noise
     found = features.find_breaths(db, voiced, feats)
+    # 자음 조각 합치기 전의 짧은 음표 (음절 앞 자음이 따로 음표가 되는지)
+    keep, nt.ONSET_MAX = getattr(nt, "ONSET_MAX", 0.0), 0.0
+    segs, _ = nt.segment(np.where(voiced, midi, np.nan), voiced, db, feats["novelty"], noise=noise,
+                        hiband=feats["high_ratio"])
+    nt.ONSET_MAX = keep
+    for i, x in enumerate(segs):
+        if x.end - x.start < 0.16:
+            prv = segs[i - 1] if i and x.strength < 10 else None
+            nxt = segs[i + 1] if i + 1 < len(segs) and segs[i + 1].strength < 10 else None
+            sl = slice(int(x.start / HOP), int(x.end / HOP))
+            print(f"짧은 음표 {x.start:.2f}-{x.end:.2f} 음 {x.tone} 세기 {x.strength:.1f}"
+                  f" | 앞 {prv.tone if prv else '-'} | 뒤 {nxt.tone if nxt else '-'} 세기 {nxt.strength if nxt else 0:.1f}"
+                  f" | 잡음 {noise[max(0, sl.start - 10):sl.stop].mean():.2f}"
+                  f" | 자음 같음 {nt._consonant_like(x, voiced, feats['high_ratio'])}")
+            stats("", x.start, x.end, db, voiced, feats, sing)
     print("찾은 숨:", [(round(a, 2), round(b, 2)) for a, b, *_ in found])
     if len(sys.argv) > 3:
         prev = json.load(open(Path(sys.argv[3]) / "preview.json"))
