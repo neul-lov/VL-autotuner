@@ -4,3 +4,4 @@ __pycache__/
 server-app.log
 mac/.build/
 mac/build/
+mac/wheels/

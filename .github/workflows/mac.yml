@@ -28,6 +28,21 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.9
+            3.10
+            3.11
+            3.12
+            3.13
+            3.14
+      - name: pyworld 휠 만들기 (PyPI에 Mac용이 없어서 앱에 넣어요)
+        run: |
+          for v in 3.9 3.10 3.11 3.12 3.13 3.14; do
+            python$v -m pip wheel --no-deps "pyworld>=0.3.4" -w mac/wheels
+          done
+          ls mac/wheels
       - run: swift --version
       - name: 앱 빌드
         run: cd mac && ./build.sh
@@ -37,3 +52,98 @@ jobs:
         with:
           name: TetoTune-mac
           path: TetoTune-mac.zip
+
+  app-smoke:
+    name: 앱 실행 시험 (처음 설치 → 엔진 → 조교)
+    needs: app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: TetoTune-mac
+      - name: 앱 켜기
+        run: |
+          ditto -x -k TetoTune-mac.zip .
+          open TetoTune.app
+      - name: 엔진이 뜰 때까지 (처음 실행 설치 포함)
+        run: |
+          for i in $(seq 1 240); do
+            if curl -sf http://127.0.0.1:8766/api/status > status.json; then cat status.json; exit 0; fi
+            sleep 5
+          done
+          echo "엔진이 뜨지 않았어요"; exit 1
+      - name: 화면 찍기
+        if: always()
+        continue-on-error: true
+        run: screencapture -x screen.png
+      - name: 앱으로 조교 한 번
+        run: |
+          vocal="$PWD/devtools/testdata/vocadito_14.flac"
+          job=$(curl -sf -X POST http://127.0.0.1:8766/api/tune --data-urlencode "vocal=$vocal" \
+                --data-urlencode "lyrics=" --data-urlencode 'options={}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["job_id"])')
+          for i in $(seq 1 120); do
+            s=$(curl -sf http://127.0.0.1:8766/api/jobs/$job)
+            st=$(echo "$s" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')
+            if [ "$st" != "running" ]; then echo "$s"; [ "$st" = "done" ] && exit 0 || exit 1; fi
+            sleep 2
+          done
+          exit 1
+      - name: 기록 모으기
+        if: always()
+        run: |
+          mkdir -p smoke
+          cp -R ~/Library/Application\ Support/TetoTune/*.log smoke/ 2>/dev/null || true
+          cp screen.png status.json smoke/ 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: app-smoke
+          path: smoke
+
+  teto:
+    name: 실제 테토 음원으로 OpenUtau 렌더 (소리 재생 없음)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - run: python -m pip install -r requirements.txt matplotlib
+      - name: OpenUtau (Mac) 받기
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh release view -R stakira/OpenUtau --json tagName -q .tagName)
+          gh release download "$tag" -R stakira/OpenUtau -p "*osx-arm64*.dmg" -O ou.dmg
+          hdiutil attach ou.dmg -nobrowse -mountpoint /tmp/ou
+          cp -R /tmp/ou/OpenUtau.app ./
+          hdiutil detach /tmp/ou
+          echo "OpenUtau $tag" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: 테토 음원 받기 (공식 배포 · OpenUTAU용 통합 세트, 시험에만 쓰고 올리지 않아요)
+        run: |
+          curl -fL --retry 3 -o teto.zip https://kasaneteto.jp/assets/download/utau/TETO-OUset240323.zip
+          python devtools/install_voicebank.py teto.zip
+      - name: 조교
+        run: |
+          mkdir -p out
+          for k in 10 14; do python -m tetotune devtools/testdata/vocadito_$k.flac out/v$k | tail -n +1 > out/v$k.log; tail -20 out/v$k.log; done
+      - name: OpenUtau로 렌더
+        run: |
+          export CSC=$(ls -d "$DOTNET_ROOT"/sdk/*/Roslyn/bincore/csc.dll | tail -1)
+          for k in 10 14; do
+            devtools/openutau_harness/render.sh "$PWD/OpenUtau.app/Contents/MacOS" "$PWD/ourun" "$PWD/out/v$k/project.ustx" "$PWD/out/v$k/render.wav" | tee out/v$k/harness.txt
+          done
+      - name: 원래 보컬과 비교
+        run: |
+          for k in 10 14; do
+            python devtools/compare_render.py out/v$k "$(ls out/v$k/render_*.wav | head -1)" out/v$k/compare.png | tee out/v$k/compare.json
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: teto-render
+          path: out

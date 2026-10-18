@@ -113,6 +113,8 @@ struct Sidebar: View {
         case .starting: return "준비 중…"
         case .missing: return "설치가 필요해요"
         case .failed: return "엔진을 시작하지 못했어요"
+        case .installing: return "처음 한 번 준비 중…"
+        case .needsPython: return "Python이 필요해요"
         case .ready:
             guard let singer = model.status?.singer else { return "OpenUtau 음원을 찾지 못했어요" }
             return "\(singer.name) · \(kindLabel(singer.kind))"
@@ -139,6 +141,9 @@ struct Sidebar: View {
             Button("보컬 파일 선택…") { model.chooseVocal() }
             Button("결과 폴더 열기") { model.openOutputFolder() }
             Button("엔진 로그 보기") { NSWorkspace.shared.open(model.backend.log) }
+            if model.backend.bundled {
+                Button("설치 기록 보기") { NSWorkspace.shared.open(model.backend.setupLog) }
+            }
             Button("새로 고침") { Task { await model.refresh() } }
             Divider()
             Button("TetoTune 종료") { NSApp.terminate(nil) }
@@ -209,7 +214,7 @@ struct Sidebar: View {
         case .none: "보컬만 있는 파일 (wav · flac · mp3 · m4a)"
         case .file(let url): url.lastPathComponent
         case .stem(let s):
-            s.lyrics ? "StemMixer · 음표와 가사도 가져와요" : s.notes ? "StemMixer · 음표도 가져와요" : "StemMixer · 반주도 같이 넣어요"
+            s.lyrics ? "StemMixer 음표 · 가사를 써요 (가사 칸이 비어 있으면)" : s.notes ? "StemMixer · 음표도 가져와요" : "StemMixer · 반주도 같이 넣어요"
         }
     }
 
@@ -222,7 +227,46 @@ struct Sidebar: View {
             placeholder(icon: "shippingbox", title: "설치가 필요해요",
                         text: "\(model.backend.folder.path) 에서 start-mac.command를 한 번 실행해 주세요.")
         case .failed(let message):
-            placeholder(icon: "exclamationmark.triangle", title: "엔진을 시작하지 못했어요", text: message)
+            VStack(spacing: 0) {
+                placeholder(icon: "exclamationmark.triangle", title: "엔진을 시작하지 못했어요", text: message)
+                HStack(spacing: 8) {
+                    Button("다시 시도") { model.start() }
+                    Button("기록 보기") { NSWorkspace.shared.open(model.backend.bundled ? model.backend.setupLog : model.backend.log) }
+                }
+                .font(.system(size: 12, weight: .semibold))
+                .padding(.bottom, 40)
+            }
+        case .installing(let step, let detail):
+            VStack(spacing: 10) {
+                Spacer()
+                ProgressView().controlSize(.regular)
+                Text(step)
+                    .font(.system(size: 15, weight: .semibold))
+                Text(detail)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .padding(.horizontal, 24)
+                Text("조교 엔진(음 높이 읽기 · WORLD)을 이 Mac에 설치하고 있어요. 처음 한 번만 해요.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 30)
+                Spacer()
+            }
+            .frame(maxWidth: .infinity)
+        case .needsPython:
+            VStack(spacing: 0) {
+                placeholder(icon: "shippingbox", title: "Python 3이 필요해요",
+                            text: "Apple의 개발자 도구(Command Line Tools)를 설치하면 같이 들어와요. 설치가 끝나면 다시 시도를 눌러 주세요.")
+                HStack(spacing: 8) {
+                    Button("개발자 도구 설치") { model.installCommandLineTools() }
+                    Button("다시 시도") { model.start() }
+                }
+                .font(.system(size: 12, weight: .semibold))
+                .padding(.bottom, 40)
+            }
         case .ready where model.stemSongs.isEmpty && model.results.isEmpty:
             placeholder(icon: "music.note.list", title: "아직 조교한 곡이 없어요",
                         text: "보컬 파일을 끌어다 놓으세요. StemMixer에서 분리한 곡은 여기 저절로 나와요.")

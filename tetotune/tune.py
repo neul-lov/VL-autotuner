@@ -332,8 +332,9 @@ def _write_ustx(path, name, bpm, notes, breath_ids, curves, waves, singer, phone
     for x in notes:
         a = int(round(x.start * tps))
         b = int(round(x.end * tps))
-        if vnotes and a < vnotes[-1]["position"] + vnotes[-1]["duration"]:
-            vnotes[-1]["duration"] = max(15, a - vnotes[-1]["position"])
+        if vnotes and a < vnotes[-1]["position"] + vnotes[-1]["duration"]:  # 겹치면 앞 음표를 줄인다
+            a = max(a, vnotes[-1]["position"] + 15)
+            vnotes[-1]["duration"] = a - vnotes[-1]["position"]
         if b - a < 15:
             continue
         exps = []
@@ -346,6 +347,8 @@ def _write_ustx(path, name, bpm, notes, breath_ids, curves, waves, singer, phone
             "vibrato": {"length": 0, "period": 175, "depth": 25, "in": 10, "out": 10, "shift": 0, "drift": 0, "vol_link": 0},
             "phoneme_expressions": exps, "phoneme_overrides": [],
         })
+    if not vnotes:
+        raise ValueError("음표가 너무 짧아서 프로젝트를 만들지 못했어요 (빠르기를 확인해 주세요)")
     end = max(n["position"] + n["duration"] for n in vnotes)
     tracks = [{"singer": singer or "", "phonemizer": phonemizer,
                "renderer_settings": {"renderer": "WORLDLINE-R"},

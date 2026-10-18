@@ -412,17 +412,17 @@ def _read_ust(path):
 
 
 def _read_midi(path):
+    """MIDI → 음표 (가장 음표가 많은 트랙). 빠르기가 중간에 바뀌어도 초를 맞게 센다."""
     import mido
 
     mid = mido.MidiFile(str(path))
-    tempo, raw, best = 500000, [], None
-    tracks = []
+    tempos, tracks = [], []
     for tr in mid.tracks:
         tick, on, lyric, notes = 0, {}, "", []
         for msg in tr:
             tick += msg.time
-            if msg.type == "set_tempo" and best is None:
-                best = msg.tempo
+            if msg.type == "set_tempo":
+                tempos.append((tick, msg.tempo))
             elif msg.type == "lyrics":
                 t = msg.text
                 try:
@@ -441,10 +441,12 @@ def _read_midi(path):
                 notes.append((t0, tick, msg.note, ly))
         if notes:
             tracks.append(notes)
-    tempo = best or tempo
-    bpm = 60_000_000 / tempo
-    sec = lambda t: mido.tick2second(t, mid.ticks_per_beat, tempo)
+    tempos = sorted(tempos) or [(0, 500000)]
+    if tempos[0][0] > 0:
+        tempos.insert(0, (0, tempos[0][1]))
+    conv = _tick_to_sec([(t * TICKS / mid.ticks_per_beat, 60_000_000 / us) for t, us in tempos])
+    raw = []
     if tracks:
         for t0, t1, p, ly in max(tracks, key=len):
-            raw.append((sec(t0), sec(t1), p, ly))
-    return raw, bpm
+            raw.append((conv(t0 * TICKS / mid.ticks_per_beat), conv(t1 * TICKS / mid.ticks_per_beat), p, ly))
+    return raw, 60_000_000 / tempos[0][1]

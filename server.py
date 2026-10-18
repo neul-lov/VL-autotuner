@@ -18,6 +18,14 @@ from fastapi.responses import JSONResponse
 from tetotune import __version__, pitch, stemmixer, voicebank
 from tetotune.tune import Options, tune
 
+# 설정 값마다 허용 범위 (숫자) 또는 고를 수 있는 값 (글자)
+LIMITS = {
+    "bpm": (0.0, 400.0), "pitch_follow": (0.0, 1.0), "vibrato": (0.0, 2.0), "correct": (0.0, 1.0),
+    "dynamics": (0.0, 2.0), "breathiness": (0.0, 2.0), "tension": (0.0, 2.0), "breath_volume": (0.0, 3.0),
+}
+CHOICES = {"breaths": ("auto", "voicebank", "original", "off"), "pitch_method": ("auto", "harvest", "rmvpe")}
+MAX_JOBS = 50
+
 PORT = int(os.environ.get("TETOTUNE_PORT", 8766))
 OUTPUT = Path(os.environ.get("TETOTUNE_OUTPUT") or Path.home() / "Music" / "TetoTune")
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
@@ -62,8 +70,44 @@ def default_options():
 
 
 def _folder_name(title):
-    safe = "".join(c for c in title if c not in '/\\:*?"<>|').strip() or "노래"
-    return f"{safe[:60]} {time.strftime('%Y-%m-%d %H%M%S')}"
+    """결과 폴더 이름 "<제목> 날짜 시각". 경로에 못 쓰는 글자 · 앞의 점(숨김 폴더)은 빼고, 이미 있으면 번호를 붙인다."""
+    safe = "".join(c for c in title if c not in '/\\:*?"<>|' and c >= " ").strip().lstrip(".").strip() or "노래"
+    base = f"{safe[:60]} {time.strftime('%Y-%m-%d %H%M%S')}"
+    name, k = base, 2
+    while (OUTPUT / name).exists():
+        name, k = f"{base} ({k})", k + 1
+    return name
+
+
+def _options(raw):
+    """앱에서 온 설정 → Options. 모르는 키는 버리고, 숫자는 범위 안으로, 잘못된 값은 알기 쉬운 오류로."""
+    if not isinstance(raw, dict):
+        raise ValueError
+    out = {}
+    for f in fields(Options):
+        if f.name not in raw:
+            continue
+        v = raw[f.name]
+        if f.name in LIMITS:
+            lo, hi = LIMITS[f.name]
+            v = min(hi, max(lo, float(v)))
+        elif f.name == "transpose":
+            v = "auto" if str(v) == "auto" else str(int(min(24, max(-24, round(float(v))))))
+        elif f.name in CHOICES:
+            if v not in CHOICES[f.name]:
+                raise ValueError
+        else:
+            v = str(v)
+        out[f.name] = v
+    if out.get("singer") and not (Path(out["singer"]) / "character.txt").exists():
+        raise HTTPException(400, "고른 가수 폴더를 찾지 못했어요")
+    return Options(**out)
+
+
+def _input_file(path, what):
+    if path and not Path(path).is_file():
+        raise HTTPException(400, f"{what}을 찾지 못했어요")
+    return path or None
 
 
 @app.post("/api/tune")
@@ -71,14 +115,19 @@ def start(vocal: str = Form(None), song: str = Form(None), lyrics: str = Form(""
           backing: str = Form(None), options: str = Form("{}")):
     if not vocal and not song:
         raise HTTPException(400, "보컬 파일이나 StemMixer 곡을 골라 주세요")
-    if vocal and not Path(vocal).exists():
-        raise HTTPException(400, "보컬 파일을 찾지 못했어요")
+    vocal = _input_file(vocal, "보컬 파일")
+    notes = _input_file(notes, "음표 파일")
+    backing = _input_file(backing, "반주 파일")
+    if song and not stemmixer.has_song(song):
+        raise HTTPException(400, "StemMixer 곡을 찾지 못했어요")
     try:
-        raw = json.loads(options or "{}")
-        known = {f.name for f in fields(Options)}
-        opts = Options(**{k: v for k, v in raw.items() if k in known})
+        opts = _options(json.loads(options or "{}"))
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(400, "설정을 읽지 못했어요")
+    for old in [k for k, j in jobs.items() if j["status"] != "running"][:-MAX_JOBS]:
+        jobs.pop(old, None)
     job_id = uuid.uuid4().hex[:12]
     jobs[job_id] = {"status": "running", "step": "대기 중", "progress": 0.0}
     threading.Thread(target=_run, args=(job_id, vocal, song, lyrics, notes, backing, opts), daemon=True).start()
