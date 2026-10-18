@@ -1,6 +1,10 @@
 #!/bin/zsh
 # Builds TetoTune.app into ./build. Pass --install to copy it to /Applications as well.
-# The app runs ../server.py with ../.venv, so keep this folder where it is after building.
+#
+# The app carries its own copy of the engine (Resources/engine) and installs its Python packages into
+# ~/Library/Application Support/TetoTune on first launch. When this checkout already has a .venv
+# (start-mac.command), the app uses this folder's server.py and .venv instead, so engine edits show up
+# without rebuilding; keep the folder where it is in that case.
 set -euo pipefail
 cd "$(dirname "$0")"
 BACKEND="$(cd .. && pwd)"
@@ -9,9 +13,23 @@ swift build -c release
 
 APP=build/TetoTune.app
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/engine/tetotune"
 cp "$(swift build -c release --show-bin-path)/TetoTune" "$APP/Contents/MacOS/TetoTune"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+
+ENGINE="$APP/Contents/Resources/engine"
+cp ../server.py ../requirements.txt "$ENGINE/"
+cp ../tetotune/*.py "$ENGINE/tetotune/"
+# pyworld wheels built by CI (PyPI has none for Mac), used on first launch so no compiler is needed.
+if ls wheels/*.whl >/dev/null 2>&1; then
+    mkdir -p "$ENGINE/wheels"
+    cp wheels/*.whl "$ENGINE/wheels/"
+fi
+
+LINK=""
+if [[ -x "$BACKEND/.venv/bin/python" ]]; then
+    LINK="<key>TetoTuneBackend</key><string>$BACKEND</string>"
+fi
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -24,12 +42,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key><string>TetoTune</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>0.2</string>
+    <key>CFBundleVersion</key><string>2</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
     <key>NSHighResolutionCapable</key><true/>
-    <key>TetoTuneBackend</key><string>$BACKEND</string>
+    $LINK
 </dict>
 </plist>
 PLIST

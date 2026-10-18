@@ -74,13 +74,27 @@ def songs():
     return out
 
 
+def _song_folder(song_id):
+    """곡 id → 곡 폴더. 곡 폴더 바로 아래만 ("../" 같은 id로 다른 폴더를 읽지 못하게)."""
+    lib = library()
+    if lib is None or not song_id or "/" in song_id or "\\" in song_id:
+        return None
+    folder = (lib / song_id).resolve()
+    if folder.parent != lib.resolve() or not (folder / "meta.json").is_file():
+        return None
+    return folder
+
+
+def has_song(song_id):
+    return _song_folder(song_id) is not None
+
+
 def prepare(song_id, work):
-    """→ (보컬 경로, 음표 파일 경로 또는 None, 반주 경로 또는 None)."""
+    """→ (보컬 경로, 음표 파일 경로 또는 None, 반주 경로 또는 None, 제목)."""
     import soundfile as sf
 
-    lib = library()
-    folder = (lib / song_id) if lib else None
-    if folder is None or not (folder / "meta.json").exists():
+    folder = _song_folder(song_id)
+    if folder is None:
         raise ValueError("StemMixer 곡을 찾지 못했어요")
     meta = json.loads((folder / "meta.json").read_text())
     vocal = _vocal(folder, meta)

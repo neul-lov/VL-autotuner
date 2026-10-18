@@ -13,6 +13,14 @@ enum VocalSource: Equatable {
         case .stem(let song): song.title
         }
     }
+
+    /// Where its lyrics are saved.
+    var key: String {
+        switch self {
+        case .file(let url): "file:" + url.path
+        case .stem(let song): "stemmixer:" + song.id
+        }
+    }
 }
 
 struct Job {
@@ -44,7 +52,13 @@ enum BreathMode: String, CaseIterable, Identifiable {
 
 @MainActor
 final class AppModel: ObservableObject {
-    enum ServerState: Equatable { case starting, ready, missing, failed(String) }
+    enum ServerState: Equatable {
+        case starting, ready, missing, failed(String)
+        /// First run of the app's own engine: installing its Python packages.
+        case installing(step: String, detail: String)
+        /// No Python 3 on this Mac (Apple's Command Line Tools bring one).
+        case needsPython
+    }
 
     let backend = Backend()
 
@@ -53,9 +67,12 @@ final class AppModel: ObservableObject {
     @Published var stemSongs: [StemSong] = []
     @Published var results: [ResultItem] = []
 
-    @Published var source: VocalSource?
-    @Published var lyrics = UserDefaults.standard.string(forKey: "lyrics") ?? "" {
-        didSet { UserDefaults.standard.set(lyrics, forKey: "lyrics") }
+    @Published var source: VocalSource? {
+        didSet { if source != oldValue { lyrics = AppModel.savedLyrics()[source?.key ?? ""] ?? "" } }
+    }
+    /// Lyrics are kept per vocal, so another song's lyrics never end up on this one.
+    @Published var lyrics = "" {
+        didSet { saveLyrics() }
     }
     @Published var notesFile: URL?
     @Published var backingFile: URL?
@@ -77,38 +94,68 @@ final class AppModel: ObservableObject {
 
     // MARK: Server
 
+    private var observing = false
+
     func start() {
-        guard backend.isInstalled else {
-            server = .missing
-            return
+        if !observing {
+            observing = true
+            // Pick up new StemMixer songs or voicebanks when coming back to the app.
+            NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil,
+                                                   queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.server == .ready else { return }
+                    Task { await self.refresh() }
+                }
+            }
         }
-        Task {
-            // A server left over from an earlier run can be reused as is.
-            if (try? await backend.status()) == nil {
-                do { try backend.launch() } catch {
+        server = .starting
+        Task { await boot() }
+    }
+
+    private func boot() async {
+        // A server left over from an earlier run can be reused as is.
+        if (try? await backend.status()) == nil {
+            if !backend.isInstalled {
+                guard backend.bundled else {
+                    server = .missing
+                    return
+                }
+                do {
+                    try await backend.install { step, detail in
+                        Task { @MainActor in self.server = .installing(step: step, detail: detail) }
+                    }
+                } catch let error as BackendError where error.needsPython {
+                    server = .needsPython
+                    return
+                } catch {
                     server = .failed(error.localizedDescription)
                     return
                 }
+                server = .starting
             }
-            for _ in 0..<120 {
-                if let s = try? await backend.status() {
-                    status = s
-                    server = .ready
-                    await refresh()
-                    return
-                }
-                try? await Task.sleep(for: .milliseconds(500))
-            }
-            server = .failed("엔진이 응답하지 않아요. 로그를 확인해 주세요.")
-        }
-        // Pick up new StemMixer songs or voicebanks when coming back to the app.
-        NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil,
-                                               queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self, self.server == .ready else { return }
-                Task { await self.refresh() }
+            do { try backend.launch() } catch {
+                server = .failed(error.localizedDescription)
+                return
             }
         }
+        for _ in 0..<240 {
+            if let s = try? await backend.status() {
+                status = s
+                server = .ready
+                await refresh()
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(500))
+        }
+        server = .failed("엔진이 응답하지 않아요. 로그를 확인해 주세요.")
+    }
+
+    /// Apple's installer for the Command Line Tools (brings python3).
+    func installCommandLineTools() {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/xcode-select")
+        p.arguments = ["--install"]
+        try? p.run()
     }
 
     func shutdown() {
@@ -181,6 +228,17 @@ final class AppModel: ObservableObject {
         options.singer = singer
     }
 
+    private static func savedLyrics() -> [String: String] {
+        UserDefaults.standard.dictionary(forKey: "lyricsBySource") as? [String: String] ?? [:]
+    }
+
+    private func saveLyrics() {
+        guard let key = source?.key else { return }
+        var all = AppModel.savedLyrics()
+        all[key] = lyrics.isEmpty ? nil : lyrics
+        UserDefaults.standard.set(all, forKey: "lyricsBySource")
+    }
+
     private static func loadOptions() -> TuneOptions {
         guard let data = UserDefaults.standard.data(forKey: "options"),
               let saved = try? JSONDecoder().decode(TuneOptions.self, from: data) else { return TuneOptions() }
@@ -213,8 +271,10 @@ final class AppModel: ObservableObject {
                 let id = try await backend.startTune(vocal: vocal, song: song, lyrics: lyrics, notes: notesFile,
                                                      backing: backingFile, options: options)
                 try await follow(id)
+            } catch let error as BackendError {
+                withAnimation { job = nil; jobError = error.message }
             } catch {
-                withAnimation { job = nil; jobError = error.localizedDescription }
+                withAnimation { job = nil; jobError = "엔진과 연결이 끊겼어요. 다시 시도해 주세요." }
             }
         }
     }
@@ -261,17 +321,28 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Opens the project in OpenUtau (or whatever app opens .ustx files).
+    /// Opens the project in OpenUtau. OpenUtau only opens a project passed as a launch argument, and a
+    /// second copy quits right away, so when it's already running the file is shown in Finder instead.
     func openInOpenUtau(_ item: ResultItem) {
-        let file = URL(fileURLWithPath: item.ustx)
-        let candidates = [URL(fileURLWithPath: "/Applications/OpenUtau.app"),
-                          FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/OpenUtau.app")]
-        if let app = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) {
-            NSWorkspace.shared.open([file], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration()) { _, error in
-                if error != nil { Task { @MainActor in self.show("OpenUtau를 열지 못했어요", success: false) } }
-            }
-        } else if !NSWorkspace.shared.open(file) {
+        let ws = NSWorkspace.shared
+        if let running = NSRunningApplication.runningApplications(withBundleIdentifier: Backend.openUtauID).first {
+            running.activate()
+            reveal(item)
+            show("OpenUtau가 이미 열려 있어요. 파일 → 열기로 project.ustx를 열어 주세요", success: false)
+            return
+        }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let app = ws.urlForApplication(withBundleIdentifier: Backend.openUtauID)
+            ?? [URL(fileURLWithPath: "/Applications/OpenUtau.app"), home.appendingPathComponent("Applications/OpenUtau.app")]
+                .first { FileManager.default.fileExists(atPath: $0.path) }
+        guard let app else {
             show("OpenUtau를 찾지 못했어요. 응용 프로그램 폴더에 넣어 주세요", success: false)
+            return
+        }
+        let config = NSWorkspace.OpenConfiguration()
+        config.arguments = [item.ustx]
+        ws.openApplication(at: app, configuration: config) { _, error in
+            if error != nil { Task { @MainActor in self.show("OpenUtau를 열지 못했어요", success: false) } }
         }
     }
 

@@ -63,12 +63,43 @@ def _rmvpe(y16, n_frames):
 
 
 # ---------------------------------------------------------------- WORLD
-def _harvest(y16):
+CHUNK = 10.0  # 초. Harvest는 긴 파일을 한 번에 넣으면 메모리를 아주 많이 쓴다 (4분 곡에 8GB 넘게): 나눠서 읽는다
+PAD = 1.0     # 조각 앞뒤로 겹쳐 읽는 길이 (조각 끝의 음높이가 흔들리지 않게)
+
+
+def _harvest_part(x):
     import pyworld
 
-    x = y16.astype(np.float64)
+    x = np.ascontiguousarray(x, dtype=np.float64)
     f0, t = pyworld.harvest(x, 16000, f0_floor=FMIN, f0_ceil=FMAX, frame_period=HOP * 1000)
     return pyworld.stonemask(x, f0, t, 16000)
+
+
+def _harvest(y16, workers=None):
+    """10초 조각으로 나눠 (앞뒤 1초 겹침) 여러 프로세스에서 읽고 이어 붙인다. 프레임 i = i*HOP초."""
+    import os
+    from concurrent.futures import ProcessPoolExecutor
+
+    hop = int(16000 * HOP)
+    total = int(len(y16) / 16000 / HOP) + 1
+    step, pad = int(CHUNK / HOP), int(PAD / HOP)
+    if total <= step + 2 * pad:
+        return _harvest_part(y16)
+    parts = []
+    for f in range(0, total, step):
+        a, b = max(0, f - pad), min(total, f + step + pad)
+        parts.append((f, a, y16[a * hop:b * hop]))
+    workers = workers or max(1, min(4, (os.cpu_count() or 2) // 2))
+    if workers > 1:
+        with ProcessPoolExecutor(max_workers=workers) as ex:
+            results = list(ex.map(_harvest_part, [p[2] for p in parts]))
+    else:
+        results = [_harvest_part(p[2]) for p in parts]
+    out = np.zeros(total)
+    for (f, a, _), r in zip(parts, results):
+        k = min(step, total - f, len(r) - (f - a))
+        out[f:f + k] = r[f - a:f - a + k]
+    return out
 
 
 def extract(y, sr, method="auto"):
@@ -91,13 +122,14 @@ def extract(y, sr, method="auto"):
 
 # ---------------------------------------------------------------- 정리
 def frame_db(y, sr, n):
-    """프레임마다 크기 (dB, 20ms 창)."""
+    """프레임마다 크기 (dB, 20ms 창). 누적합으로 계산해서 긴 곡도 메모리를 적게 쓴다."""
     hop = int(sr * HOP)
     win = int(sr * 0.02)
-    pad = np.pad(y, (win // 2, win + n * hop))
-    idx = np.arange(n)[:, None] * hop + np.arange(win)[None, :]
-    rms = np.sqrt((pad[idx] ** 2).mean(axis=1) + 1e-12)
-    return 20 * np.log10(rms + 1e-9)
+    pad = np.pad(np.asarray(y, dtype=np.float64), (win // 2, win + n * hop))
+    c = np.concatenate([[0.0], np.cumsum(pad * pad)])
+    starts = np.arange(n) * hop
+    power = np.maximum(c[starts + win] - c[starts], 0.0) / win
+    return 20 * np.log10(np.sqrt(power + 1e-12) + 1e-9)
 
 
 def _runs(mask):
