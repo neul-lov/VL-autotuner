@@ -1,0 +1,39 @@
+name: Mac 앱 빌드 · 엔진 시험
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  engine:
+    name: 엔진 시험 (Python ${{ matrix.python }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 = Mac 기본 python3 (Command Line Tools), 3.13 = 최신
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -r requirements.txt pytest httpx
+      - run: python -m pytest -q tests
+
+  app:
+    name: TetoTune.app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift --version
+      - name: 앱 빌드
+        run: cd mac && ./build.sh
+      - name: 압축
+        run: ditto -c -k --keepParent mac/build/TetoTune.app TetoTune-mac.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TetoTune-mac
+          path: TetoTune-mac.zip
