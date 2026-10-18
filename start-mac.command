@@ -26,8 +26,12 @@ if [ ! -d .venv ]; then
   .venv/bin/python -m pip install -r requirements.txt || { rm -rf .venv; echo "설치 실패"; read; exit 1; }
   .venv/bin/python -m pip install -r requirements-extra.txt || echo "추가 프로그램(RMVPE · 한자 읽기)은 설치하지 못했어요. 없어도 조교는 돼요."
 fi
-if [ ! -d /Applications/TetoTune.app ] && command -v swift >/dev/null; then
+# 이 폴더의 최신 코드로 앱을 늘 다시 만든다 (전에 받은 앱이 있어도 바꿔 넣음)
+if command -v swift >/dev/null; then
+  osascript -e 'quit app "TetoTune"' 2>/dev/null
   echo "Mac 앱을 만듭니다..."
   (cd mac && ./build.sh --install) || echo "앱을 만들지 못했어요. Xcode(또는 Command Line Tools)가 필요해요: xcode-select --install"
+else
+  echo "앱을 만들려면 Command Line Tools가 필요해요: 터미널에서 xcode-select --install 을 실행한 뒤 이 파일을 다시 열어 주세요"
 fi
 echo "준비 끝! 응용 프로그램 폴더의 TetoTune을 여세요. 이 창은 닫아도 돼요."
