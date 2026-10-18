@@ -34,16 +34,17 @@ def variants():
     """이름 → 바꿀 것들 [(모듈, 이름, 값)]. 첫 번째가 지금 기본값."""
     nv = features.noisy_voiced
     out = {"기본": []}
-    for ml in (0.08, 0.12):
+    for ml in (0.08,):
         out[f"잡음 최소 {ml}s"] = [(features, "noisy_voiced", functools.partial(nv, min_len=ml))]
-    out["자음 틈 안 메움"] = [(notes, "CONSONANT_GAP", 0.0)]
     if hasattr(notes, "LINE_MATCH"):
         out["줄 맞추기 끔"] = [(notes, "LINE_MATCH", False)]
     if hasattr(notes, "ONSET_MAX"):
-        out["자음 조각 끔"] = [(notes, "ONSET_MAX", 0.0)]
-        out["짧은 음표 모두"] = [(notes, "ONSET_ANY", True)]
-        for v in (0.12, 0.18):
-            out[f"자음 조각 {v}s"] = [(notes, "ONSET_MAX", v)]
+        out["짧은 음표 합치기 끔"] = [(notes, "ONSET_MAX", 0.0)]
+        out["자음 같은 것만 합치기"] = [(notes, "ONSET_ANY", False)]
+    if hasattr(notes, "SYL_GAP"):
+        out["음절 간격 끔"] = [(notes, "SYL_GAP", 0.0)]
+        for v in (0.09, 0.15):
+            out[f"음절 간격 {v}s"] = [(notes, "SYL_GAP", v)]
     return out
 
 
