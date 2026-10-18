@@ -30,7 +30,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: python -m pip install -r requirements.txt pytest httpx
+      - run: python -m pip install -r requirements.txt -r requirements-extra.txt pytest httpx
       - run: python -m pytest -q tests
 
   app:
@@ -82,7 +82,9 @@ jobs:
         run: |
           sup="$HOME/Library/Application Support/TetoTune"
           for i in $(seq 1 180); do
-            if curl -sf http://127.0.0.1:8766/api/status > status.json; then cat status.json; exit 0; fi
+            if curl -sf http://127.0.0.1:8766/api/status > status.json; then
+              cat status.json; echo; grep -h "^\[TetoTune\]" "$sup/setup.log" || true; exit 0
+            fi
             if (( i % 12 == 0 )); then
               echo "--- $((i * 5))초: $(pgrep -lf 'TetoTune|server.py|pip' | tr '\n' ' ')"
               tail -n 2 "$sup/setup.log" 2>/dev/null || true
@@ -135,7 +137,7 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "10.0.x"
-      - run: python -m pip install -r requirements.txt matplotlib
+      - run: python -m pip install -r requirements.txt -r requirements-extra.txt matplotlib
       - name: OpenUtau (Mac) 받기
         env:
           GH_TOKEN: ${{ github.token }}
@@ -164,6 +166,22 @@ jobs:
         run: |
           for k in 10 14; do
             python devtools/compare_render.py out/v$k "$(ls out/v$k/render_*.wav | head -1)" out/v$k/compare.png | tee out/v$k/compare.json
+          done
+      - name: 정답을 아는 테토 노래로 가사 · 음표 · 숨 맞추기
+        run: |
+          export CSC=$(ls -d "$DOTNET_ROOT"/sdk/*/Roslyn/bincore/csc.dll | tail -1)
+          ou="$PWD/OpenUtau.app/Contents/MacOS"
+          for seed in 7 3; do
+            d="$PWD/out/ref$seed"; mkdir -p "$d"
+            python devtools/make_reference_song.py "$d/ref.ustx" "$d/truth.json" $seed --teto --lyrics "$d/lyrics.txt"
+            devtools/openutau_harness/render.sh "$ou" "$PWD/ourun" "$d/ref.ustx" "$d/ref.wav" > "$d/harness_ref.txt"
+            grep -m1 phoneme_errors "$d/harness_ref.txt"
+            python -m tetotune "$d/ref_ref.wav" "$d/tuned" --lyrics "$d/lyrics.txt" > "$d/tune.log"
+            devtools/openutau_harness/render.sh "$ou" "$PWD/ourun" "$d/tuned/project.ustx" "$d/tuned/render.wav" > "$d/harness_tuned.txt"
+            grep -m1 phoneme_errors "$d/harness_tuned.txt"
+            echo "== 시드 $seed: $(cat "$d/lyrics.txt" | tr '\n' ' ')"
+            python devtools/eval_reference.py "$d/truth.json" "$d/tuned" | tee "$d/eval.txt"
+            python devtools/compare_render.py "$d/tuned" "$(ls "$d"/tuned/render_*.wav | head -1)" | tee "$d/compare.json"
           done
       - uses: actions/upload-artifact@v4
         if: always()
