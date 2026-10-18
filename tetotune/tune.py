@@ -172,10 +172,12 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
             warnings.append(f"노래에서 숨 쉬는 곳(프레이즈)을 {phrases}개 찾았는데 가사는 {len(lines)}줄이에요. "
                             f"가사를 프레이즈마다 한 줄씩 나눠 주면 음절이 더 정확히 들어가요")
         notes = nt.align(notes, lines)
-        n_syl = sum(len(l) for l in lines)
+        n_syl = sum(1 for line in lines for s in line if s != "+")  # ー · + (늘이기)는 음절이 아니다
         got = sum(1 for x in notes if x.lyric != "+")
         if got != n_syl:
             warnings.append(f"가사 {n_syl}음절 중 {got}개만 음표에 들어갔어요 (음표가 모자라요). OpenUtau에서 확인해 주세요")
+    # 가사 칸이 비면 음표 파일(StemMixer · ust · MIDI)의 가사를 쓰니까 말도 거기서 본다 (빈 가사를 채우기 전에)
+    lang = lyr.language(lyrics_text) if lines else lyr.language("".join(x.lyric for x in notes))
     for i, x in enumerate(notes):
         if not x.lyric:
             # 가사가 없으면: 자음 · 쉼표 · 크기 꺼짐이 있는 곳만 새 음절, 음만 바뀌는 곳은 이어 부르기
@@ -186,9 +188,10 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
     singer_id, info = voicebank.find(o.singer or None)
     if singer_id is None:
         warnings.append("OpenUtau 가수 폴더에서 테토를 찾지 못했어요. OpenUtau에서 가수를 골라 주세요")
-        info = {"phonemizer": voicebank.PRESAMP, "breath_in": None, "breath_out": None, "japanese": True, "name": None}
+        info = {"phonemizer": voicebank.PRESAMP, "breath_in": None, "breath_out": None, "japanese": True, "name": None,
+                "classic": True}
     phonemizer = info["phonemizer"]
-    if lines and lyr.language(lyrics_text) == "ko" and info.get("japanese"):
+    if lang == "ko" and info.get("japanese"):
         phonemizer = voicebank.KO_TO_JA
 
     # 숨
@@ -284,16 +287,15 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
     guide = out / "guide_vocals.wav"
     audio.write(guide, y, sr)
     waves = [("원래 보컬 (참고용 · 음소거)", guide.name, len(y) / sr * 1000, True, 0)]
-    if backing:
-        yb, srb = audio.load(backing)
-        audio.write(out / "backing.wav", yb, srb)
-        waves.append(("반주", "backing.wav", len(yb) / srb * 1000, False, -3))
+    if backing:  # 반주는 듣기만 하니까 모노로 줄이지 않고 그대로 (wav · flac · aiff는 복사, 다른 형식은 24비트 wav)
+        file, ms = audio.save_copy(backing, out / "backing")
+        waves.append(("반주", file.name, ms, False, -3))
     if mode == "original" and breaths:
         audio.write(out / "breaths.wav", _breath_track(y, sr, breaths, o.breath_volume), sr)
         waves.append(("숨소리 (원래 보컬)", "breaths.wav", len(y) / sr * 1000, False, -2))
     name = title or Path(vocal).stem
     _write_ustx(out / "project.ustx", name, bpm, all_notes, set(id(b) for b in breath_notes), curves, waves,
-                singer_id, phonemizer)
+                singer_id, phonemizer, info.get("classic", True))
 
     preview = {
         "hop": HOP, "bpm": bpm, "shift": shift,
@@ -331,7 +333,7 @@ def _breath_track(y, sr, breaths, gain):
     return out
 
 
-def _write_ustx(path, name, bpm, notes, breath_ids, curves, waves, singer, phonemizer):
+def _write_ustx(path, name, bpm, notes, breath_ids, curves, waves, singer, phonemizer, classic=True):
     import yaml
 
     tps = bpm / 60 * TICKS
@@ -357,9 +359,11 @@ def _write_ustx(path, name, bpm, notes, breath_ids, curves, waves, singer, phone
     if not vnotes:
         raise ValueError("음표가 너무 짧아서 프로젝트를 만들지 못했어요 (빠르기를 확인해 주세요)")
     end = max(n["position"] + n["duration"] for n in vnotes)
-    tracks = [{"singer": singer or "", "phonemizer": phonemizer,
-               "renderer_settings": {"renderer": "WORLDLINE-R"},
-               "track_name": "테토 (자동 조교)", "track_color": "Red", "mute": False, "solo": False, "volume": 0, "pan": 0}]
+    track = {"singer": singer or "", "phonemizer": phonemizer}
+    if classic:  # UTAU 음원만 WORLDLINE-R. DiffSinger · ENUNU 등은 비워서 OpenUtau가 그 가수의 기본 렌더러를 고르게
+        track["renderer_settings"] = {"renderer": "WORLDLINE-R"}
+    tracks = [{**track, "track_name": "테토 (자동 조교)", "track_color": "Red", "mute": False, "solo": False,
+               "volume": 0, "pan": 0}]
     wave_parts = []
     for i, (track_name, file, ms, mute, vol) in enumerate(waves, start=1):
         tracks.append({"singer": None, "phonemizer": None, "track_name": track_name, "track_color": "Blue",
