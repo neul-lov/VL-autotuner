@@ -34,3 +34,20 @@ def test_two_lines_sung_in_one_breath():
 def test_one_line_still_distributes():
     out = nt.align(_song([3, 3]), [list("あいうえおか")])
     assert [n.lyric for n in out] == list("あいうえおか")
+
+
+def test_consonant_fragment_joins_previous_note():
+    ns = [nt.Note(0.0, 0.4, 60), nt.Note(0.4, 0.5, 62, strength=5.0), nt.Note(0.5, 0.9, 64, strength=5.0)]
+    out = nt._merge_onsets(ns, lambda x: True)
+    assert [(n.start, n.end, n.tone) for n in out] == [(0.0, 0.5, 60), (0.5, 0.9, 64)]
+
+
+def test_short_sung_note_is_kept():
+    ns = [nt.Note(0.0, 0.4, 60), nt.Note(0.4, 0.5, 62, strength=5.0), nt.Note(0.5, 0.9, 64, strength=5.0)]
+    assert len(nt._merge_onsets(ns, lambda x: False)) == 3
+
+
+def test_consonant_fragment_at_phrase_start_is_dropped():
+    ns = [nt.Note(0.0, 0.1, 62), nt.Note(0.1, 0.5, 64, strength=5.0)]
+    out = nt._merge_onsets(ns, lambda x: True)
+    assert [(n.start, n.strength) for n in out] == [(0.1, 10.0)]
