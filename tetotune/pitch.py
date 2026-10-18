@@ -134,11 +134,13 @@ def extract(y, sr, method="auto"):
 # ---------------------------------------------------------------- 정리
 def frame_db(y, sr, n):
     """프레임마다 크기 (dB, 20ms 창). 누적합으로 계산해서 긴 곡도 메모리를 적게 쓴다."""
-    hop = int(sr * HOP)
     win = int(sr * 0.02)
-    pad = np.pad(np.asarray(y, dtype=np.float64), (win // 2, win + n * hop))
+    # 44.1kHz에서 5ms는 220.5샘플이라 정수 간격으로 자르면 곡 뒤로 갈수록 음높이 프레임보다 밀린다
+    starts = np.round(np.arange(n) * HOP * sr).astype(np.int64)
+    y = np.asarray(y, dtype=np.float64)
+    right = max(0, int(starts[-1]) + win - len(y) - win // 2) if n else 0
+    pad = np.pad(y, (win // 2, right))
     c = np.concatenate([[0.0], np.cumsum(pad * pad)])
-    starts = np.arange(n) * hop
     power = np.maximum(c[starts + win] - c[starts], 0.0) / win
     return 20 * np.log10(np.sqrt(power + 1e-12) + 1e-9)
 

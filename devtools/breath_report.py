@@ -28,7 +28,7 @@ def main():
     db = pitch.frame_db(y, sr, n)
     midi, voiced = pitch.clean(f0, db)
     feats = features.analyze(y, sr, np.where(voiced, pitch.midi_to_hz(np.nan_to_num(midi, nan=60)), 0), voiced)
-    noise = features.noisy_voiced(voiced, feats)
+    noise = features.noisy_voiced(voiced, feats, db)
     print("음높이가 잡힌 잡음(숨):", [(round(a * HOP, 2), round(b * HOP, 2)) for a, b in pitch._runs(noise)])
     sing = float(np.median(db[voiced]))
     print(f"바닥 {np.percentile(db, 3) - sing:.1f}dB (노래 중앙값 기준)")
