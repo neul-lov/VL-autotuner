@@ -181,6 +181,7 @@ jobs:
             grep -m1 phoneme_errors "$d/harness_tuned.txt"
             echo "== 시드 $seed: $(cat "$d/lyrics.txt" | tr '\n' ' ')"
             python devtools/eval_reference.py "$d/truth.json" "$d/tuned" | tee "$d/eval.txt"
+            python devtools/breath_report.py "$d/truth.json" "$d/ref_ref.wav" "$d/tuned" 2>/dev/null | tee "$d/breath_report.txt"
             python devtools/compare_render.py "$d/tuned" "$(ls "$d"/tuned/render_*.wav | head -1)" | tee "$d/compare.json"
           done
       - uses: actions/upload-artifact@v4
