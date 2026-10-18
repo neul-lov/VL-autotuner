@@ -79,6 +79,7 @@ def _harvest(y16, workers=None):
     """10초 조각으로 나눠 (앞뒤 1초 겹침) 여러 프로세스에서 읽고 이어 붙인다. 프레임 i = i*HOP초."""
     import os
     from concurrent.futures import ProcessPoolExecutor
+    from concurrent.futures.process import BrokenProcessPool
 
     hop = int(16000 * HOP)
     total = int(len(y16) / 16000 / HOP) + 1
@@ -90,10 +91,16 @@ def _harvest(y16, workers=None):
         a, b = max(0, f - pad), min(total, f + step + pad)
         parts.append((f, a, y16[a * hop:b * hop]))
     workers = workers or max(1, min(4, (os.cpu_count() or 2) // 2))
+    results = None
     if workers > 1:
-        with ProcessPoolExecutor(max_workers=workers) as ex:
-            results = list(ex.map(_harvest_part, [p[2] for p in parts]))
-    else:
+        # Mac은 새 프로세스를 spawn으로 띄워서, `if __name__ == "__main__"` 없이 부른 스크립트에서는 실패한다:
+        # 그때는 한 프로세스에서 차례로 읽는다
+        try:
+            with ProcessPoolExecutor(max_workers=workers) as ex:
+                results = list(ex.map(_harvest_part, [p[2] for p in parts]))
+        except (RuntimeError, OSError, BrokenProcessPool):
+            results = None
+    if results is None:
         results = [_harvest_part(p[2]) for p in parts]
     out = np.zeros(total)
     for (f, a, _), r in zip(parts, results):
