@@ -1,7 +1,10 @@
 """TetoTune 엔진 서버. Mac 앱(TetoTune.app)이 켜질 때 띄우고, 앱을 끄면 같이 꺼진다.
 
 실행: python server.py  →  http://127.0.0.1:8766  (화면은 Mac 앱)
+앱이 띄울 때는 빈 포트(TETOTUNE_PORT)와 실행마다 새로 만든 비밀값(TETOTUNE_TOKEN)을 넘기고,
+비밀값을 X-TetoTune-Token 머리글로 보낸 요청만 받는다 (같은 Mac의 다른 사용자 · 다른 프로그램이 못 쓰게).
 """
+import hmac
 import json
 import os
 import shutil
@@ -27,6 +30,7 @@ CHOICES = {"breaths": ("auto", "voicebank", "original", "off"), "pitch_method": 
 MAX_JOBS = 50
 
 PORT = int(os.environ.get("TETOTUNE_PORT", 8766))
+TOKEN = os.environ.get("TETOTUNE_TOKEN") or None
 OUTPUT = Path(os.environ.get("TETOTUNE_OUTPUT") or Path.home() / "Music" / "TetoTune")
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
 
@@ -43,12 +47,15 @@ async def only_this_computer(request, call_next):
     origin = request.headers.get("origin")
     if name not in LOCAL_HOSTS or (origin is not None and origin != f"http://{host}"):
         return JSONResponse({"detail": "이 컴퓨터의 TetoTune에서 보낸 요청만 받아요"}, status_code=403)
+    if TOKEN and not hmac.compare_digest(request.headers.get("x-tetotune-token", ""), TOKEN):
+        return JSONResponse({"detail": "이 엔진을 켠 TetoTune에서 보낸 요청만 받아요"}, status_code=403)
     return await call_next(request)
 
 
 @app.get("/api/status")
-def status():
-    singer_id, info = voicebank.find()
+def status(singer: str = ""):
+    """singer: 앱에서 고른 가수 폴더 (비우면 테토를 찾는다)."""
+    singer_id, info = voicebank.find(singer if singer and (Path(singer) / "character.txt").exists() else None)
     return {
         "version": __version__,
         "singer": info and {k: info[k] for k in ("name", "path", "kind", "breath_in", "breath_out", "phonemizer")},
@@ -193,14 +200,22 @@ def preview(name: str):
     return json.loads((_result_folder(name) / "preview.json").read_text())
 
 
-@app.delete("/api/results/{name}")
-def delete_result(name: str):
-    shutil.rmtree(_result_folder(name))
-    return {"ok": True}
+# 결과 지우기는 앱이 직접 휴지통으로 옮긴다 (OpenUtau에서 고친 project.ustx도 되살릴 수 있게)
+
+
+def _exit_with_parent(pid):
+    """앱이 강제로 꺼지거나 멈춰도 엔진이 혼자 남지 않게: 부모가 바뀌면(launchd가 받으면) 끝낸다."""
+    while True:
+        time.sleep(1)
+        if os.getppid() != pid:
+            os._exit(0)
 
 
 if __name__ == "__main__":
     import uvicorn
 
     OUTPUT.mkdir(parents=True, exist_ok=True)
+    parent = os.environ.get("TETOTUNE_PARENT_PID")
+    if parent and parent.isdigit():
+        threading.Thread(target=_exit_with_parent, args=(int(parent),), daemon=True).start()
     uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="warning")

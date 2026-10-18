@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tetotune import audio, pitch  # noqa: E402
+from tetotune import audio, features, pitch  # noqa: E402
 from tetotune.pitch import HOP  # noqa: E402
 
 
@@ -24,7 +24,10 @@ def main():
         f0 = np.pad(f0, (0, max(0, n - len(f0))))[:n]
         db = pitch.frame_db(y, sr, n)
         m, v = pitch.clean(f0, db)
-        return m, v, db
+        # 음높이가 잡힌 잡음(숨 · ㅅ · ㅎ)은 음높이가 아니라서 비교에서 뺀다 (조교할 때와 같은 기준)
+        feats = features.analyze(y, sr, np.where(v, pitch.midi_to_hz(np.nan_to_num(m, nan=60)), 0), v)
+        v = v & ~features.noisy_voiced(v, feats, db)
+        return np.where(v, m, np.nan), v, db
 
     ms, vs, dbs = analyse(ys)
     mr, vr, dbr = analyse(yr)

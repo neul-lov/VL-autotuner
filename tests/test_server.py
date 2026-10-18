@@ -47,6 +47,14 @@ def test_result_paths_stay_inside_output(client):
     assert client.delete("/api/results/..").status_code in (404, 405)
 
 
+def test_token_required_when_set(client, monkeypatch):
+    import server
+    monkeypatch.setattr(server, "TOKEN", "s3cret")
+    assert client.get("/api/options").status_code == 403
+    assert client.get("/api/options", headers={"X-TetoTune-Token": "wrong"}).status_code == 403
+    assert client.get("/api/options", headers={"X-TetoTune-Token": "s3cret"}).status_code == 200
+
+
 def test_folder_names(client, monkeypatch):
     import server
     a = server._folder_name("../.hidden:name")
