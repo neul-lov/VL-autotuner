@@ -33,6 +33,8 @@ def main():
     mr, vr, dbr = analyse(yr)
     ms = ms + prev["shift"]
     both = vs & vr
+    if not both.any():
+        sys.exit(f"렌더({render})에 원래 보컬과 같이 소리 나는 곳이 없어요: 렌더 유성 {int(vr.sum())}프레임, 원래 {int(vs.sum())}프레임")
     err = np.abs(mr[both] - ms[both]) * 100
     notes = np.zeros(n, dtype=bool)
     for s, e, *_ in prev["notes"]:
