@@ -90,10 +90,20 @@ OpenUtau에서 사람이 "조교"할 때 만지는 것과, 이 앱이 각각을 
   조교 중 종료 확인, 반주 음질 유지, `start-mac.command`가 덜 끝난 설치를 다시 하기.
 
 ## 아직 확인 못 한 것 · 한계
-- 노을 님 Mac에 직접 깔지는 못했어요 (이 환경에서 그 Mac에 접속할 수 없어서). 대신 같은 OpenUtau · 테토 음원으로 CI의 Mac에서 시험했어요.
+- 실제 사용하는 Mac에 깔아 보지는 못했고, 같은 OpenUtau · 테토 음원으로 CI의 Mac에서 시험했어요.
 - RMVPE 경로는 모델을 받을 수 없어서 시험하지 못했어요 (Harvest로 시험).
 - 마지막 검토에서 고친 앱 코드 몇 줄(Swift: 보컬 빼기 · 기본값 · 가수 경로의 +)은 GitHub Actions 사용 한도 때문에
   아직 빌드해 보지 못했어요. 한도가 풀리면 CI가 다시 빌드 · 실제 테토 시험을 해요.
 - ㅁ · ㄴ 같은 콧소리 자음은 아직 가끔 따로 음표가 되어 가사가 한 칸 밀려요. OpenUtau에서 고치거나 음표 파일을 주세요.
 - 가사를 한 줄로 몰아 쓰면 음절 맞추기가 약해요. 숨 쉬는 곳마다 줄을 바꿔 주세요.
 - 음표 파일 없이 보컬만 주면 빠른 멜리스마는 음표가 합쳐질 수 있어요 (음 높이 선은 그대로 따라가요).
+
+## 크레딧 · 라이선스
+- TetoTune은 개인이 만든 **비공식** 도구예요. 카사네 테토(重音テト)와 그 음원의 권리자와는 관계가 없어요.
+  - 重音テト音声ライブラリー © 小山乃舞世 (https://kasaneteto.jp/utau/).
+    음원은 이 저장소 · 앱에 들어 있지 않으니, 공식 사이트에서 받고 [이용 약관](https://kasaneteto.jp/guidelines/voice.html)을 따라 주세요.
+  - CI 시험에 쓰는 OpenUtau용 통합 음원(TETO-OUset240323)은 まいこ 님이 정리해 공식 사이트에서 배포하는 것이에요.
+    CI는 시험할 때만 받아 쓰고, 음원도 테토로 렌더한 소리 파일도 올리지 않아요 (숫자 · 그림만 남겨요).
+- 이 저장소의 코드는 MIT 라이선스예요 ([LICENSE](LICENSE)).
+- 빌드된 앱에는 pyworld(MIT)와 그 안의 WORLD(수정 BSD)가 들어 있어요. 고지문은 [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)에 있고, 앱 안에도 같이 넣어요.
+- 시험용 보컬 `devtools/testdata/*.flac`은 Vocadito(CC BY 4.0)예요. 만든 사람과 출처는 [devtools/testdata/README.md](devtools/testdata/README.md)에 있어요.
