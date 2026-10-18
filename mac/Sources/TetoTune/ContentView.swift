@@ -713,3 +713,48 @@ private struct ResultSection: View {
         }
     }
 }
+
+struct JobCard: View {
+    let job: Job
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(job.step)
+                        .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(2)
+                    Text(job.label)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 0)
+                if job.progress > 0 {
+                    Text("\(Int(job.progress * 100))%")
+                        .font(.system(size: 11, weight: .bold))
+                        .monospacedDigit()
+                        .foregroundStyle(Color.teto)
+                        .contentTransition(.numericText())
+                }
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.primary.opacity(0.08))
+                    Capsule()
+                        .fill(LinearGradient(colors: [.teto.opacity(0.7), .teto],
+                                             startPoint: .leading, endPoint: .trailing))
+                        .frame(width: max(6, geo.size.width * job.progress))
+                }
+            }
+            .frame(height: 6)
+            .animation(.easeOut(duration: 0.4), value: job.progress)
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.teto.opacity(0.1)))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.teto.opacity(0.3), lineWidth: 1))
+        .transition(.move(edge: .top).combined(with: .opacity))
+    }
+}
