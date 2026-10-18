@@ -13,6 +13,8 @@ TICKS = 480
 REST_GAP = 0.15  # 이보다 긴 무성 구간은 쉼표 (숨 · 프레이즈 사이)
 CONSONANT_GAP = 0.22  # 바람 소리(자음)로 찬 틈은 이만큼까지 프레이즈 안 (features.CONSONANT_MAX와 같게)
 LINE_MATCH = True  # 가사 줄 수 ≠ 프레이즈 수일 때 줄 경계를 지키며 짝짓기 (끄면 음절 수만 나눈다)
+ONSET_MAX = 0.15  # 이보다 짧고 자음 같은 음표가 다음 음표 바로 앞에 붙어 있으면 자음 조각 (_merge_onsets, 0이면 끔)
+ONSET_ANY = False  # True면 자음 같은지 보지 않고 짧으면 모두 (빠른 노래의 짧은 음절까지 합쳐져서 기본은 끔)
 
 
 class Note:
@@ -83,10 +85,11 @@ def _cuts(db_s, nov_z, a, b, edge_sec=0.1):
     return sorted(out)
 
 
-def segment(midi, voiced, db, novelty=None, auto_split_db=6.0, noise=None):
+def segment(midi, voiced, db, novelty=None, auto_split_db=6.0, noise=None, hiband=None):
     """음높이 → 음표 목록. 프레이즈(쉼표로 나뉜 덩어리)마다 음 높이가 머무는 곳을 찾는다 (비터비).
     noise: 음높이가 잡혔지만 바람 소리라서 무성으로 돌린 곳 (features.noisy_voiced). 그런 틈이나 노래만큼 큰 틈은
-    ㅅ · ㅎ 같은 자음이라 REST_GAP보다 조금 길어도 프레이즈를 끊지 않는다."""
+    ㅅ · ㅎ 같은 자음이라 REST_GAP보다 조금 길어도 프레이즈를 끊지 않는다.
+    hiband: 프레임마다 높은 대역 비율 (features high_ratio). 짧은 음표가 자음 조각인지 볼 때 쓴다."""
     from scipy.ndimage import uniform_filter1d
 
     offset = tuning_offset(midi, voiced)
@@ -164,8 +167,16 @@ def segment(midi, voiced, db, novelty=None, auto_split_db=6.0, noise=None):
                 part = Note(s * HOP, e * HOP, note.tone, strength=note.strength if j == 0 else 3.0 + score[s] / 2)
                 part.dips = [(t, d) for t, d in note.dips if part.start < t < part.end]
                 out.append(part)
-        notes.extend(_merge_short(_snap(out)))
+        notes.extend(_merge_onsets(_merge_short(_snap(out)), lambda x: _consonant_like(x, voiced, hiband)))
     return notes, offset
+
+
+def _consonant_like(note, voiced, hiband):
+    """음표 대부분이 무성(메운 자음 틈)이거나 바람 소리처럼 높은 대역이 센지."""
+    fa, fb = int(round(note.start / HOP)), int(round(note.end / HOP))
+    if fb <= fa:
+        return True
+    return voiced[fa:fb].mean() < 0.5 or (hiband is not None and float(np.median(hiband[fa:fb])) > 0.5)
 
 
 def _snap(notes, near=0.15, min_score=4.0):
@@ -206,6 +217,29 @@ def _merge_short(notes, min_len=0.09):
             prv.dips += x.dips
         elif i + 1 < len(notes):  # 앞뒤가 쉼표인 짧은 조각 (숨 끝 · 잡음): 버리고 다음 음이 프레이즈 시작
             notes[i + 1].strength = max(notes[i + 1].strength, x.strength)
+        notes.pop(i)
+    return notes
+
+
+def _merge_onsets(notes, consonant=lambda x: True, max_len=None):
+    """프레이즈 하나에서, 다음 음표 바로 앞에 붙은 짧고 자음 같은 음표는 자음 조각으로 본다.
+    자음 틈(무성)이나 테토(WORLDLINE-R)가 음높이를 실어 부른 ㅅ · ㅎ이 모음 앞 100ms쯤 따로 음표가 되는데,
+    UTAU에서는 자음이 음표 시작보다 먼저(선행발성) 나오고 음표는 모음에서 시작하니까 그 조각은 앞 음표 끝에 붙인다.
+    프레이즈 첫 음이면 버리고 다음 음표가 프레이즈를 시작한다."""
+    max_len = ONSET_MAX if max_len is None else max_len
+    notes = list(notes)
+    i = 0
+    while i + 1 < len(notes):
+        x, nxt = notes[i], notes[i + 1]
+        if x.end - x.start >= max_len or abs(nxt.start - x.end) > 1e-6 or nxt.strength >= 10 \
+                or not (ONSET_ANY or consonant(x)):
+            i += 1
+            continue
+        if i == 0:
+            nxt.strength = max(nxt.strength, x.strength)
+        else:
+            notes[i - 1].end = x.end
+            notes[i - 1].dips += x.dips
         notes.pop(i)
     return notes
 

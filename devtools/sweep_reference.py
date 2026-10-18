@@ -37,10 +37,13 @@ def variants():
     for ml in (0.08, 0.12):
         out[f"잡음 최소 {ml}s"] = [(features, "noisy_voiced", functools.partial(nv, min_len=ml))]
     out["자음 틈 안 메움"] = [(notes, "CONSONANT_GAP", 0.0)]
-    out["자음 틈 0.3s"] = [(notes, "CONSONANT_GAP", 0.3)]
-    out["쉼 0.2s"] = [(notes, "REST_GAP", 0.2)]
     if hasattr(notes, "LINE_MATCH"):
         out["줄 맞추기 끔"] = [(notes, "LINE_MATCH", False)]
+    if hasattr(notes, "ONSET_MAX"):
+        out["자음 조각 끔"] = [(notes, "ONSET_MAX", 0.0)]
+        out["짧은 음표 모두"] = [(notes, "ONSET_ANY", True)]
+        for v in (0.12, 0.18):
+            out[f"자음 조각 {v}s"] = [(notes, "ONSET_MAX", v)]
     return out
 
 
