@@ -23,6 +23,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/engine/tetotune"
 cp "$(swift build -c release "${ARCHS[@]}" --show-bin-path)/TetoTune" "$APP/Contents/MacOS/TetoTune"
 lipo -archs "$APP/Contents/MacOS/TetoTune"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+cp ../LICENSE ../THIRD_PARTY_NOTICES.txt "$APP/Contents/Resources/"
 
 ENGINE="$APP/Contents/Resources/engine"
 cp ../server.py ../requirements.txt ../requirements-extra.txt "$ENGINE/"

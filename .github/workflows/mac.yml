@@ -11,6 +11,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# 이 저장소에 쓰지 않아요 (OpenUtau 릴리스 받기 · 아티팩트 올리기만)
+permissions:
+  contents: read
+
 defaults:
   run:
     # pipefail: `… | tee` 앞의 명령이 실패해도 단계가 실패로 보이게
@@ -20,6 +24,7 @@ jobs:
   engine:
     name: 엔진 시험 (Python ${{ matrix.python }})
     runs-on: macos-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -36,6 +41,7 @@ jobs:
   app:
     name: TetoTune.app
     runs-on: macos-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -68,11 +74,13 @@ jobs:
         with:
           name: TetoTune-mac
           path: TetoTune-mac.zip
+          retention-days: 30
 
   app-smoke:
     name: 앱 실행 시험 (처음 설치 → 엔진 → 조교)
     needs: app
     runs-on: macos-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -155,10 +163,14 @@ jobs:
         with:
           name: app-smoke
           path: smoke
+          retention-days: 14
 
   teto:
     name: 실제 테토 음원으로 OpenUtau 렌더 (소리 재생 없음)
+    # 다른 사람 저장소(포크)에서 온 PR에서는 테토 음원을 받지 않아요
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: macos-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -226,8 +238,13 @@ jobs:
           done
           python -W ignore devtools/sweep_reference.py out/ref* | tee out/sweep.txt
           cat out/sweep.txt >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - name: 결과 숫자 · 그림만 올리기 (테토 소리 파일은 올리지 않아요)
+        uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: teto-render
-          path: out
+          name: teto-results
+          path: |
+            out
+            !out/**/*.wav
+            !out/**/*.flac
+          retention-days: 14
