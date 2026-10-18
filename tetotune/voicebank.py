@@ -18,6 +18,9 @@ EXHALE = ("息", "br", "breath", "R息", "hh", "Breath", "息1")
 PRESAMP = "OpenUtau.Plugin.Builtin.JapanesePresampPhonemizer"
 KO_TO_JA = "OpenUtau.Plugin.Builtin.KOtoJAPhonemizer"
 DEFAULT = "OpenUtau.Core.DefaultPhonemizer"
+# character.yaml의 text_file_encoding은 .NET 이름이다. .NET의 shift_jis는 cp932(NEC · IBM 확장 문자 포함)
+DOTNET_ENC = {"shift_jis": "cp932", "shift-jis": "cp932", "sjis": "cp932", "utf-8": "utf-8-sig", "utf8": "utf-8-sig",
+              "gb2312": "gbk", "ks_c_5601-1987": "cp949"}
 
 
 def openutau_home():
@@ -42,45 +45,73 @@ def singer_roots():
     return [r for r in roots if r.exists()]
 
 
-def _read_text(p):
+def _read_text(p, enc=None):
+    """UTAU 파일은 보통 cp932 (윈도 일본어. OpenUtau가 shift_jis로 읽는 것과 같다). enc가 있으면 그것부터."""
     data = p.read_bytes()
-    for enc in ("utf-8-sig", "shift_jis", "cp949"):
+    for e in ((enc,) if enc else ()) + ("utf-8-sig", "cp932", "cp949"):
         try:
-            return data.decode(enc)
-        except UnicodeDecodeError:
+            return data.decode(e)
+        except (UnicodeDecodeError, LookupError):
             continue
     return data.decode("utf-8", errors="replace")
 
 
-def _name(folder):
+def _config(folder):
+    """character.yaml → dict (없거나 못 읽으면 {})."""
+    p = Path(folder) / "character.yaml"
+    if p.exists():
+        import yaml
+        try:
+            cfg = yaml.safe_load(_read_text(p))
+            if isinstance(cfg, dict):
+                return cfg
+        except Exception:
+            pass
+    return {}
+
+
+def _encoding(cfg):
+    """character.txt · oto.ini를 읽을 글자 인코딩 (character.yaml의 text_file_encoding, 없으면 None)."""
+    enc = str(cfg.get("text_file_encoding") or "").strip().lower()
+    return DOTNET_ENC.get(enc, enc) or None
+
+
+def _classic(cfg):
+    """UTAU식(oto.ini) 음원인지. DiffSinger · ENUNU 등은 character.yaml에 singer_type이 있다."""
+    return str(cfg.get("singer_type") or "utau").strip().lower() in ("utau", "classic")
+
+
+def _name(folder, enc=None):
     for f in ("character.yaml", "character.txt"):
         p = folder / f
         if p.exists():
-            m = re.search(r"^\s*name\s*[:=]\s*(.+)$", _read_text(p), re.M)
+            m = re.search(r"^\s*name\s*[:=]\s*(.+)$", _read_text(p, enc if f == "character.txt" else None), re.M)
             if m:
                 return m.group(1).strip().strip("'\"")
     return folder.name
 
 
 def list_singers(roots=None):
-    """→ [{id, name, path, root}] 테토가 먼저."""
+    """→ [{id, name, path, root, classic}] 테토가 먼저, 테토 중에서는 UTAU식 음원이 먼저."""
     out = []
     for root in roots or singer_roots():
         for c in root.rglob("character.txt"):
             folder = c.parent
-            out.append({"id": str(folder.relative_to(root)), "name": _name(folder), "path": str(folder), "root": str(root)})
+            cfg = _config(folder)
+            out.append({"id": str(folder.relative_to(root)), "name": _name(folder, _encoding(cfg)), "path": str(folder),
+                        "root": str(root), "classic": _classic(cfg)})
     def rank(s):
         text = s["name"] + " " + s["id"]
-        return (not any(k in text for k in TETO), any(k in text for k in SPECIAL), s["name"])
+        return (not any(k in text for k in TETO), not s["classic"], any(k in text for k in SPECIAL), s["name"])
     out.sort(key=rank)
     return out
 
 
-def _otos(folder):
+def _otos(folder, enc=None):
     """→ {별칭: (wav 경로, offset, cutoff)} (같은 별칭이 여럿이면 처음 것)."""
     out = {}
     for oto in Path(folder).rglob("oto.ini"):
-        for line in _read_text(oto).splitlines():
+        for line in _read_text(oto, enc).splitlines():
             if "=" not in line:
                 continue
             wav, rest = line.split("=", 1)
@@ -118,31 +149,32 @@ def _level(entry):
 
 
 def inspect(folder):
-    """음원 폴더 → {name, phonemizer, kind, breath_in, breath_out, subbank_affixes}."""
+    """음원 폴더 → {name, path, aliases, classic, kind, breath_in, breath_out, breath_gap_db, phonemizer, japanese}."""
     folder = Path(folder)
-    otos = _otos(folder)
+    cfg = _config(folder)
+    enc = _encoding(cfg)
+    otos = _otos(folder, enc)
     aliases = set(otos)
-    info = {"name": _name(folder), "path": str(folder), "aliases": len(aliases)}
+    info = {"name": _name(folder, enc), "path": str(folder), "aliases": len(aliases), "classic": _classic(cfg)}
     # 하위 음원(음 높이별 · 표정별) 접두사 · 접미사를 떼고 본다 (예: "息↑", "あ_D4")
     affixes = set()
-    yaml_path = folder / "character.yaml"
-    phonemizer = None
-    if yaml_path.exists():
-        import yaml
-        try:
-            cfg = yaml.safe_load(_read_text(yaml_path)) or {}
-            phonemizer = cfg.get("default_phonemizer")
-            for sb in cfg.get("subbanks") or []:
-                affixes.add((sb.get("prefix") or "", sb.get("suffix") or ""))
-        except Exception:
-            pass
+    phonemizer = cfg.get("default_phonemizer")
+    try:
+        for sb in cfg.get("subbanks") or []:
+            affixes.add((sb.get("prefix") or "", sb.get("suffix") or ""))
+    except Exception:
+        pass
     affixes.add(("", ""))
 
     def has(alias):
         return any(f"{p}{alias}{s}" in aliases for p, s in affixes) or alias in aliases
 
-    vcv = sum(1 for a in aliases if re.match(r"^[aiueon-] \S", a))
-    info["kind"] = "VCV" if vcv > 50 else ("CVVC" if any(re.match(r"^[aiueo] [kgsztdnhbpmyrw]", a) for a in aliases) else "CV")
+    # CVVC: 모음 + 로마자 자음만 ("a k", "o sh", "a kC4"). VCV: 모음 + 가나 ("a か") 또는 로마자 음절 ("a ka").
+    # "- か" 같은 첫 음은 CVVC에도 있어서 VCV 근거로 세지 않는다. CVVC 음원에도 "a い" 같은 모음 잇기가 있으니 CVVC부터 보되,
+    # VCV 음원에 몇 개 섞인 "a br" 같은 것으로 CVVC가 되지 않게 VCV 근거보다 너무 적으면 CVVC로 보지 않는다.
+    vc = sum(1 for a in aliases if re.match(r"^[aiueonN] [b-df-hj-np-tv-z]+(?![a-z])", a))
+    vcv = sum(1 for a in aliases if re.match(r"^[aiueonN] ([぀-ヿ]|[a-z]*[aiueo](?![a-z]))", a))
+    info["kind"] = "CVVC" if vc >= 10 and vc * 4 >= vcv else ("VCV" if vcv > 50 else "CV")
     info["breath_in"] = next((a for a in INHALE if has(a)), None)
     info["breath_out"] = next((a for a in EXHALE if has(a)), None)
     # 숨 샘플이 모음 샘플보다 얼마나 작은지 (숨 음표 크기를 원래 보컬의 숨 크기에 맞출 때 쓴다)
