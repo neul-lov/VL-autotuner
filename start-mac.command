@@ -1,5 +1,10 @@
 #!/bin/bash
 cd "$(dirname "$0")"
+# 지난번 설치가 중간에 끊겼거나(창을 닫음 · 설치 실패) 맞지 않는 Python으로 만든 .venv는 지우고 다시 설치한다
+if [ -d .venv ] && ! .venv/bin/python -c 'import numpy, scipy, soundfile, pyworld, fastapi, uvicorn' 2>/dev/null; then
+  echo "이전 설치가 덜 끝나서 다시 설치해요"
+  rm -rf .venv
+fi
 if [ ! -d .venv ]; then
   echo "처음 실행이라 필요한 프로그램을 설치합니다. 몇 분 걸려요..."
   # 필요한 프로그램이 다 나와 있는 Python을 고른다 (Homebrew의 python3는 3.15라 아직 안 돼요)

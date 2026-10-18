@@ -122,6 +122,28 @@ def test_korean_note_lyrics_use_ko_to_ja_and_renderer(tmp_path, monkeypatch):
     assert "renderer_settings" not in track
 
 
+@needs_tagger
+def test_katakana_particles_and_greetings():
+    assert _flat(lyrics.split("ワタシハ ドコヘ")[0]) == list("わたしわどこえ")
+    assert _flat(lyrics.split("こんにちは")[0]) == list("こんにちわ")
+    assert _flat(lyrics.split("ヨハネ ハハハ")[0]) == list("よはねははは")
+
+
+def test_line_separators_and_apostrophes():
+    assert lyrics.split("あ\u2028い")[0] == [["あ"], ["い"]]
+    assert lyrics.split("don't stop I’m 'cause")[0] == [["don't", "stop", "I'm", "cause"]]
+
+
+def test_korean_lyrics_warn_when_singer_cannot_read_them(tmp_path, monkeypatch):
+    vocal = tmp_path / "vocal.wav"
+    _sing(vocal, [60, 62, 64])
+    info = {"phonemizer": "DiffSingerJapanesePhonemizer", "breath_in": None, "breath_out": None, "japanese": False,
+            "korean": False, "name": "ds", "classic": False}
+    monkeypatch.setattr(voicebank, "find", lambda prefer=None: ("ds", info))
+    res = tune(str(vocal), tmp_path / "k", "사랑해", options=Options(transpose="0", breaths="off"))
+    assert any("한글 가사를 부르지 못해요" in w for w in res.warnings)
+
+
 # ---------------------------------------------------------------- 오디오
 def test_backing_kept_as_is(tmp_path):
     y = (0.1 * np.random.default_rng(0).standard_normal((48000, 2))).astype(np.float32)
@@ -136,6 +158,16 @@ def test_backing_kept_as_is(tmp_path):
     info = sf.info(out)
     assert out.name == "backing2.wav" and (info.channels, info.samplerate, info.subtype) == (2, 48000, "PCM_24")
     assert ms == pytest.approx(1000, abs=30)
+
+
+def test_aifc_backing_becomes_wav(tmp_path):
+    y = (0.1 * np.random.default_rng(1).standard_normal((44100, 2))).astype(np.float32)
+    plain, little = tmp_path / "a.aiff", tmp_path / "b.aiff"
+    sf.write(plain, y, 44100, subtype="PCM_16", format="AIFF")
+    sf.write(little, y, 44100, subtype="PCM_16", format="AIFF", endian="LITTLE")  # AIFF-C sowt
+    assert audio.save_copy(plain, tmp_path / "p")[0].name == "p.aiff"
+    out = audio.save_copy(little, tmp_path / "q")[0]
+    assert out.name == "q.wav" and sf.info(out).subtype == "PCM_24"
 
 
 def test_tune_writes_backing_part(tmp_path):

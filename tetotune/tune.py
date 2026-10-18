@@ -193,6 +193,9 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
     phonemizer = info["phonemizer"]
     if lang == "ko" and info.get("japanese"):
         phonemizer = voicebank.KO_TO_JA
+    elif lang == "ko" and not info.get("korean") and "korean" not in str(phonemizer).lower():
+        warnings.append("이 음원은 한글 가사를 부르지 못해요 (KO→JA 변환은 히라가나 별칭이 있는 UTAU 일본어 음원만 돼요). "
+                        "가나로 쓰거나 UTAU 테토를 골라 주세요")
 
     # 숨
     progress(0.6, "숨소리 찾는 중")

@@ -442,6 +442,8 @@ final class Backend {
         var url = base.appendingPathComponent(path)
         if !query.isEmpty, var c = URLComponents(url: url, resolvingAgainstBaseURL: false) {
             c.queryItems = query
+            // URLComponents leaves "+" as is and the server reads it as a space (same as post()).
+            c.percentEncodedQuery = c.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
             url = c.url ?? url
         }
         var req = URLRequest(url: url)

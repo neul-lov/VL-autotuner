@@ -1,5 +1,6 @@
 """엔진 서버: 이 컴퓨터에서 온 요청만 받는지, 잘못된 입력을 알기 쉽게 거절하는지."""
 import json
+import os
 
 import pytest
 from fastapi.testclient import TestClient
@@ -53,6 +54,19 @@ def test_token_required_when_set(client, monkeypatch):
     assert client.get("/api/options").status_code == 403
     assert client.get("/api/options", headers={"X-TetoTune-Token": "wrong"}).status_code == 403
     assert client.get("/api/options", headers={"X-TetoTune-Token": "s3cret"}).status_code == 200
+    assert client.get("/api/options", headers={"X-TetoTune-Token": b"\xe9\xe9"}).status_code == 403
+
+
+def test_unfinished_folders_are_swept(client, tmp_path):
+    import server
+    out = tmp_path / "out"
+    dead, live, mine = out / "a 2026", out / ".work" / "job1", out / "b 2026"
+    for d, pid in ((dead, 999999), (live, os.getppid())):
+        d.mkdir(parents=True)
+        (d / server.INCOMPLETE).write_text(str(pid))
+    mine.mkdir()  # 표시 없는 폴더 (사용자 것)
+    server.sweep_unfinished()
+    assert not dead.exists() and live.exists() and mine.exists()
 
 
 def test_folder_names(client, monkeypatch):

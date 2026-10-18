@@ -180,7 +180,7 @@ struct Sidebar: View {
                 }
                 Spacer(minLength: 0)
                 if model.source != nil {
-                    Button { withAnimation { model.source = nil } } label: {
+                    Button { model.clearSource() } label: {
                         Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
                     }
                     .buttonStyle(.plain)
