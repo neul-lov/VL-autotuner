@@ -18,7 +18,7 @@ from pathlib import Path
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import JSONResponse
 
-from tetotune import __version__, game, pitch, stemmixer, voicebank
+from tetotune import __version__, edit, game, openutau, pitch, refine, retune, stemmixer, voicebank
 from tetotune.tune import Options, tune
 
 # 설정 값마다 허용 범위 (숫자) 또는 고를 수 있는 값 (글자)
@@ -26,7 +26,8 @@ LIMITS = {
     "bpm": (0.0, 400.0), "pitch_follow": (0.0, 1.0), "vibrato": (0.0, 2.0), "correct": (0.0, 1.0),
     "dynamics": (0.0, 2.0), "breathiness": (0.0, 2.0), "tension": (0.0, 2.0), "breath_volume": (0.0, 3.0),
 }
-CHOICES = {"breaths": ("auto", "voicebank", "original", "off"), "pitch_method": ("auto", "harvest", "rmvpe")}
+CHOICES = {"breaths": ("auto", "voicebank", "original", "off"), "pitch_method": ("auto", "harvest", "rmvpe"),
+           "refine": ("auto", "off")}
 MAX_JOBS = 50
 INCOMPLETE = ".incomplete"  # 조교 중인 폴더 표시 (엔진 pid). 끝나면 지우고, 엔진이 중간에 꺼졌으면 다음 실행 때 폴더를 치운다
 
@@ -65,6 +66,7 @@ def status(singer: str = ""):
         "singer": info and {k: info[k] for k in ("name", "path", "kind", "breath_in", "breath_out", "phonemizer")},
         "singers": voicebank.list_singers(),
         "rmvpe": pitch.rmvpe_model_path() is not None,
+        "openutau": openutau.available(),  # 테토로 불러 보고 다듬기 · 미리 듣기를 할 수 있는지
         "stemmixer": stemmixer.library() is not None,
         "output": str(OUTPUT),
     }
@@ -165,8 +167,14 @@ def _run(job_id, vocal, song, lyrics, notes, backing, opts):
                     game.ensure_model(lambda s: job.update(step=s, progress=0.01))
                 except Exception as e:
                     print(f"GAME 모델을 받지 못했어요: {e}", flush=True)
+            polish = opts.refine != "off" and openutau.available()
+            scale = 0.6 if polish else 1.0  # 다듬기가 남은 시간의 대부분
             res = tune(vocal, out, lyrics or "", notes or None, backing or None, opts,
-                       progress=lambda p, s: job.update(step=s, progress=round(p, 3)), title=title)
+                       progress=lambda p, s: job.update(step=s, progress=round(p * scale, 3)), title=title)
+            if polish:
+                w = refine.for_result(out, lambda p, s: job.update(step=s, progress=round(scale + (1 - scale) * p, 3)))
+                if w:
+                    res.warnings.append(w)
             (out / INCOMPLETE).unlink(missing_ok=True)
             job.update(status="done", progress=1.0, step="끝", result=asdict(res))
     except Exception as e:
@@ -202,16 +210,118 @@ def results():
             r = json.loads(p.read_text())
         except (OSError, ValueError):
             continue
-        out.append({"id": p.parent.name, "folder": str(p.parent), "ustx": str(p.parent / "project.ustx"),
+        folder = p.parent
+        teto = folder / (r.get("teto_preview") or "teto_preview.wav")
+        backing = next((f for f in sorted(folder.glob("backing.*"))), None)
+        out.append({"id": folder.name, "folder": str(folder), "ustx": str(folder / "project.ustx"),
                     "notes": r.get("notes"), "breaths": r.get("breaths"), "warnings": r.get("warnings") or [],
-                    "singer": r.get("singer"), "transpose": r.get("transpose"), "created": p.stat().st_mtime})
+                    "singer": r.get("singer"), "transpose": r.get("transpose"), "created": p.stat().st_mtime,
+                    "guide": str(folder / "guide_vocals.wav") if (folder / "guide_vocals.wav").exists() else None,
+                    "teto": str(teto) if teto.is_file() else None, "backing": str(backing) if backing else None})
     out.sort(key=lambda r: -r["created"])
     return out
 
 
 @app.get("/api/results/{name}/preview")
 def preview(name: str):
-    return json.loads((_result_folder(name) / "preview.json").read_text())
+    folder = _result_folder(name)
+    prev = json.loads((folder / "preview.json").read_text())
+    prev["history"] = edit.history_count(folder)
+    try:  # 구간 다시 조교하기 창이 처음 조교한 설정에서 시작하게
+        prev["options"] = json.loads((folder / "report.json").read_text()).get("options")
+    except (OSError, ValueError):
+        pass
+    return prev
+
+
+@app.post("/api/results/{name}/edit")
+def edit_result(name: str, op: str = Form(...), index: int = Form(...), text: str = Form(None), time: float = Form(None)):
+    """음절 옮기기 · 늘여 부르기 · 나누기 · 합치기 · 가사 고치기 → 새 미리 보기."""
+    folder = _result_folder(name)
+    kw = {}
+    if op == "lyric":
+        kw["text"] = text or ""
+    if op == "split" and time is not None:
+        kw["time"] = time
+    with work_lock:
+        try:
+            return edit.apply(folder, op, index, **kw)
+        except edit.EditError as e:
+            raise HTTPException(400, str(e))
+
+
+@app.post("/api/results/{name}/undo")
+def undo_result(name: str):
+    folder = _result_folder(name)
+    with work_lock:
+        try:
+            return edit.undo(folder)
+        except edit.EditError as e:
+            raise HTTPException(400, str(e))
+
+
+@app.post("/api/results/{name}/retune")
+def retune_result(name: str, start: float = Form(...), end: float = Form(...), options: str = Form("{}"),
+                  lyrics: str = Form(None), renote: bool = Form(False)):
+    """고른 구간만 다시 조교 (뒤에서 돌리고 job으로 따라간다). 결과는 새 미리 보기."""
+    folder = _result_folder(name)
+    try:
+        opts = asdict(_options(json.loads(options or "{}")))
+        raw = json.loads(options or "{}")
+        opts = {k: v for k, v in opts.items() if k in raw}  # 앱이 보낸 것만 바꾼다 (나머지는 처음 조교한 설정)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(400, "설정을 읽지 못했어요")
+    if not end > start:
+        raise HTTPException(400, "구간을 다시 골라 주세요")
+    job_id = uuid.uuid4().hex[:12]
+    jobs[job_id] = {"status": "running", "step": "대기 중", "progress": 0.0}
+
+    def run():
+        job = jobs[job_id]
+        try:
+            with work_lock:
+                prev = retune.retune(folder, start, end, opts, lyrics, renote,
+                                     progress=lambda p, s: job.update(step=s, progress=round(p, 3)))
+            prev["history"] = edit.history_count(folder)
+            job.update(status="done", progress=1.0, step="끝", result=prev)
+        except Exception as e:
+            traceback.print_exc()
+            job.update(status="error", error=str(e) if isinstance(e, ValueError) else f"다시 조교하지 못했어요: {e}")
+    threading.Thread(target=run, daemon=True).start()
+    return {"job_id": job_id}
+
+
+@app.post("/api/results/{name}/render")
+def render_result(name: str):
+    """지금 project.ustx를 테토로 다시 불러서 미리 듣기(teto_preview.wav)를 새로 만든다 (고친 뒤에). job으로 따라간다."""
+    folder = _result_folder(name)
+    if not openutau.available():
+        raise HTTPException(400, "OpenUtau를 찾지 못했어요")
+    job_id = uuid.uuid4().hex[:12]
+    jobs[job_id] = {"status": "running", "step": "테토로 불러 보는 중", "progress": 0.1}
+
+    def run():
+        job = jobs[job_id]
+        work = folder / ".render"
+        try:
+            with work_lock:
+                wav = openutau.render(folder / "project.ustx", work)
+                shutil.move(str(wav), folder / "teto_preview.wav")
+                prev_path = folder / "preview.json"
+                prev = json.loads(prev_path.read_text(encoding="utf-8"))
+                prev.pop("teto_stale", None)
+                prev_path.write_text(json.dumps(prev, ensure_ascii=False), encoding="utf-8")
+                prev["history"] = edit.history_count(folder)
+            job.update(status="done", progress=1.0, step="끝", result=prev)
+        except Exception as e:
+            traceback.print_exc()
+            job.update(status="error", error=str(e))
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+    threading.Thread(target=run, daemon=True).start()
+    return {"job_id": job_id}
 
 
 # 결과 지우기는 앱이 직접 휴지통으로 옮긴다 (OpenUtau에서 고친 project.ustx도 되살릴 수 있게)

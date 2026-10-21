@@ -17,6 +17,7 @@ from . import audio
 FILES = ("encoder.onnx", "segmenter.onnx", "estimator.onnx", "bd2dur.onnx")
 STEPS, SEG_THRESHOLD, SEG_RADIUS, EST_THRESHOLD = 8, 0.2, 2, 0.2
 MAX_CHUNK = 20.0
+SEED = 20251021
 
 
 REGISTRY = "https://openutau.github.io/svs-index/registry/v1/softwares/all.json"
@@ -95,6 +96,8 @@ class Game:
         import onnxruntime as ort
 
         self.cfg = json.loads((Path(folder) / "config.json").read_text(encoding="utf-8"))
+        if hasattr(ort, "set_seed"):  # 나누기 모델(D3PM)이 난수를 써서: 같은 노래면 늘 같은 음표가 나오게
+            ort.set_seed(SEED)
         opts = ort.SessionOptions()
         opts.log_severity_level = 3
         self.s = {f[:-5]: ort.InferenceSession(str(Path(folder) / f), opts, providers=["CPUExecutionProvider"])

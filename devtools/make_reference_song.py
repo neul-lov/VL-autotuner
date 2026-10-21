@@ -15,6 +15,7 @@ ap.add_argument("truth")
 ap.add_argument("seed", nargs="?", type=int, default=7)
 ap.add_argument("--teto", action="store_true")
 ap.add_argument("--lyrics", help="한 줄에 한 소절씩 가사를 써 둘 파일")
+ap.add_argument("--korean", action="store_true", help="한글 가사 (받침 있는 음절도), OpenUtau KO to JA 음소기로 부른다 (--teto와 함께)")
 args = ap.parse_args()
 
 random.seed(args.seed)
@@ -30,6 +31,10 @@ if args.teto:
         sys.exit("테토 음원을 찾지 못했어요")
     breath_lyric = info["breath_in"] or info["breath_out"] or "息"
     vowels = list("あいうえおかきくけこさしすせそたてとなにぬねのはひふへほまみむめもらりるれろやゆよわん")
+    if args.korean:  # 받침 없는 음절 반, 받침(ㄴ · ㅁ · ㅇ · ㄹ · ㄱ · ㅂ · ㅅ) 있는 음절 반
+        vowels = list("가나다라마바사아자하고노도로모보소오조호구누두루무부수우주기니리미시이지")
+        vowels += list("사랑한별꿈맘밤눈빛길손강문달봄맘숨곳밖입속날말물")
+phonemizer = "OpenUtau.Plugin.Builtin.KOtoJAPhonemizer" if args.korean else "OpenUtau.Plugin.Builtin.JapanesePresampPhonemizer"
 scale = [48, 50, 52, 53, 55, 57, 59, 60]  # C3 장음계
 if args.teto:
     scale = [t + 12 for t in scale]  # 테토 음역 (C4 장음계)
@@ -62,7 +67,7 @@ for n in notes:
 proj = {"name": "reference", "comment": "", "output_dir": "Vocal", "cache_dir": "UCache", "ustx_version": "0.6", "key": 0,
         "time_signatures": [{"bar_position": 0, "beat_per_bar": 4, "beat_unit": 4}],
         "tempos": [{"position": 0, "bpm": BPM}],
-        "tracks": [{"singer": singer, "phonemizer": "OpenUtau.Plugin.Builtin.JapanesePresampPhonemizer",
+        "tracks": [{"singer": singer, "phonemizer": phonemizer,
                     "renderer_settings": {"renderer": "WORLDLINE-R"}, "track_name": "ref", "track_color": "Red",
                     "mute": False, "solo": False, "volume": 0, "pan": 0}],
         "voice_parts": [{"name": "ref", "comment": "", "track_no": 0, "position": 0, "duration": pos + TICKS,

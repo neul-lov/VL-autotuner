@@ -1,6 +1,7 @@
 name: 조교 정확도 비교
 
 # 조교 방식을 바꿀 때 실제 테토 · 사람 노래로 정확도를 비교해요 (소리는 재생하지 않고 숫자만)
+# 방식이 많아서 몇 개씩 나눠 여러 Mac에서 돌리고, 마지막에 표 하나로 합쳐요.
 on:
   push:
     branches: ["claude/accuracy*"]
@@ -19,24 +20,37 @@ defaults:
 
 jobs:
   compare:
-    name: 방식별 정확도 (테토 정답 노래 · vocadito 사람 노래)
+    name: 정확도 (${{ matrix.only }})
     runs-on: macos-latest
-    timeout-minutes: 120
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {id: 1, only: "새 기본,PR3 기본"}
+          - {id: 2, only: "다듬기 없음"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: "3.12"
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "10.0.x"
       - run: python -m pip install -r requirements.txt -r requirements-extra.txt mir_eval
+      - name: Demucs 설치 (분리한 보컬 만들기용)
+        id: demucs
+        continue-on-error: true
+        run: python -m pip install "torch==2.5.1" "torchaudio==2.5.1" "demucs==4.0.1"
       - name: vocadito 받기 (사람 노래 40곡 + 사람이 표시한 음 높이 · 음표, CC BY 4.0)
         run: |
           url=$(curl -fsSL https://zenodo.org/api/records/5578807 | python -c 'import json,sys; print([f["links"]["self"] for f in json.load(sys.stdin)["files"] if f["key"].endswith(".zip")][0])')
           curl -fL --retry 3 -o vocadito.zip "$url"
           mkdir -p vocadito && unzip -q vocadito.zip -d vocadito && rm -rf vocadito/__MACOSX
-          find vocadito -maxdepth 3 | head -20
+      - name: 분리한 보컬 만들기 (vocadito + 잔향 + 만든 반주 → Demucs, 올리지 않아요)
+        if: steps.demucs.outcome == 'success'
+        continue-on-error: true
+        run: python -W ignore devtools/make_separated.py vocadito out/sep 3,10,14,22
       - name: OpenUtau (Mac) 받기
         env:
           GH_TOKEN: ${{ github.token }}
@@ -45,7 +59,7 @@ jobs:
         run: |
           curl -fL --retry 3 -o teto.zip https://kasaneteto.jp/assets/download/utau/TETO-OUset240323.zip
           python devtools/install_voicebank.py teto.zip
-      - name: 테토 정답 노래 렌더
+      - name: 테토 정답 노래 렌더 (일본어 12곡 · 한글 6곡)
         run: |
           export CSC=$(ls -d "$DOTNET_ROOT"/sdk/*/Roslyn/bincore/csc.dll | tail -1)
           ou="$PWD/OpenUtau.app/Contents/MacOS"
@@ -54,19 +68,45 @@ jobs:
             python devtools/make_reference_song.py "$d/ref.ustx" "$d/truth.json" $seed --teto --lyrics "$d/lyrics.txt" > /dev/null
             devtools/openutau_harness/render.sh "$ou" "$PWD/ourun" "$d/ref.ustx" "$d/ref.wav" > "$d/harness_ref.txt"
           done
+          for seed in 2 4 6 8 10 12; do
+            d="$PWD/out/kref$seed"; mkdir -p "$d"
+            python devtools/make_reference_song.py "$d/ref.ustx" "$d/truth.json" $seed --teto --korean --lyrics "$d/lyrics.txt" > /dev/null
+            devtools/openutau_harness/render.sh "$ou" "$PWD/ourun" "$d/ref.ustx" "$d/ref.wav" > "$d/harness_ref.txt"
+            grep -E "phonemizer=|phoneme_errors" "$d/harness_ref.txt" || true
+          done
       - name: 방식별 비교
         run: |
           export CSC=$(ls -d "$DOTNET_ROOT"/sdk/*/Roslyn/bincore/csc.dll | tail -1)
           set -o pipefail
-          python -W ignore devtools/accuracy.py --refs out/ref* --vocadito vocadito \
-            --render "$PWD/OpenUtau.app/Contents/MacOS" "$PWD/ourun" --render-songs 10,14,3,22 --render-refs 6 | tee out/accuracy.txt
+          python -W ignore devtools/accuracy.py --refs out/ref* --refs-ko out/kref* --vocadito vocadito --separated out/sep \
+            --render "$PWD/OpenUtau.app/Contents/MacOS" "$PWD/ourun" --render-songs 3,10,14,22 --render-refs 4 \
+            --only "${{ matrix.only }}" --json "out/acc_${{ matrix.id }}.json" | tee out/accuracy.txt
           sed -n '/^|/,$p' out/accuracy.txt >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: accuracy
+          name: accuracy-${{ matrix.id }}
           path: |
-            out
-            !out/**/*.wav
-            !out/**/*.flac
+            out/acc_*.json
+            out/accuracy.txt
           retention-days: 14
+
+  merge:
+    name: 방식별 정확도 (합친 표)
+    needs: compare
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: accuracy-*
+          path: res
+          merge-multiple: true
+      - run: |
+          python -W ignore devtools/accuracy.py --merge res/acc_*.json | tee merged.txt
+          cat merged.txt >> "$GITHUB_STEP_SUMMARY"

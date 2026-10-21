@@ -14,13 +14,14 @@ from pathlib import Path
 
 import numpy as np
 
-from . import audio, features, lyrics as lyr, notes as nt, pitch, voicebank
+from . import audio, confidence, features, lyrics as lyr, notes as nt, pitch, voicebank
 from .pitch import HOP
 
 TICKS = 480
 INTERVAL = 5  # OpenUtau 곡선 간격 (틱)
 DYN_WIN = 0.02  # 초. 크기 윤곽을 잡는 최댓값 · 다듬기 창 (길면 크기가 음 시작보다 먼저 커진다)
 DYN_GAIN = 1 / 0.7  # 셈여림 0.7(앱 기본값)에서 원래 보컬 크기 차이를 그대로: 실제 테토 렌더 비교에서 이쪽이 더 닮았다
+LEGATO_GAP = 0.3  # 초. 음표 사이 이보다 짧은 틈은 앞 음표를 늘여 메운다 (자음 · 성대 닫힘에서 소리가 뚝 끊기지 않게). 0 = 끔
 
 
 @dataclass
@@ -36,6 +37,7 @@ class Options:
     breaths: str = "auto"        # auto (음원 숨소리, 없으면 원래 숨) · voicebank · original · off
     breath_volume: float = 1.0
     pitch_method: str = "auto"   # auto (RMVPE 있으면) · harvest · rmvpe
+    refine: str = "auto"         # auto (OpenUtau가 있으면 테토로 불러 보고 곡선을 다듬는다) · off
     singer: str = ""             # 음원 폴더 경로 (비우면 테토를 찾는다)
     default_lyric: str = "ら"
 
@@ -108,6 +110,40 @@ def _base_cents(notes, t):
     return tones[np.minimum(k, len(notes) - 1)]
 
 
+CURVE_RANGE = {"pitd": (-1200, 1200, 1.5), "dyn": (-240, 120, 2), "brec": (-100, 100, 2), "tenc": (-100, 100, 2)}
+
+
+def make_curves(t, vals, bpm, span):
+    """프레임 곡선 {이름: 값} → ustx 곡선 (INTERVAL 틱마다, 선 위의 점은 지운다)."""
+    tps = bpm / 60 * TICKS  # 초당 틱
+    xs = np.arange(int(span[0] * tps) // INTERVAL * INTERVAL, int(span[1] * tps) + INTERVAL, INTERVAL)
+    sec = xs / tps
+    out = []
+    for abbr, v in vals.items():
+        lo, hi, tol = CURVE_RANGE[abbr]
+        ys = np.clip(np.round(np.interp(sec, t, v)), lo, hi).astype(int)
+        cx, cy = _simplify(list(xs), list(ys), tol)
+        out.append({"xs": cx, "ys": cy, "abbr": abbr})
+    return out
+
+
+def _legato(notes, breaths, db, sing_db, max_gap=None, silent=0.1):
+    """음표 사이 짧은 틈(LEGATO_GAP 안)을 앞 음표를 늘여 메운다: 사람은 자음(ㅅ · ㅎ · ㄱ …)을 지나며 이어 부르는데
+    틈이 있으면 OpenUtau가 그 사이를 쉼으로 보고 소리를 끊었다가 새로 시작해서 뚝뚝 끊긴다.
+    숨 쉰 틈, 노래보다 35dB 넘게 작은 곳이 silent초 넘게 이어지는 틈(진짜 쉼)은 그대로."""
+    max_gap = LEGATO_GAP if max_gap is None else max_gap
+    spans = [(b.start, b.end) if isinstance(b, nt.Note) else (b[0], b[1]) for b in breaths]
+    for a, b in zip(notes, notes[1:]):
+        gap = b.start - a.end
+        if gap <= 0 or gap > max_gap or any(s < b.start and e > a.end for s, e in spans):
+            continue
+        quiet = db[int(a.end / HOP):int(b.start / HOP) + 1] < sing_db - 35
+        if max((e - s for s, e in pitch._runs(quiet)), default=0) * HOP >= silent:
+            continue
+        a.end = b.start
+    return notes
+
+
 def _note_mask(notes, n, lead=0.0, tail=0.0):
     m = np.zeros(n, dtype=bool)
     for x in notes:
@@ -117,7 +153,9 @@ def _note_mask(notes, n, lead=0.0, tail=0.0):
 
 # ---------------------------------------------------------------- 본체
 def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=None, progress=lambda p, s: None,
-         title=None):
+         title=None, context=None):
+    """context: 곡의 한 구간만 다시 조교할 때 곡 전체의 기준 (report.json의 "context"): 크기 · 숨 섞임 · 힘의 기준값.
+    없으면 이 보컬에서 잰다."""
     o = options or Options()
     warnings = []
     out = Path(out_dir)
@@ -243,6 +281,9 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
             breath_notes.append(nt.Note(a2, b2, tone, alias))
             breath_notes[-1].strength = vol  # vol을 잠깐 여기에 둔다
 
+    if LEGATO_GAP > 0:
+        _legato(notes, breath_notes if mode == "voicebank" else breaths, db, float(np.median(db[voiced])))
+
     # 곡선
     progress(0.7, "곡선 만드는 중")
     t = np.arange(n) * HOP
@@ -263,7 +304,8 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
     pitd = o.pitch_follow * (lp * (1 - o.correct * steady) + o.vibrato * fine)
 
     near = _smooth(_note_mask(notes, n, 0.1, 0.06).astype(float), 0.04)
-    ref = float(np.median(db[voiced]))
+    ctx = dict(context or {})
+    ref = float(ctx.get("ref_db", np.median(db[voiced])))
     # 크기는 겉 윤곽만 (DYN_WIN 최댓값): 음절 사이 자음에서 잠깐 꺼지는 건 음원 자음이 이미 갖고 있다
     from scipy.ndimage import maximum_filter1d
     env = _smooth(maximum_filter1d(_interp_gaps(db, sing_mask), int(DYN_WIN / HOP)), DYN_WIN)
@@ -271,34 +313,35 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
     rel = np.where(rel < -6, -6 + (rel + 6) * 0.5, rel)  # 아주 작은 곳은 반만: 음원 소리가 묻히지 않게
     dyn = np.clip(rel * 10 * o.dynamics * DYN_GAIN, -120, 60) * near
 
-    def zcurve(raw, scale, lo, hi):
+    stats = {}
+
+    def zcurve(name, raw, scale, lo, hi):
         v = raw[sing_mask & np.isfinite(raw)]
-        if len(v) < 10:
+        if name in ctx:
+            q1, q2, q3 = ctx[name]
+        elif len(v) < 10:
             return np.zeros(n)
-        q1, q2, q3 = np.percentile(v, [25, 50, 75])
+        else:
+            q1, q2, q3 = (float(q) for q in np.percentile(v, [25, 50, 75]))
+        stats[name] = [q1, q2, q3]
         z = (raw - q2) / max(1e-6, (q3 - q1) / 1.35)
         z = _interp_gaps(np.where(np.isfinite(z), z, np.nan), sing_mask)
         return np.clip(_smooth(z, 0.06) * scale, lo, hi) * near
 
-    brec = zcurve(feats["breathiness"], 30 * o.breathiness, -50, 70)
-    tenc = zcurve(feats["tension"], 25 * o.tension, -50, 50)
+    brec = zcurve("brec_q", feats["breathiness"], 30 * o.breathiness, -50, 70)
+    tenc = zcurve("tenc_q", feats["tension"], 25 * o.tension, -50, 50)
 
-    tps = bpm / 60 * TICKS  # 초당 틱
-    first = max(0.0, all_notes[0].start - 0.5)
-    last = all_notes[-1].end + 0.3
-    xs = np.arange(int(first * tps) // INTERVAL * INTERVAL, int(last * tps) + INTERVAL, INTERVAL)
-    sec = xs / tps
-
-    def curve(abbr, vals, lo, hi, tol):
-        ys = np.clip(np.round(np.interp(sec, t, vals)), lo, hi).astype(int)
-        cx, cy = _simplify(list(xs), list(ys), tol)
-        return {"xs": cx, "ys": cy, "abbr": abbr}
-
-    curves = [curve("pitd", pitd, -1200, 1200, 1.5), curve("dyn", dyn, -240, 120, 2)]
+    span = (max(0.0, all_notes[0].start - 0.5), all_notes[-1].end + 0.3)
+    vals = {"pitd": pitd, "dyn": dyn}
     if o.breathiness > 0:
-        curves.append(curve("brec", brec, -100, 100, 2))
+        vals["brec"] = brec
     if o.tension > 0:
-        curves.append(curve("tenc", tenc, -100, 100, 2))
+        vals["tenc"] = tenc
+    curves = make_curves(t, vals, bpm, span)
+    # 렌더해서 고치기(refine.py)가 쓰는 프레임 곡선: 원래 음높이(+조옮김) · 음표 계단 · 크기 목표
+    np.savez_compressed(out / "curves.npz", hop=HOP, bpm=bpm, span=np.array(span), base=base, target=target,
+                        sing=sing_mask, voiced=voiced, rel=np.clip(rel * o.dynamics * DYN_GAIN, -12, 6), near=near,
+                        **{k: v for k, v in vals.items()})
 
     # 파일
     progress(0.85, "OpenUtau 프로젝트 쓰는 중")
@@ -326,12 +369,15 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
         "duration": len(y) / sr,
         "phrases": len(nt._phrases([x for x in notes])),
         "offset": round(nt.tuning_offset(midi, voiced), 3),
+        "flags": confidence.merge(confidence.note_flags(notes, midi, voiced, shift)),
     }
     (out / "preview.json").write_text(json.dumps(preview, ensure_ascii=False), encoding="utf-8")
     res = Result(str(out), str(out / "project.ustx"), len(notes),
                  len(breath_notes) if mode == "voicebank" else (len(breaths) if mode == "original" else 0),
                  shift, bpm, info.get("name"), phonemizer, used, warnings)
-    (out / "report.json").write_text(json.dumps({**asdict(res), "options": asdict(o)}, ensure_ascii=False, indent=1),
+    extra = {"options": asdict(o), "context": {"ref_db": ref, **stats}, "breath_aliases": [a for a in (alias_in, alias_out) if a],
+             "lyrics": lyrics_text}
+    (out / "report.json").write_text(json.dumps({**asdict(res), **extra}, ensure_ascii=False, indent=1),
                                      encoding="utf-8")
     progress(1.0, "끝")
     return res
