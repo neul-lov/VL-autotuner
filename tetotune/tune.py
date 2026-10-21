@@ -378,7 +378,7 @@ def _write_ustx(path, name, bpm, notes, breath_ids, curves, waves, singer, phone
         wave_parts.append({"name": track_name, "comment": "", "track_no": i, "position": 0,
                            "relative_path": file, "file_duration_ms": float(ms), "skip_ms": 0.0, "trim_ms": 0.0})
     project = {
-        "name": name, "comment": "TetoTune 자동 조교. 1마디 첫 박 = 원래 보컬 0초",
+        "name": name, "comment": "AutoTuner 자동 조교. 1마디 첫 박 = 원래 보컬 0초",
         "output_dir": "Vocal", "cache_dir": "UCache", "ustx_version": "0.6", "key": 0,
         "time_signatures": [{"bar_position": 0, "beat_per_bar": 4, "beat_unit": 4}],
         "tempos": [{"position": 0, "bpm": float(round(bpm, 3))}],

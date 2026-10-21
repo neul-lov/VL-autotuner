@@ -1,4 +1,4 @@
-# TetoTune: 테토 자동 조교
+# AutoTuner: 테토 자동 조교
 
 원래 보컬(사람이 부른 노래)과 가사를 넣으면, 보컬의 음 높이 · 꺾기 · 비브라토 · 셈여림 · 숨 섞인 소리 · 힘 준 소리 · 숨 쉬는 자리를
 읽어서 **OpenUtau의 카사네 테토가 그대로 따라 부르는 프로젝트(.ustx)** 를 만들어 주는 Mac 앱이에요. 모든 처리는 내 컴퓨터에서 돌아가요.
@@ -7,14 +7,14 @@
 1. OpenUtau(Mac)와 테토 음원을 설치해 둬요. 음원이 OpenUtau 가수 폴더(`~/Library/OpenUtau/Singers`)에 있으면 저절로 찾아요
    (테토 음원이 여럿이면 기본 목소리를 먼저 골라요. 다른 음원은 앱 오른쪽 위 ⋯ 메뉴에서).
 2. 앱 받기 (둘 중 하나)
-   - **빌드된 앱**: 저장소의 Actions → 최근 빌드 → `TetoTune-mac` 을 받아 풀고 `TetoTune.app` 을 응용 프로그램 폴더로 옮겨요.
+   - **빌드된 앱**: 저장소의 Actions → 최근 빌드 → `AutoTuner-mac` 을 받아 풀고 `AutoTuner.app` 을 응용 프로그램 폴더로 옮겨요.
      Apple Silicon · 인텔 Mac 모두 돼요 (macOS 14 Sonoma 이상).
      인터넷에서 받은 서명 없는 앱이라 처음 한 번은 막혀요. 시스템 설정 → 개인정보 보호 및 보안 → "그래도 열기"를 누르거나,
-     터미널에서 `xattr -dr com.apple.quarantine /Applications/TetoTune.app` 를 실행해요.
-   - **직접 빌드**: 이 폴더의 `start-mac.command` 를 더블클릭하면 `.venv` 를 만들고 `/Applications/TetoTune.app` 도 만들어요
+     터미널에서 `xattr -dr com.apple.quarantine /Applications/AutoTuner.app` 를 실행해요.
+   - **직접 빌드**: 이 폴더의 `start-mac.command` 를 더블클릭하면 `.venv` 를 만들고 `/Applications/AutoTuner.app` 도 만들어요
      (Xcode 또는 Command Line Tools 필요). 앱만 다시 만들려면 `mac/build.sh --install`.
-3. TetoTune을 열면 조교 엔진(`server.py`)이 같이 켜지고, 앱을 끄면 같이 꺼져요.
-   - 빌드된 앱은 엔진을 앱 안에 갖고 있고, 처음 켤 때 한 번 필요한 Python 패키지를 `~/Library/Application Support/TetoTune` 에 설치해요
+3. AutoTuner을 열면 조교 엔진(`server.py`)이 같이 켜지고, 앱을 끄면 같이 꺼져요.
+   - 빌드된 앱은 엔진을 앱 안에 갖고 있고, 처음 켤 때 한 번 필요한 Python 패키지를 `~/Library/Application Support/AutoTuner` 에 설치해요
      (인터넷 필요, 몇 분). Python 3.9 이상이 없으면 앱이 Apple 개발자 도구 설치를 안내해요.
    - 직접 빌드한 앱은 이 폴더의 `server.py` 와 `.venv` 를 쓰니, 폴더를 옮기면 `mac/build.sh --install` 을 다시 실행해요.
 
@@ -28,7 +28,7 @@
 - **자동 조교 시작**(⌘⏎) → 끝나면 오른쪽에 미리보기(원래 음 높이 파랑 · 테토 음 높이 빨강 · 음표 · 숨)가 나오고, "OpenUtau에서 열기"로 바로 열어요.
   OpenUtau는 켜질 때만 프로젝트를 받아서, 이미 켜져 있으면 Finder에서 파일을 보여 줘요 (OpenUtau의 파일 → 열기로 열어요).
 - 가사는 보컬마다 따로 기억해요. StemMixer 곡에 가사가 있으면 가사 칸을 비워 둘 때 그 가사를 써요.
-- 결과는 `~/Music/TetoTune/<곡 이름 날짜>/` 에 저장돼요.
+- 결과는 `~/Music/AutoTuner/<곡 이름 날짜>/` 에 저장돼요.
   - `project.ustx`: 테토 트랙, 원래 보컬 트랙(**음소거**, 비교용), 반주(있으면), 숨소리 트랙(음원에 숨소리가 없을 때)
   - `guide_vocals.wav`, `preview.json`, `report.json`
   - 앱에서 결과를 지우면 휴지통으로 옮겨서 되살릴 수 있어요.
@@ -98,7 +98,7 @@ OpenUtau에서 사람이 "조교"할 때 만지는 것과, 이 앱이 각각을 
 - 음표 파일 없이 보컬만 주면 빠른 멜리스마는 음표가 합쳐질 수 있어요 (음 높이 선은 그대로 따라가요).
 
 ## 크레딧 · 라이선스
-- TetoTune은 개인이 만든 **비공식** 도구예요. 카사네 테토(重音テト)와 그 음원의 권리자와는 관계가 없어요.
+- AutoTuner은 개인이 만든 **비공식** 도구예요. 카사네 테토(重音テト)와 그 음원의 권리자와는 관계가 없어요.
   - 重音テト音声ライブラリー © 小山乃舞世 (https://kasaneteto.jp/utau/).
     음원은 이 저장소 · 앱에 들어 있지 않으니, 공식 사이트에서 받고 [이용 약관](https://kasaneteto.jp/guidelines/voice.html)을 따라 주세요.
   - CI 시험에 쓰는 OpenUtau용 통합 음원(TETO-OUset240323)은 まいこ 님이 정리해 공식 사이트에서 배포하는 것이에요.
