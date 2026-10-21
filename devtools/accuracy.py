@@ -29,27 +29,19 @@ from tetotune.tune import Options, tune  # noqa: E402
 
 
 class Cfg:
-    refine = 0  # 렌더해서 고치기 횟수 (0 = 안 함). 방식마다 (Cfg, "refine", 2)로
+    refine = refine_mod.ROUNDS  # 렌더해서 고치기 횟수 (앱 기본처럼). 0 = 안 함
 
 
 def variants():
     """이름 → [(모듈, 이름, 값)]. 첫 번째가 지금 기본값. (None, 옵션 이름, 값)은 조교 설정을 바꾼다."""
-    pr3 = [(tune_mod, "LEGATO_GAP", 0.0)]
-    old = pr3 + [(notes, "VOWEL_ONSET", False), (notes, "USE_GAME", False), (tune_mod, "DYN_WIN", 0.08),
-                 (tune_mod, "DYN_GAIN", 1.0)]
+    pr3 = [(tune_mod, "LEGATO_GAP", 0.0), (Cfg, "refine", 0)]  # main (PR #3)
     return {
         "새 기본": [],
+        "튐 막기 150": [(tune_mod, "GLITCH_CENTS", 150.0)],
+        "튐 막기 100": [(tune_mod, "GLITCH_CENTS", 100.0)],
+        "튐 막기 150 + 끝 처짐 제한": [(tune_mod, "GLITCH_CENTS", 150.0), (tune_mod, "FALL_LIMIT", 150.0)],
+        "다듬기 없음": [(Cfg, "refine", 0)],
         "PR3 기본": pr3,
-        "예전 기본": old,
-        "떨림 거르기 12Hz": [(tune_mod, "FINE_HZ", 12.0)],
-        "떨림 거르기 8Hz": [(tune_mod, "FINE_HZ", 8.0)],
-        "끝 처짐 제한": [(tune_mod, "FALL_LIMIT", 150.0)],
-        "크기 바닥": [(tune_mod, "DYN_FLOOR", -60.0)],
-        "크기 창 45ms": [(tune_mod, "DYN_WIN", 0.045)],
-        "RMVPE": [(None, "pitch_method", "rmvpe")],
-        "렌더 고치기": [(Cfg, "refine", 2)],
-        "렌더 고치기 (크기만)": [(Cfg, "refine", 2), (refine_mod, "PITCH_GAIN", 0.0)],
-        "렌더 고치기 3번": [(Cfg, "refine", 3)],
     }
 
 
