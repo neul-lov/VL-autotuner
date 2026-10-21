@@ -1,0 +1,40 @@
+name: 분리한 보컬 음높이 비교
+
+# 분리한 보컬에서 음높이를 짧게 잘못 읽는 곳을 줄이는 방법을 렌더 없이 빠르게 비교해요 (소리는 재생하지 않고 숫자만).
+# vocadito 사람 노래에 잔향 · 만든 반주를 섞고 Demucs로 다시 분리한 보컬을 쓰고, 그 오디오는 올리지 않아요.
+on:
+  push:
+    branches: ["claude/f0*"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  f0:
+    name: 음높이 읽기 방법 비교
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements.txt "torch==2.5.1" "torchaudio==2.5.1" "demucs==4.0.1"
+      - name: vocadito 받기 (사람 노래 40곡 + 사람이 표시한 음 높이 · 음표, CC BY 4.0)
+        run: |
+          url=$(curl -fsSL https://zenodo.org/api/records/5578807 | python -c 'import json,sys; print([f["links"]["self"] for f in json.load(sys.stdin)["files"] if f["key"].endswith(".zip")][0])')
+          curl -fL --retry 3 -o vocadito.zip "$url"
+          mkdir -p vocadito && unzip -q vocadito.zip -d vocadito && rm -rf vocadito/__MACOSX
+      - name: 분리한 보컬 만들기 (40곡, 올리지 않아요)
+        run: python -W ignore devtools/make_separated.py vocadito out/sep "$(seq -s, 1 40)"
+      - name: 방법별 비교
+        run: python -W ignore devtools/f0_robust.py vocadito out/sep | tee out/f0.txt && grep -A100 "^| 방법" out/f0.txt >> "$GITHUB_STEP_SUMMARY"
