@@ -13,8 +13,8 @@
      터미널에서 `xattr -dr com.apple.quarantine /Applications/AutoTuner.app` 를 실행해요.
    - **직접 빌드**: 이 폴더의 `start-mac.command` 를 더블클릭하면 `.venv` 를 만들고 `/Applications/AutoTuner.app` 도 만들어요
      (Xcode 또는 Command Line Tools 필요). 앱만 다시 만들려면 `mac/build.sh --install`.
-3. AutoTuner을 열면 조교 엔진(`server.py`)이 같이 켜지고, 앱을 끄면 같이 꺼져요.
-   - 빌드된 앱은 엔진을 앱 안에 갖고 있고, 처음 켤 때 한 번 필요한 Python 패키지를 `~/Library/Application Support/AutoTuner` 에 설치해요
+3. AutoTuner를 열면 조교 엔진(`server.py`)이 같이 켜지고, 앱을 끄면 같이 꺼져요.
+   - 빌드된 앱은 엔진을 앱 안에 갖고 있고, 처음 켤 때 한 번 필요한 Python 패키지를 `~/Library/Application Support/TetoTune` 에 설치해요
      (인터넷 필요, 몇 분). Python 3.9 이상이 없으면 앱이 Apple 개발자 도구 설치를 안내해요.
    - 직접 빌드한 앱은 이 폴더의 `server.py` 와 `.venv` 를 쓰니, 폴더를 옮기면 `mac/build.sh --install` 을 다시 실행해요.
 
@@ -98,7 +98,7 @@ OpenUtau에서 사람이 "조교"할 때 만지는 것과, 이 앱이 각각을 
 - 음표 파일 없이 보컬만 주면 빠른 멜리스마는 음표가 합쳐질 수 있어요 (음 높이 선은 그대로 따라가요).
 
 ## 크레딧 · 라이선스
-- AutoTuner은 개인이 만든 **비공식** 도구예요. 카사네 테토(重音テト)와 그 음원의 권리자와는 관계가 없어요.
+- AutoTuner는 개인이 만든 **비공식** 도구예요. 카사네 테토(重音テト)와 그 음원의 권리자와는 관계가 없어요.
   - 重音テト音声ライブラリー © 小山乃舞世 (https://kasaneteto.jp/utau/).
     음원은 이 저장소 · 앱에 들어 있지 않으니, 공식 사이트에서 받고 [이용 약관](https://kasaneteto.jp/guidelines/voice.html)을 따라 주세요.
   - CI 시험에 쓰는 OpenUtau용 통합 음원(TETO-OUset240323)은 まいこ 님이 정리해 공식 사이트에서 배포하는 것이에요.
