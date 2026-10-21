@@ -22,8 +22,8 @@ INTERVAL = 5  # OpenUtau 곡선 간격 (틱)
 DYN_WIN = 0.02  # 초. 크기 윤곽을 잡는 최댓값 · 다듬기 창 (길면 크기가 음 시작보다 먼저 커진다)
 DYN_GAIN = 1 / 0.7  # 셈여림 0.7(앱 기본값)에서 원래 보컬 크기 차이를 그대로: 실제 테토 렌더 비교에서 이쪽이 더 닮았다
 LEGATO_GAP = 0.3  # 초. 음표 사이 이보다 짧은 틈은 앞 음표를 늘여 메운다 (자음 · 성대 닫힘에서 소리가 뚝 끊기지 않게). 0 = 끔
-OCTAVE_FIX = False  # 음표에서 한 옥타브쯤 잘못 읽은 음 높이를 접는다 (_fold_octaves)
-GAP_NOTE = 0.0  # 초. 음표 안 빈 곳이 이보다 길면 가운데는 음표 음으로 (_fill_gaps). 0 = 앞뒤를 바로 잇기만
+OCTAVE_FIX = True  # 음표에서도 앞뒤 음 높이에서도 한 옥타브쯤 떨어지게 읽은 조각을 접는다 (_fold_octaves)
+GAP_NOTE = 0.05  # 초. 음표 안 빈 곳이 이보다 길면 가운데는 음표 음으로 (_fill_gaps). 0 = 앞뒤를 바로 잇기만
 
 
 @dataclass
@@ -168,24 +168,43 @@ def _pitd(target, base, notes, o):
     return o.pitch_follow * (lp * (1 - o.correct * steady) + o.vibrato * fine)
 
 
-def _fold_octaves(target, mask, notes):
-    """음표 안에서 그 음표 · 앞뒤 음표 어느 것과도 멀고 음표에서 한 옥타브쯤 떨어진 음 높이는 옥타브를 접는다.
-    분리한 보컬은 반주 · 잔향 때문에 Harvest가 0.1~0.2초씩 한 옥타브 아래 · 위를 읽을 때가 있다
-    (pitch.clean의 150ms 중앙값보다 길어서 거기서는 못 접는다)."""
+def _fold_octaves(target, mask, notes, ctx=1.0):
+    """한 옥타브쯤 잘못 읽은 조각을 접는다. 분리한 보컬은 반주 · 잔향 때문에 Harvest가 0.1~0.8초씩 한 옥타브 아래 · 위를
+    읽을 때가 있다 (pitch.clean의 150ms 중앙값보다 길어서 거기서는 못 접는다).
+    두 쪽이 다 그렇다고 할 때만 접는다: (1) 그 음표(GAME)에서 한 옥타브(±2반음) 떨어져 있고 앞뒤 음표와도 멀다,
+    (2) 앞뒤 ctx초에 읽은 음 높이(그 조각 빼고)의 중앙값에 접은 쪽이 6반음 넘게 더 가깝다.
+    음표가 틀린 곳(GAME이 옥타브를 틀림)에서 맞게 읽은 음을 접어 버리지 않게 (2)가 막는다."""
     out = target.copy()
     n = len(out)
+    ok = mask & np.isfinite(out)
+    cand = np.zeros(n, dtype=bool)
+    kk = np.zeros(n)
     for i, x in enumerate(notes):
         a, b = max(0, int(x.start / HOP)), min(n, int(x.end / HOP))
         if b <= a:
             continue
         tones = [x.tone] + [notes[j].tone for j in (i - 1, i + 1) if 0 <= j < len(notes)
                             and abs((notes[j].start if j > i else notes[j].end) - (x.end if j > i else x.start)) < 0.3]
-        seg, m = out[a:b], mask[a:b] & np.isfinite(out[a:b])
+        seg = np.nan_to_num(out[a:b])
         d = seg - x.tone * 100
         k = np.round(d / 1200)
         near = np.min([np.abs(seg - t * 100) for t in tones], axis=0)
-        fold = m & (k != 0) & (near > 600) & (np.abs(d - 1200 * k) < 400)
-        seg[fold] -= 1200 * k[fold]
+        c = ok[a:b] & (k != 0) & (near > 900) & (np.abs(d - 1200 * k) < 200)
+        cand[a:b] |= c
+        kk[a:b] = np.where(c, k, kk[a:b])
+    w = int(ctx / HOP)
+    for a, b in pitch._runs(cand):
+        if b - a < 6:
+            continue
+        lo, hi = max(0, a - w), min(n, b + w)
+        around = ok[lo:hi] & ~cand[lo:hi]
+        if around.sum() < 20:
+            continue
+        ref = float(np.median(out[lo:hi][around]))
+        seg = out[a:b]
+        k = float(np.median(kk[a:b]))
+        if abs(float(np.median(seg)) - 1200 * k - ref) < abs(float(np.median(seg)) - ref) - 600:
+            out[a:b] = seg - 1200 * k
     return out
 
 
