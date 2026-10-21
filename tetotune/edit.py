@@ -242,8 +242,9 @@ def undo(folder):
     return refresh_preview(folder)
 
 
-def refresh_preview(folder, p=None, touched=None):
-    """project.ustx의 음표로 미리 보기 음표를 다시 쓴다. touched(초 구간)에 걸친 가사 표시는 지운다 (사용자가 확인했으니)."""
+def refresh_preview(folder, p=None, touched=None, stale=True):
+    """project.ustx의 음표로 미리 보기 음표를 다시 쓴다. touched(초 구간)에 걸친 가사 표시는 지운다 (사용자가 확인했으니).
+    stale: 테토 미리 듣기(teto_preview.wav)가 지금 음표와 달라졌다 (앱이 "다시 불러 보기"를 보여 준다)."""
     folder = Path(folder)
     p = p or Project(folder)
     prev_path = folder / "preview.json"
@@ -253,6 +254,8 @@ def refresh_preview(folder, p=None, touched=None):
     if touched:
         a, b = touched
         prev["flags"] = [f for f in prev.get("flags", []) if not (f[3] == "lyric" and f[0] < b and f[1] > a)]
+    if stale and (folder / "teto_preview.wav").exists():
+        prev["teto_stale"] = True
     prev_path.write_text(json.dumps(prev, ensure_ascii=False), encoding="utf-8")
     prev["history"] = history_count(folder)
     return prev

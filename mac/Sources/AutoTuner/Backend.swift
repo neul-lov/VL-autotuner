@@ -19,9 +19,11 @@ struct TuneOptions: Codable, Equatable {
     /// Voicebank folder; empty = find Teto.
     var singer: String = ""
     var defaultLyric: String = "ら"
+    /// "auto": after tuning, sing it with Teto in OpenUtau and fix the places that come out off (needs OpenUtau); "off".
+    var refine: String = "auto"
 
     enum CodingKeys: String, CodingKey {
-        case bpm, transpose, vibrato, correct, dynamics, breathiness, tension, breaths, singer
+        case bpm, transpose, vibrato, correct, dynamics, breathiness, tension, breaths, singer, refine
         case pitchFollow = "pitch_follow"
         case breathVolume = "breath_volume"
         case pitchMethod = "pitch_method"
@@ -47,6 +49,7 @@ struct TuneOptions: Codable, Equatable {
         pitchMethod = (try? c.decode(String.self, forKey: .pitchMethod)) ?? d.pitchMethod
         singer = (try? c.decode(String.self, forKey: .singer)) ?? d.singer
         defaultLyric = (try? c.decode(String.self, forKey: .defaultLyric)) ?? d.defaultLyric
+        refine = (try? c.decode(String.self, forKey: .refine)) ?? d.refine
     }
 }
 
@@ -73,6 +76,8 @@ struct ServerStatus: Decodable, Equatable {
     let rmvpe: Bool
     let stemmixer: Bool
     let output: String
+    /// OpenUtau and the render tool are there: results can be sung with Teto (polish + preview listening).
+    let openutau: Bool?
 }
 
 /// A song split in StemMixer.
@@ -118,6 +123,10 @@ struct ResultItem: Decodable, Identifiable, Equatable {
     let singer: String?
     let transpose: Int?
     let created: Double
+    /// Files for listening in the app: the original vocal, Teto singing the result, the backing.
+    let guide: String?
+    let teto: String?
+    let backing: String?
 
     /// The folder name is "<title> YYYY-MM-DD HHMMSS".
     var title: String {
@@ -148,8 +157,47 @@ struct Preview: Decodable, Equatable {
     let breaths: [[Double]]
     let duration: Double
     let phrases: Int
+    /// Places that may be wrong (marked on the timeline).
+    let flags: [Flag]?
+    /// How many edits can be undone.
+    let history: Int?
+    /// After a section re-tune: the section that changed.
+    let range: [Double]?
+    let warning: String?
+    /// The settings the result was tuned with (the re-tune sheet starts from them).
+    let options: TuneOptions?
+    /// Edited since Teto last sang it: the Teto preview is the old one.
+    let teto_stale: Bool?
+
+    /// [start, end, level (1 check · 2 likely wrong), kind (pitch · lyric · render), reason]
+    struct Flag: Decodable, Equatable, Hashable {
+        let start: Double, end: Double, level: Int, kind: String, reason: String
+        init(from decoder: Decoder) throws {
+            var c = try decoder.unkeyedContainer()
+            start = try c.decode(Double.self); end = try c.decode(Double.self)
+            level = try c.decode(Int.self); kind = try c.decode(String.self)
+            reason = (try? c.decode(String.self)) ?? ""
+        }
+        var kindTitle: String {
+            switch kind {
+            case "lyric": "가사"
+            case "render": "테토 소리"
+            default: "음 높이"
+            }
+        }
+    }
 
     var step: Double { hop * 2 }
+    var marks: [Flag] { flags ?? [] }
+}
+
+/// A section re-tune or a re-render running in the engine; its result is the new preview.
+struct PreviewJob: Decodable {
+    let status: String
+    let step: String?
+    let progress: Double?
+    let result: Preview?
+    let error: String?
 }
 
 /// Runs the Python engine (server.py) in the background and talks to it over HTTP.
@@ -486,6 +534,42 @@ final class Backend {
 
     func preview(_ resultID: String) async throws -> Preview {
         try await get("api/results/\(resultID)/preview", as: Preview.self)
+    }
+
+    func previewJob(_ id: String) async throws -> PreviewJob { try await get("api/jobs/\(id)", as: PreviewJob.self) }
+
+    /// Changes notes or lyrics of a result (see tetotune/edit.py). `index` = the note's place in `Preview.notes`.
+    func edit(_ resultID: String, op: String, index: Int, text: String? = nil, time: Double? = nil) async throws -> Preview {
+        var items = [URLQueryItem(name: "op", value: op), URLQueryItem(name: "index", value: "\(index)")]
+        if let text { items.append(URLQueryItem(name: "text", value: text)) }
+        if let time { items.append(URLQueryItem(name: "time", value: "\(time)")) }
+        return try JSONDecoder().decode(Preview.self, from: try await post("api/results/\(resultID)/edit", items))
+    }
+
+    func undo(_ resultID: String) async throws -> Preview {
+        try JSONDecoder().decode(Preview.self, from: try await post("api/results/\(resultID)/undo", []))
+    }
+
+    /// Tunes one section again. `options`: only the settings to change. Returns the job id.
+    func startRetune(_ resultID: String, start: Double, end: Double, options: [String: Double], lyrics: String?,
+                     renote: Bool) async throws -> String {
+        let json = String(data: try JSONSerialization.data(withJSONObject: options), encoding: .utf8) ?? "{}"
+        var items = [URLQueryItem(name: "start", value: "\(start)"), URLQueryItem(name: "end", value: "\(end)"),
+                     URLQueryItem(name: "options", value: json), URLQueryItem(name: "renote", value: renote ? "true" : "false")]
+        if let lyrics { items.append(URLQueryItem(name: "lyrics", value: lyrics)) }
+        return try jobID(try await post("api/results/\(resultID)/retune", items))
+    }
+
+    /// Sings the current project with Teto again (after edits), for the preview. Returns the job id.
+    func startRender(_ resultID: String) async throws -> String {
+        try jobID(try await post("api/results/\(resultID)/render", []))
+    }
+
+    private func jobID(_ data: Data) throws -> String {
+        guard let id = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["job_id"] as? String else {
+            throw BackendError(message: "요청이 실패했어요")
+        }
+        return id
     }
 
     /// Starts tuning a vocal file or a StemMixer song. Returns the job id.

@@ -183,7 +183,8 @@ def retune(folder, start, end, options=None, lyrics_text=None, renote=False, pro
                 cur[c["abbr"]] = {"abbr": c["abbr"], "xs": [], "ys": []}
                 part.setdefault("curves", []).append(cur[c["abbr"]])
             _splice_curve(cur[c["abbr"]], c, lo, hi)
-        if (out / "teto_preview.wav").exists() and (folder / "teto_preview.wav").exists():
+        spliced = (out / "teto_preview.wav").exists() and (folder / "teto_preview.wav").exists()
+        if spliced:
             _splice_wav(folder / "teto_preview.wav", out / "teto_preview.wav", a - EDGE, b + EDGE, off)
         edit.snapshot(folder)
         p.save()
@@ -196,7 +197,7 @@ def retune(folder, start, end, options=None, lyrics_text=None, renote=False, pro
     prev["flags"] = sorted([f for f in prev.get("flags", []) if not (f[0] < b and f[1] > a)] +
                            [f for f in moved if f[0] < b + EDGE and f[1] > a - EDGE], key=lambda f: f[0])
     prev_path.write_text(json.dumps(prev, ensure_ascii=False), encoding="utf-8")
-    prev = edit.refresh_preview(folder)
+    prev = edit.refresh_preview(folder, stale=not spliced)
     prev["range"] = [round(a, 3), round(b, 3)]
     if warning:
         prev["warning"] = warning
