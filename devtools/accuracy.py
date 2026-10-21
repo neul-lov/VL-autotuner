@@ -12,6 +12,7 @@ import argparse
 import csv
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -22,27 +23,36 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tetotune import features, game, notes, pitch  # noqa: E402
+from tetotune import refine as refine_mod  # noqa: E402
 from tetotune import tune as tune_mod  # noqa: E402
 from tetotune.tune import Options, tune  # noqa: E402
 
 
+class Cfg:
+    refine = 0  # 렌더해서 고치기 횟수 (0 = 안 함). 방식마다 (Cfg, "refine", 2)로
+
+
 def variants():
-    """이름 → [(모듈, 이름, 값)]. 첫 번째가 지금 기본값."""
-    old = [(notes, "VOWEL_ONSET", False), (notes, "USE_GAME", False), (tune_mod, "DYN_WIN", 0.08), (tune_mod, "DYN_GAIN", 1.0)]
+    """이름 → [(모듈, 이름, 값)]. 첫 번째가 지금 기본값. (None, 옵션 이름, 값)은 조교 설정을 바꾼다."""
+    pr3 = [(tune_mod, "LEGATO_GAP", 0.0)]
+    old = pr3 + [(notes, "VOWEL_ONSET", False), (notes, "USE_GAME", False), (tune_mod, "DYN_WIN", 0.08),
+                 (tune_mod, "DYN_GAIN", 1.0)]
     return {
         "새 기본": [],
+        "PR3 기본": pr3,
         "예전 기본": old,
-        "GAME 없이": [(notes, "USE_GAME", False)],
-        "모음 시작 없이": [(notes, "VOWEL_ONSET", False)],
-        "크기 창 12ms": [(tune_mod, "DYN_WIN", 0.012)],
-        "크기 창 30ms": [(tune_mod, "DYN_WIN", 0.03)],
-        "셈여림 ×1.2": [(tune_mod, "DYN_GAIN", 1.2 / 0.7)],
-        "셈여림 ×0.85": [(tune_mod, "DYN_GAIN", 0.85 / 0.7)],
+        "떨림 거르기 12Hz": [(tune_mod, "FINE_HZ", 12.0)],
+        "떨림 거르기 8Hz": [(tune_mod, "FINE_HZ", 8.0)],
+        "끝 처짐 제한": [(tune_mod, "FALL_LIMIT", 150.0)],
+        "크기 바닥": [(tune_mod, "DYN_FLOOR", -60.0)],
+        "크기 창 45ms": [(tune_mod, "DYN_WIN", 0.045)],
+        "RMVPE": [(None, "pitch_method", "rmvpe")],
+        "렌더 고치기": [(Cfg, "refine", 2)],
+        "렌더 고치기 (크기만)": [(Cfg, "refine", 2), (refine_mod, "PITCH_GAIN", 0.0)],
+        "렌더 고치기 3번": [(Cfg, "refine", 3)],
     }
 
 
-RENDER_VARIANTS = ("새 기본", "예전 기본", "크기 창 12ms", "크기 창 30ms", "셈여림 ×1.2", "셈여림 ×0.85")
-RENDER_REF_VARIANTS = ("새 기본", "예전 기본")
 OPTS = {"transpose": "0", "pitch_method": "harvest"}  # 방식마다 (None, 옵션 이름, 값)으로 바꾼다
 
 
@@ -71,6 +81,7 @@ def _memo(fn):
 
 
 pitch.extract = _memo(pitch.extract)
+_transcribe_once = game.transcribe
 game.transcribe = _memo(game.transcribe)
 features.analyze = _memo(features.analyze)
 
@@ -211,95 +222,199 @@ def eval_vocadito(songs, patches, keep=None):
 
 
 # ---------------------------------------------------------------- 렌더
-def render_compare(ou, work, folder):
+def render_compare(ou, work, folder, truth=None):
     render = folder / "render.wav"
     subprocess.run([str(ROOT / "devtools/openutau_harness/render.sh"), str(ou), str(work), str(folder / "project.ustx"),
                     str(render)], check=True, stdout=subprocess.DEVNULL)
     wav = sorted(folder.glob("render_*.wav"))[0]
-    out = subprocess.run([sys.executable, str(ROOT / "devtools/compare_render.py"), str(folder), str(wav)],
-                         check=True, capture_output=True, text=True).stdout
+    cmd = [sys.executable, str(ROOT / "devtools/compare_render.py"), str(folder), str(wav)]
+    if truth:
+        cmd += ["--truth", str(truth)]
+    out = subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
     for f in folder.glob("render*.wav"):
         f.unlink()
     return json.loads(out)
 
 
+def _render_only(ou, work, ustx):
+    """refine.py가 부르는 렌더: ustx 옆 _r 폴더에 렌더해서 테토 트랙 wav 경로."""
+    d = Path(ustx).parent / "_r"
+    shutil.rmtree(d, ignore_errors=True)
+    d.mkdir()
+    subprocess.run([str(ROOT / "devtools/openutau_harness/render.sh"), str(ou), str(work), str(ustx), str(d / "render.wav")],
+                   check=True, stdout=subprocess.DEVNULL)
+    return sorted(d.glob("render_*.wav"))[0]
+
+
+def compare_wav(folder, wav, truth=None):
+    cmd = [sys.executable, str(ROOT / "devtools/compare_render.py"), str(folder), str(wav)]
+    if truth:
+        cmd += ["--truth", str(truth)]
+    return json.loads(subprocess.run(cmd, check=True, capture_output=True, text=True).stdout)
+
+
+RENDER_KEYS = ("pitch_err_cents_median", "pitch_err_cents_p90", "within_50_cents", "loudness_corr", "loudness_mae_db",
+               "dropouts_per_min",
+               "pitch_drops_per_min", "pitch_jumps_per_min", "wobble_ratio")
+
+
+def _mean(cs, k):
+    v = [c[k] for c in cs if c.get(k) is not None]
+    return float(np.mean(v)) if v else float("nan")
+
+
+def render_set(name, items, patches, args):
+    """items: [(이름, 보컬, 가사, 비교할 정답 보컬 또는 None)] → 곡마다 비교 결과."""
+    out = []
+    for label, wav, text, truth in items:
+        with patched(patches), tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "o"
+            try:
+                run_tune(wav, text, folder)
+                if Cfg.refine:
+                    rr = refine_mod.refine(folder, lambda u: _render_only(Path(args.render[0]), Path(args.render[1]), u),
+                                           rounds=Cfg.refine)
+                    print(f"{name} {label} 고치기", json.dumps(rr["rounds"], ensure_ascii=False), flush=True)
+                    c = compare_wav(folder, folder / "teto_preview.wav", truth)
+                else:
+                    c = render_compare(Path(args.render[0]), Path(args.render[1]), folder, truth)
+            except (RuntimeError, subprocess.CalledProcessError) as e:
+                print(f"{name} {label} 렌더 못 함: {e}", flush=True)
+                continue
+        c["song"] = label
+        events = c.pop("events", [])
+        print(f"{name} {label}", json.dumps({k: c.get(k) for k in RENDER_KEYS + ("event_kinds",)}, ensure_ascii=False),
+              flush=True)
+        for e in events[:12]:
+            print("   ", json.dumps(e, ensure_ascii=False), flush=True)
+        out.append(c)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--refs", nargs="*", default=[])
+    ap.add_argument("--refs-ko", nargs="*", default=[], help="한글 가사 테토 정답 노래 (KO to JA)")
     ap.add_argument("--vocadito")
+    ap.add_argument("--separated", help="make_separated.py 결과 폴더 (sep_<번호>.wav)")
     ap.add_argument("--render", nargs=2, metavar=("OPENUTAU", "WORK"))
     ap.add_argument("--render-songs", default="10,14")
-    ap.add_argument("--render-refs", type=int, default=0, help="테토 정답 노래 몇 곡을 조교해서 다시 렌더해 비교할지")
+    ap.add_argument("--render-refs", type=int, default=0, help="테토 정답 노래 몇 곡을 조교해서 다시 렌더해 비교할지 (한글도 같은 수)")
     ap.add_argument("--only", help="쉼표로 나눈 방식 이름만")
+    ap.add_argument("--json", help="결과를 이 파일에 (여러 잡 결과를 합칠 때)")
     args = ap.parse_args()
     refs = [Path(p) for p in args.refs if (Path(p) / "truth.json").exists()]
+    krefs = [Path(p) for p in args.refs_ko if (Path(p) / "truth.json").exists()]
     songs = vocadito_songs(args.vocadito) if args.vocadito else []
+    sep = []
+    if args.separated and songs:
+        by_k = {k: (f0, nts, wav) for k, wav, f0, nts in songs}
+        for f in sorted(Path(args.separated).glob("sep_*.wav")):
+            k = int(f.stem.split("_")[1])
+            if k in by_k:
+                sep.append((k, f, by_k[k][0], by_k[k][1], by_k[k][2]))
     vs = variants()
     if args.only:
         vs = {k: v for k, v in vs.items() if k in args.only.split(",")}
-    print(f"테토 정답 노래 {len(refs)}곡 · vocadito {len(songs)}곡", flush=True)
-    rows = {}
+    print(f"테토 정답 노래 {len(refs)}곡 · 한글 {len(krefs)}곡 · vocadito {len(songs)}곡 · 분리한 보컬 {len(sep)}곡", flush=True)
+    if songs and game.model_dir():  # GAME이 같은 노래에 늘 같은 음표를 내는지 (잡마다 비교가 흔들리지 않게)
+        from tetotune import audio
+        y, sr = audio.load(songs[0][1])
+        f0, _ = pitch.extract(y, sr, "harvest")
+        _, v = pitch.clean(f0, pitch.frame_db(y, sr, len(f0)))
+        a, b = _transcribe_once(y, sr, v, pitch.HOP), _transcribe_once(y, sr, v, pitch.HOP)
+        print(f"GAME 두 번 같은 결과: {a == b} ({len(a)}음표)", flush=True)
+    results = {}
     for name, patches in vs.items():
         row = {}
         try:
             if refs:
                 row.update(eval_refs(refs, patches))
+            if krefs:
+                row.update({"k" + k: v for k, v in eval_refs(krefs, patches).items()})
             if songs:
                 row.update(eval_vocadito(songs, patches))
+            if sep:
+                row.update({"s" + k: v for k, v in eval_vocadito([(k, w, f0, nts) for k, w, f0, nts, _ in sep], patches).items()})
         except RuntimeError as e:
             print(name, "건너뜀:", e, flush=True)
             continue
-        rows[name] = row
         print(name, json.dumps({k: round(v, 4) for k, v in row.items()}, ensure_ascii=False), flush=True)
-    if refs or songs:
+        rend = {}
+        if args.render:
+            want = {int(x) for x in args.render_songs.split(",")}
+            n = args.render_refs
+            sets = {
+                "ref": [(d.name, d / "ref_ref.wav", (d / "lyrics.txt").read_text(encoding="utf-8"), None) for d in refs[:n]],
+                "kref": [(d.name, d / "ref_ref.wav", (d / "lyrics.txt").read_text(encoding="utf-8"), None) for d in krefs[:n]],
+                "vocadito": [(str(k), wav, "", None) for k, wav, _, _ in songs if k in want],
+                "sep": [(str(k), f, "", clean) for k, f, _, _, clean in sep if k in want],
+            }
+            for key, items in sets.items():
+                if items:
+                    rend[key] = render_set(name, items, patches, args)
+        results[name] = {"row": row, "render": rend}
+    if args.json:
+        Path(args.json).write_text(json.dumps(results, ensure_ascii=False), encoding="utf-8")
+    print_tables(results)
+
+
+def print_tables(results):
+    """여러 방식 결과(main의 results, 잡 여러 개를 합친 것도) → 마크다운 표."""
+    rows = {k: v["row"] for k, v in results.items()}
+
+    def ref_cell(r, p=""):
+        if p + "ref_f1" not in r:
+            return " | | "
+        return f"{r[p + 'ref_f1']:.3f} | {r[p + 'ref_lyric']}/{r[p + 'ref_n']} | {r[p + 'ref_tone']}/{r[p + 'ref_n']}"
+
+    def hum_cell(r, p=""):
+        if p + "v_rpa" not in r:
+            return " | | "
+        return f"{r[p + 'v_rpa']:.3f} | {r[p + 'v_conp']:.3f} | {r[p + 'v_con']:.3f}"
+    print()
+    print("| 방식 | 테토 정답 F1 | 가사 | 음 높이 | 한글 정답 F1 | 가사 | 음 높이 | 사람 RPA | COnP | COn | "
+          "분리 보컬 RPA | COnP | COn |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    for name, r in rows.items():
+        print(f"| {name} | {ref_cell(r)} | {ref_cell(r, 'k')} | {hum_cell(r)} | {hum_cell(r, 's')} |")
+    labels = {"ref": "테토 정답", "kref": "한글 정답", "vocadito": "사람 노래", "sep": "분리한 보컬"}
+    for key, label in labels.items():
+        have = [(name, v["render"][key]) for name, v in results.items() if v["render"].get(key)]
+        if not have:
+            continue
         print()
-        print("| 방식 | 정답 노래 음 시작 F1 | 가사 | 음 높이 | 시작 오차 울리는 자음 (중앙/90%) · 그 밖 | "
-              "사람 노래 음 높이 RPA | 유성 오경보 | 음표 COnP | COnPOff | COn |")
+        print(f"| 방식 | {label} → 조교 → 테토 렌더 | 음 높이 오차 중앙/90% | 50센트 안 | 크기 상관 | 크기 차이 dB | "
+              f"끊김 /분 | 떨어짐 /분 | 튐 /분 | 흔들림 (1=원래) |")
         print("|---|---|---|---|---|---|---|---|---|---|")
-        for name, r in rows.items():
-            ref = (f"{r['ref_f1']:.3f} | {r['ref_lyric']}/{r['ref_n']} | {r['ref_tone']}/{r['ref_n']} | "
-                   f"{r['ref_err_v']:.0f}/{r['ref_err_v90']:.0f} · {r['ref_err_o']:.0f}ms") if "ref_f1" in r else " | | | "
-            hum = (f"{r['v_rpa']:.3f} | {r['v_vfa']:.3f} | {r['v_conp']:.3f} | {r['v_conpoff']:.3f} | {r['v_con']:.3f}"
-                   ) if "v_rpa" in r else " | | | | "
-            print(f"| {name} | {ref} | {hum} |")
-    if args.render and refs and args.render_refs:
-        print()
-        print("| 방식 | 테토 정답 노래 → 조교 → 렌더 | 음 높이 오차 중앙/90% (센트) | 50센트 안 | 크기 상관 |")
-        print("|---|---|---|---|---|")
-        for name in RENDER_REF_VARIANTS:
-            if name not in rows:
-                continue
-            cs = []
-            for d in refs[:args.render_refs]:
-                with patched(vs[name]), tempfile.TemporaryDirectory() as tmp:
-                    out = Path(tmp) / "o"
-                    run_tune(d / "ref_ref.wav", (d / "lyrics.txt").read_text(encoding="utf-8"), out)
-                    cs.append(render_compare(Path(args.render[0]), Path(args.render[1]), out))
-            med = np.mean([c["pitch_err_cents_median"] for c in cs])
-            p90 = np.mean([c["pitch_err_cents_p90"] for c in cs])
-            w50 = np.mean([c["within_50_cents"] for c in cs])
-            lc = np.mean([c["loudness_corr"] for c in cs])
-            print(f"| {name} | {len(cs)}곡 평균 | {med:.1f}/{p90:.1f} | {w50:.3f} | {lc:.3f} |", flush=True)
-    if args.render and songs:
-        want = {int(x) for x in args.render_songs.split(",")}
-        print()
-        print("| 방식 | 곡 | 렌더 음 높이 오차 중앙/90% (센트) | 50센트 안 | 크기 상관 | 숨 크기 (테토 / 원래) |")
-        print("|---|---|---|---|---|---|")
-        for name in RENDER_VARIANTS:
-            if name not in vs:
-                continue
-            if name not in rows:
-                continue
-            for k, wav, f0, nts in songs:
-                if k not in want:
-                    continue
-                with patched(vs[name]), tempfile.TemporaryDirectory() as tmp:
-                    out = Path(tmp) / "o"
-                    run_tune(wav, "", out)
-                    c = render_compare(Path(args.render[0]), Path(args.render[1]), out)
-                print(f"| {name} | {k} | {c['pitch_err_cents_median']}/{c['pitch_err_cents_p90']} | {c['within_50_cents']} | "
-                      f"{c['loudness_corr']} | {c['breath_db_vs_singing']} / {c['source_breath_db_vs_singing']} |", flush=True)
+        for name, cs in have:
+            print(f"| {name} | {len(cs)}곡 평균 | {_mean(cs, 'pitch_err_cents_median'):.1f}/{_mean(cs, 'pitch_err_cents_p90'):.1f}"
+                  f" | {_mean(cs, 'within_50_cents'):.3f} | {_mean(cs, 'loudness_corr'):.3f} | "
+                  f"{_mean(cs, 'loudness_mae_db'):.2f} | "
+                  f"{_mean(cs, 'dropouts_per_min'):.2f} | {_mean(cs, 'pitch_drops_per_min'):.2f} | "
+                  f"{_mean(cs, 'pitch_jumps_per_min'):.2f} | {_mean(cs, 'wobble_ratio'):.2f} |")
+        kinds = {}
+        for name, cs in have:
+            for c in cs:
+                for k, v in c.get("event_kinds", {}).items():
+                    kinds.setdefault(name, {}).setdefault(k, 0)
+                    kinds[name][k] += v
+        for name, kd in kinds.items():
+            top = sorted(kd.items(), key=lambda kv: -kv[1])[:8]
+            print(f"\n{label} · {name} 문제 종류: " + ", ".join(f"{k} {v}" for k, v in top))
+
+
+def merge_main():
+    """python accuracy.py --merge 결과*.json: 잡마다 나온 결과를 합쳐 표로."""
+    results = {}
+    for f in sys.argv[2:]:
+        results.update(json.loads(Path(f).read_text(encoding="utf-8")))
+    order = list(variants())
+    print_tables({k: results[k] for k in sorted(results, key=lambda k: order.index(k) if k in order else 99)})
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "--merge":
+        merge_main()
+    else:
+        main()

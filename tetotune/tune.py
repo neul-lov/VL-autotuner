@@ -21,6 +21,10 @@ TICKS = 480
 INTERVAL = 5  # OpenUtau 곡선 간격 (틱)
 DYN_WIN = 0.02  # 초. 크기 윤곽을 잡는 최댓값 · 다듬기 창 (길면 크기가 음 시작보다 먼저 커진다)
 DYN_GAIN = 1 / 0.7  # 셈여림 0.7(앱 기본값)에서 원래 보컬 크기 차이를 그대로: 실제 테토 렌더 비교에서 이쪽이 더 닮았다
+LEGATO_GAP = 0.3  # 초. 음표 사이 이보다 짧은 틈은 앞 음표를 늘여 메운다 (자음 · 성대 닫힘에서 소리가 뚝 끊기지 않게). 0 = 끔
+FINE_HZ = 0.0  # 원래 음높이의 빠른 움직임 중 이 Hz보다 빠른 떨림(음높이 읽기 잡음)은 거른다. 0 = 거르지 않음
+FALL_LIMIT = 0.0  # 센트. 쉼 앞 음표 끝에서 음높이가 이보다 더 떨어지지 않게. 0 = 그대로
+DYN_FLOOR = None  # 음표 가운데에서 크기 곡선이 이보다 작아지지 않게 (dyn 값). None = 그대로
 
 
 @dataclass
@@ -106,6 +110,55 @@ def _base_cents(notes, t):
     tones = np.array([n.tone for n in notes]) * 100.0
     k = np.searchsorted(ends, t, side="right")
     return tones[np.minimum(k, len(notes) - 1)]
+
+
+CURVE_RANGE = {"pitd": (-1200, 1200, 1.5), "dyn": (-240, 120, 2), "brec": (-100, 100, 2), "tenc": (-100, 100, 2)}
+
+
+def make_curves(t, vals, bpm, span):
+    """프레임 곡선 {이름: 값} → ustx 곡선 (INTERVAL 틱마다, 선 위의 점은 지운다)."""
+    tps = bpm / 60 * TICKS  # 초당 틱
+    xs = np.arange(int(span[0] * tps) // INTERVAL * INTERVAL, int(span[1] * tps) + INTERVAL, INTERVAL)
+    sec = xs / tps
+    out = []
+    for abbr, v in vals.items():
+        lo, hi, tol = CURVE_RANGE[abbr]
+        ys = np.clip(np.round(np.interp(sec, t, v)), lo, hi).astype(int)
+        cx, cy = _simplify(list(xs), list(ys), tol)
+        out.append({"xs": cx, "ys": cy, "abbr": abbr})
+    return out
+
+
+def _legato(notes, breaths, db, sing_db, max_gap=None, silent=0.1):
+    """음표 사이 짧은 틈(LEGATO_GAP 안)을 앞 음표를 늘여 메운다: 사람은 자음(ㅅ · ㅎ · ㄱ …)을 지나며 이어 부르는데
+    틈이 있으면 OpenUtau가 그 사이를 쉼으로 보고 소리를 끊었다가 새로 시작해서 뚝뚝 끊긴다.
+    숨 쉰 틈, 노래보다 35dB 넘게 작은 곳이 silent초 넘게 이어지는 틈(진짜 쉼)은 그대로."""
+    max_gap = LEGATO_GAP if max_gap is None else max_gap
+    spans = [(b.start, b.end) if isinstance(b, nt.Note) else (b[0], b[1]) for b in breaths]
+    for a, b in zip(notes, notes[1:]):
+        gap = b.start - a.end
+        if gap <= 0 or gap > max_gap or any(s < b.start and e > a.end for s, e in spans):
+            continue
+        quiet = db[int(a.end / HOP):int(b.start / HOP) + 1] < sing_db - 35
+        if max((e - s for s, e in pitch._runs(quiet)), default=0) * HOP >= silent:
+            continue
+        a.end = b.start
+    return notes
+
+
+def _limit_falls(pitd, notes, limit, tail=0.25):
+    """쉼 앞 음표 끝(tail초)에서 음높이가 limit센트보다 더 떨어지지 않게 (부드럽게 들어간다)."""
+    out = pitd.copy()
+    n = len(pitd)
+    w = np.zeros(n)
+    for x, nxt in zip(notes, notes[1:] + [None]):
+        if nxt is not None and nxt.start - x.end < 0.05:
+            continue
+        a, b = int(max(x.start, x.end - tail) / HOP), min(n, int(x.end / HOP) + 1)
+        w[a:b] = np.linspace(0, 1, b - a) if b > a else 0
+    w = np.minimum(1, _smooth(w, 0.03) * 1.5)
+    soft = -limit * np.tanh(np.maximum(0, -out) / limit)
+    return np.where(out < 0, out * (1 - w) + soft * w, out)
 
 
 def _note_mask(notes, n, lead=0.0, tail=0.0):
@@ -243,6 +296,9 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
             breath_notes.append(nt.Note(a2, b2, tone, alias))
             breath_notes[-1].strength = vol  # vol을 잠깐 여기에 둔다
 
+    if LEGATO_GAP > 0:
+        _legato(notes, breath_notes if mode == "voicebank" else breaths, db, float(np.median(db[voiced])))
+
     # 곡선
     progress(0.7, "곡선 만드는 중")
     t = np.arange(n) * HOP
@@ -254,6 +310,8 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
     dev = target - base
     lp = _lowpass(dev, 3.0)
     fine = dev - lp
+    if FINE_HZ > 0:
+        fine = _lowpass(fine, FINE_HZ)
     # 음 가운데(앞뒤 80ms 또는 25% 뺀 곳)에서만 음정 틀림을 바로잡는다 → 미끄러짐 · 꺾기는 그대로
     steady = np.zeros(n)
     for x in notes:
@@ -261,6 +319,8 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
         steady[int((x.start + edge) / HOP):int((x.end - edge) / HOP)] = 1.0
     steady = _smooth(steady, 0.06)
     pitd = o.pitch_follow * (lp * (1 - o.correct * steady) + o.vibrato * fine)
+    if FALL_LIMIT > 0:
+        pitd = _limit_falls(pitd, notes, FALL_LIMIT)
 
     near = _smooth(_note_mask(notes, n, 0.1, 0.06).astype(float), 0.04)
     ref = float(np.median(db[voiced]))
@@ -270,6 +330,8 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
     rel = env - ref
     rel = np.where(rel < -6, -6 + (rel + 6) * 0.5, rel)  # 아주 작은 곳은 반만: 음원 소리가 묻히지 않게
     dyn = np.clip(rel * 10 * o.dynamics * DYN_GAIN, -120, 60) * near
+    if DYN_FLOOR is not None:
+        dyn = np.maximum(dyn, DYN_FLOOR * steady)
 
     def zcurve(raw, scale, lo, hi):
         v = raw[sing_mask & np.isfinite(raw)]
@@ -283,22 +345,17 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
     brec = zcurve(feats["breathiness"], 30 * o.breathiness, -50, 70)
     tenc = zcurve(feats["tension"], 25 * o.tension, -50, 50)
 
-    tps = bpm / 60 * TICKS  # 초당 틱
-    first = max(0.0, all_notes[0].start - 0.5)
-    last = all_notes[-1].end + 0.3
-    xs = np.arange(int(first * tps) // INTERVAL * INTERVAL, int(last * tps) + INTERVAL, INTERVAL)
-    sec = xs / tps
-
-    def curve(abbr, vals, lo, hi, tol):
-        ys = np.clip(np.round(np.interp(sec, t, vals)), lo, hi).astype(int)
-        cx, cy = _simplify(list(xs), list(ys), tol)
-        return {"xs": cx, "ys": cy, "abbr": abbr}
-
-    curves = [curve("pitd", pitd, -1200, 1200, 1.5), curve("dyn", dyn, -240, 120, 2)]
+    span = (max(0.0, all_notes[0].start - 0.5), all_notes[-1].end + 0.3)
+    vals = {"pitd": pitd, "dyn": dyn}
     if o.breathiness > 0:
-        curves.append(curve("brec", brec, -100, 100, 2))
+        vals["brec"] = brec
     if o.tension > 0:
-        curves.append(curve("tenc", tenc, -100, 100, 2))
+        vals["tenc"] = tenc
+    curves = make_curves(t, vals, bpm, span)
+    # 렌더해서 고치기(refine.py)가 쓰는 프레임 곡선: 원래 음높이(+조옮김) · 음표 계단 · 크기 목표
+    np.savez_compressed(out / "curves.npz", hop=HOP, bpm=bpm, span=np.array(span), base=base, target=target,
+                        sing=sing_mask, voiced=voiced, rel=np.clip(rel * o.dynamics * DYN_GAIN, -12, 6), near=near,
+                        **{k: v for k, v in vals.items()})
 
     # 파일
     progress(0.85, "OpenUtau 프로젝트 쓰는 중")
