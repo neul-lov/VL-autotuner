@@ -17,6 +17,7 @@ ONSET_MAX = 0.15  # 이보다 짧은 음표가 다음 음표 바로 앞에 붙�
 ONSET_ANY = True  # False면 자음 같은(무성 · 높은 대역) 짧은 음표만
 SYL_GAP = 0.12  # 음절 시작 후보 두 곳이 이보다 가까우면 약한 쪽은 마지막에 고른다 (_evidence, 0이면 끔)
 LOCAL_OFFSET = 0.0  # 초. 0보다 크면 음정 기준을 이만큼 창으로 따로 잡는다 (무반주로 부르면 곡 뒤로 갈수록 처진다)
+USE_GAME = False  # OpenUtau에 GAME 모델이 있으면 음표 나누기를 GAME으로 (game.py)
 VOWEL_ONSET = False  # 울리는 자음(ま · な · ら · や · わ · が행 등)으로 시작하는 음절은 음표 시작을 모음 시작으로 옮긴다
 
 
@@ -195,6 +196,21 @@ def segment(midi, voiced, db, novelty=None, auto_split_db=6.0, noise=None, hiban
                 out.append(part)
         notes.extend(_merge_onsets(_merge_short(_snap(out)), lambda x: _consonant_like(x, voiced, hiband)))
     return notes, offset
+
+
+def from_game(game_notes, midi, voiced):
+    """GAME 음표 [(시작, 끝, midi 소수)] → Note 목록. 쉼(REST_GAP보다 긴 틈) 뒤는 프레이즈 시작.
+    GAME이 나눈 곳은 새 음절일 가능성이 커서 무성 틈(자음)과 같은 세기로 둔다."""
+    offset = tuning_offset(midi, voiced)
+    out = []
+    for s, e, p in game_notes:
+        if e - s < 0.03:
+            continue
+        gap = s - out[-1].end if out else 99.0
+        if out and gap < 0:
+            out[-1].end = s
+        out.append(Note(s, e, int(np.round(p - offset)), strength=10.0 if gap > REST_GAP else 5.0))
+    return out, offset
 
 
 def _consonant_like(note, voiced, hiband):
