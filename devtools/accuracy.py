@@ -36,10 +36,12 @@ def variants():
         "꺾기 남기기 6dB": [(pitch, "EDGE_KEEP_DB", 6.0)],
         "꺾기 남기기 12dB": [(pitch, "EDGE_KEEP_DB", 12.0)],
         "크기 창 30ms": [(tune_mod, "DYN_WIN", 0.03)],
+        "RMVPE": [(None, "pitch_method", "rmvpe")],
     }
 
 
-RENDER_VARIANTS = ("기본", "꺾기 남기기 6dB", "크기 창 30ms")
+RENDER_VARIANTS = ("기본", "꺾기 남기기 6dB", "크기 창 30ms", "RMVPE")
+OPTS = {"transpose": "0", "pitch_method": "harvest"}  # 방식마다 (None, 옵션 이름, 값)으로 바꾼다
 
 
 # ---------------------------------------------------------------- 같은 입력이면 다시 계산하지 않기 (방식마다 음 높이 읽기는 같다)
@@ -70,18 +72,26 @@ features.analyze = _memo(features.analyze)
 def patched(patches):
     class Ctx:
         def __enter__(self):
-            self.saved = [(m, a, getattr(m, a)) for m, a, _ in patches]
+            self.saved = [(m, a, getattr(m, a)) for m, a, _ in patches if m is not None]
+            self.opts = dict(OPTS)
             for m, a, v in patches:
-                setattr(m, a, v)
+                if m is None:
+                    OPTS[a] = v
+                else:
+                    setattr(m, a, v)
 
         def __exit__(self, *exc):
             for m, a, v in self.saved:
                 setattr(m, a, v)
+            OPTS.clear()
+            OPTS.update(self.opts)
     return Ctx()
 
 
 def run_tune(wav, lyrics_text, out):
-    tune(wav, out, lyrics_text, options=Options(transpose="0"), title="t")
+    res = tune(wav, out, lyrics_text, options=Options(**OPTS), title="t")
+    if res.pitch_method != OPTS["pitch_method"]:
+        raise RuntimeError(f"{OPTS['pitch_method']}를 쓰지 못했어요 ({res.pitch_method})")
     return json.loads((Path(out) / "preview.json").read_text())
 
 
@@ -222,10 +232,14 @@ def main():
     rows = {}
     for name, patches in vs.items():
         row = {}
-        if refs:
-            row.update(eval_refs(refs, patches))
-        if songs:
-            row.update(eval_vocadito(songs, patches))
+        try:
+            if refs:
+                row.update(eval_refs(refs, patches))
+            if songs:
+                row.update(eval_vocadito(songs, patches))
+        except RuntimeError as e:
+            print(name, "건너뜀:", e, flush=True)
+            continue
         rows[name] = row
         print(name, json.dumps({k: round(v, 4) for k, v in row.items()}, ensure_ascii=False), flush=True)
     if refs or songs:
@@ -246,6 +260,8 @@ def main():
         print("|---|---|---|---|---|---|")
         for name in RENDER_VARIANTS:
             if name not in vs:
+                continue
+            if name not in rows:
                 continue
             for k, wav, f0, nts in songs:
                 if k not in want:
