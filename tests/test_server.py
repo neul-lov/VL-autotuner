@@ -75,3 +75,27 @@ def test_folder_names(client, monkeypatch):
     assert "/" not in a and not a.startswith(".") and ":" not in a
     (server.OUTPUT / a).mkdir(parents=True)
     assert server._folder_name("../.hidden:name") != a
+
+
+def test_edit_and_undo_endpoints(client, tmp_path):
+    import yaml
+    import server
+    folder = server.OUTPUT / "곡 2026"
+    folder.mkdir(parents=True)
+    notes = [{"position": 480, "duration": 240, "tone": 60, "lyric": "あ"},
+             {"position": 720, "duration": 240, "tone": 62, "lyric": "+"}]
+    (folder / "project.ustx").write_text(yaml.safe_dump({"tempos": [{"position": 0, "bpm": 120.0}],
+                                                          "voice_parts": [{"notes": notes, "curves": []}]}))
+    (folder / "report.json").write_text(json.dumps({"notes": 2, "breath_aliases": []}))
+    (folder / "preview.json").write_text(json.dumps({"notes": []}))
+    r = client.post(f"/api/results/{folder.name}/edit", data={"op": "lyric", "index": 1, "text": "い"})
+    assert r.status_code == 200 and [n[3] for n in r.json()["notes"]] == ["あ", "い"] and r.json()["history"] == 1
+    r = client.post(f"/api/results/{folder.name}/edit", data={"op": "move_left", "index": 0})
+    assert r.status_code == 400 and "음절" in r.json()["detail"]
+    r = client.post(f"/api/results/{folder.name}/undo")
+    assert r.status_code == 200 and [n[3] for n in r.json()["notes"]] == ["あ", "+"]
+    assert client.post(f"/api/results/{folder.name}/undo").status_code == 400
+    listed = client.get("/api/results").json()[0]
+    assert listed["teto"] is None and listed["backing"] is None
+    r = client.post(f"/api/results/{folder.name}/retune", data={"start": 2, "end": 1})
+    assert r.status_code == 400

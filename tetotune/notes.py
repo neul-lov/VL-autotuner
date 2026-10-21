@@ -21,12 +21,13 @@ VOWEL_ONSET = True  # 울리는 자음(ま · な · ら · や · わ · が행
 
 
 class Note:
-    __slots__ = ("start", "end", "tone", "lyric", "strength", "dips")
+    __slots__ = ("start", "end", "tone", "lyric", "strength", "dips", "weak")
 
     def __init__(self, start, end, tone, lyric="", strength=10.0):
         self.start, self.end, self.tone, self.lyric = float(start), float(end), int(tone), lyric
         self.strength = strength  # 앞 음표와의 경계가 얼마나 "새 음절" 같은지
         self.dips = []  # [(초, 점수)] 같은 음 안에서 새 음절이 시작했을 만한 곳 (같은 음으로 다른 음절을 부를 때)
+        self.weak = False  # 가사를 넣을 때 이 음표의 음절 시작이 확실하지 않았다 (약한 경계 · 억지로 나눔)
 
     def __repr__(self):
         return f"Note({self.start:.3f}-{self.end:.3f} {self.tone} {self.lyric!r})"
@@ -356,6 +357,7 @@ def _align_group(notes, syls):
     ev = _evidence(notes)
     chosen = ev[:len(syls) - 1]
     starts = {notes[0].start} | {e[3] for e in chosen if e[1] == "b"}
+    weak = {e[3] for e in chosen if e[0] < NEUTRAL}  # 경계가 약한데 음절 수를 채우려고 고른 곳
     for _, kind, i, t in sorted((e for e in chosen if e[1] == "c"), key=lambda e: -e[3]):
         k = next(j for j, n in enumerate(notes) if n.start < t < n.end)
         _split_note(notes, k, t, 3.0)
@@ -369,14 +371,19 @@ def _align_group(notes, syls):
         t = (n.start + n.end) / 2
         _split_note(notes, k, t, 2.0)
         starts.add(t)
+        weak.add(t)
         missing -= 1
     s = 0
     for n in notes:
         if n.start in starts and s < len(syls):
             n.lyric = syls[s]
+            n.weak = n.start in weak
             s += 1
         else:
             n.lyric = "+"
+    if s < len(syls):  # 음절이 남았다: 이 소절 전체가 확실하지 않다
+        for n in notes:
+            n.weak = True
     return notes
 
 

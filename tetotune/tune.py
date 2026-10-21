@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import audio, features, lyrics as lyr, notes as nt, pitch, voicebank
+from . import audio, confidence, features, lyrics as lyr, notes as nt, pitch, voicebank
 from .pitch import HOP
 
 TICKS = 480
@@ -40,6 +40,7 @@ class Options:
     breaths: str = "auto"        # auto (음원 숨소리, 없으면 원래 숨) · voicebank · original · off
     breath_volume: float = 1.0
     pitch_method: str = "auto"   # auto (RMVPE 있으면) · harvest · rmvpe
+    refine: str = "auto"         # auto (OpenUtau가 있으면 테토로 불러 보고 곡선을 다듬는다) · off
     singer: str = ""             # 음원 폴더 경로 (비우면 테토를 찾는다)
     default_lyric: str = "ら"
 
@@ -170,7 +171,9 @@ def _note_mask(notes, n, lead=0.0, tail=0.0):
 
 # ---------------------------------------------------------------- 본체
 def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=None, progress=lambda p, s: None,
-         title=None):
+         title=None, context=None):
+    """context: 곡의 한 구간만 다시 조교할 때 곡 전체의 기준 (report.json의 "context"): 크기 · 숨 섞임 · 힘의 기준값.
+    없으면 이 보컬에서 잰다."""
     o = options or Options()
     warnings = []
     out = Path(out_dir)
@@ -323,7 +326,8 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
         pitd = _limit_falls(pitd, notes, FALL_LIMIT)
 
     near = _smooth(_note_mask(notes, n, 0.1, 0.06).astype(float), 0.04)
-    ref = float(np.median(db[voiced]))
+    ctx = dict(context or {})
+    ref = float(ctx.get("ref_db", np.median(db[voiced])))
     # 크기는 겉 윤곽만 (DYN_WIN 최댓값): 음절 사이 자음에서 잠깐 꺼지는 건 음원 자음이 이미 갖고 있다
     from scipy.ndimage import maximum_filter1d
     env = _smooth(maximum_filter1d(_interp_gaps(db, sing_mask), int(DYN_WIN / HOP)), DYN_WIN)
@@ -333,17 +337,23 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
     if DYN_FLOOR is not None:
         dyn = np.maximum(dyn, DYN_FLOOR * steady)
 
-    def zcurve(raw, scale, lo, hi):
+    stats = {}
+
+    def zcurve(name, raw, scale, lo, hi):
         v = raw[sing_mask & np.isfinite(raw)]
-        if len(v) < 10:
+        if name in ctx:
+            q1, q2, q3 = ctx[name]
+        elif len(v) < 10:
             return np.zeros(n)
-        q1, q2, q3 = np.percentile(v, [25, 50, 75])
+        else:
+            q1, q2, q3 = (float(q) for q in np.percentile(v, [25, 50, 75]))
+        stats[name] = [q1, q2, q3]
         z = (raw - q2) / max(1e-6, (q3 - q1) / 1.35)
         z = _interp_gaps(np.where(np.isfinite(z), z, np.nan), sing_mask)
         return np.clip(_smooth(z, 0.06) * scale, lo, hi) * near
 
-    brec = zcurve(feats["breathiness"], 30 * o.breathiness, -50, 70)
-    tenc = zcurve(feats["tension"], 25 * o.tension, -50, 50)
+    brec = zcurve("brec_q", feats["breathiness"], 30 * o.breathiness, -50, 70)
+    tenc = zcurve("tenc_q", feats["tension"], 25 * o.tension, -50, 50)
 
     span = (max(0.0, all_notes[0].start - 0.5), all_notes[-1].end + 0.3)
     vals = {"pitd": pitd, "dyn": dyn}
@@ -383,12 +393,15 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
         "duration": len(y) / sr,
         "phrases": len(nt._phrases([x for x in notes])),
         "offset": round(nt.tuning_offset(midi, voiced), 3),
+        "flags": confidence.merge(confidence.note_flags(notes, midi, voiced, shift)),
     }
     (out / "preview.json").write_text(json.dumps(preview, ensure_ascii=False), encoding="utf-8")
     res = Result(str(out), str(out / "project.ustx"), len(notes),
                  len(breath_notes) if mode == "voicebank" else (len(breaths) if mode == "original" else 0),
                  shift, bpm, info.get("name"), phonemizer, used, warnings)
-    (out / "report.json").write_text(json.dumps({**asdict(res), "options": asdict(o)}, ensure_ascii=False, indent=1),
+    extra = {"options": asdict(o), "context": {"ref_db": ref, **stats}, "breath_aliases": [a for a in (alias_in, alias_out) if a],
+             "lyrics": lyrics_text}
+    (out / "report.json").write_text(json.dumps({**asdict(res), **extra}, ensure_ascii=False, indent=1),
                                      encoding="utf-8")
     progress(1.0, "끝")
     return res
