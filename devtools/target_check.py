@@ -57,9 +57,8 @@ def where(nl, t):
 VARIANTS = {  # 이름 → (옥타브 접기 (음표를 덮는 비율 한도, 0 = 안 접음), 긴 틈 기준 초, 음표 범위 센트)
     "지금": (0, 0.0, 0),
     "긴 틈 50ms": (0, 0.05, 0),
+    "옥타브 접기": (1.0, 0.0, 0),
     "옥타브 접기 + 긴 틈": (1.0, 0.05, 0),
-    "옥타브 접기(음표 일부만 70%) + 긴 틈": (0.7, 0.05, 0),
-    "옥타브 접기(음표 일부만 50%) + 긴 틈": (0.5, 0.05, 0),
 }
 
 
@@ -133,8 +132,13 @@ def compare(want, sv, notes, ms, vs, annot, n):
                            "note_ok": bool(np.isfinite(nerr) and abs(nerr) < 150),
                            "truth_vs_annot": int(aerr) if np.isfinite(aerr) else None, "sep_voiced": round(voiced, 2)})
     err = np.abs(diff[use])
+    # 사람이 표시한 음 높이(vocadito f0)와도 비교: 깨끗한 보컬 Harvest도 가끔 한 옥타브 아래를 읽어서 그 자리는 기준이 틀린다
+    ua = np.isfinite(annot) & inside
+    da = np.where(ua, (want - np.nan_to_num(annot)) * 100, 0.0)
+    off_a = [r for r in pitch._runs(np.abs(da) > 150) if r[1] - r[0] >= 6]
     return {"minutes": m * HOP / 60, "events": events, "rpa": float((err <= 50).mean()) if use.any() else 0.0,
-            "notes": len(nl)}
+            "notes": len(nl), "annot_off": len(off_a), "annot_big": sum(np.median(np.abs(da[a:b])) > 600 for a, b in off_a),
+            "annot_rpa_n": int((np.abs(da[ua]) <= 50).sum()), "annot_n": int(ua.sum())}
 
 
 def main():
@@ -180,15 +184,19 @@ def main():
     print()
     for label, rs in out.items():
         print(f"\n### {label}\n")
-        print("| 방법 | 벗어남 /분 | 음표는 맞는데 벗어남 /분 | 600센트 넘게 /분 | 50센트 안 |")
-        print("|---|---|---|---|---|")
+        print("| 방법 | 벗어남 /분 | 음표는 맞는데 벗어남 /분 | 600센트 넘게 /분 | 50센트 안 | 사람 표시와 다름 /분 | 그중 600센트 넘게 /분 | 사람 표시 50센트 안 |")
+        print("|---|---|---|---|---|---|---|---|")
         for name in VARIANTS:
             minutes = sum(r[name]["minutes"] for r in rs)
             evs = [e for r in rs for e in r[name]["events"]]
             ok = sum(e["note_ok"] for e in evs)
             big = sum(abs(e["cents"]) > 600 for e in evs)
             rpa = np.mean([r[name]["rpa"] for r in rs])
-            print(f"| {name} | {len(evs) / minutes:.2f} | {ok / minutes:.2f} | {big / minutes:.2f} | {rpa:.4f} |", flush=True)
+            ao = sum(r[name]["annot_off"] for r in rs) / minutes
+            ab = sum(r[name]["annot_big"] for r in rs) / minutes
+            ar = sum(r[name]["annot_rpa_n"] for r in rs) / max(1, sum(r[name]["annot_n"] for r in rs))
+            print(f"| {name} | {len(evs) / minutes:.2f} | {ok / minutes:.2f} | {big / minutes:.2f} | {rpa:.4f} | {ao:.2f} | "
+                  f"{ab:.2f} | {ar:.4f} |", flush=True)
         evs = [e for r in rs for e in r["지금"]["events"]]
         cnt = {}
         for e in evs:
