@@ -9,6 +9,8 @@
   덮어서 테토가 음표 음을 그대로 부르는 곳이다.
 - 왜: 정답 의심(깨끗한 보컬 Harvest가 사람이 표시한 vocadito f0와 150센트 넘게 다름) · 빈 곳 잇기(분리한 보컬이 거기서
   소리 없음이라 앞뒤를 이어 그음) · 읽기 틀림(분리한 보컬에서 읽은 음 높이부터 다름)
+- 사람 표시와 다름: 깨끗한 보컬 Harvest 대신 사람이 표시한 음 높이(vocadito f0)와 비교. 깨끗한 보컬 Harvest도 가끔 한
+  옥타브 아래를 읽어서, 방법을 고를 때는 이쪽을 믿는다.
 
 사용: python target_check.py <vocadito 폴더> <분리한 보컬 폴더 (sep_<번호>.wav)> [번호,번호,...]
 """
@@ -54,11 +56,11 @@ def where(nl, t):
     return w, k
 
 
-VARIANTS = {  # 이름 → (옥타브 접기 (음표를 덮는 비율 한도, 0 = 안 접음), 긴 틈 기준 초, 음표 범위 센트)
-    "지금": (0, 0.0, 0),
-    "긴 틈 50ms": (0, 0.05, 0),
-    "옥타브 접기": (1.0, 0.0, 0),
-    "옥타브 접기 + 긴 틈": (1.0, 0.05, 0),
+VARIANTS = {  # 이름 → (옥타브 접기, 긴 틈 기준 초)
+    "PR4 기본": (False, 0.0),
+    "긴 틈 50ms": (False, 0.05),
+    "옥타브 접기": (True, 0.0),
+    "옥타브 접기 + 긴 틈 (새 기본)": (True, 0.05),
 }
 
 
@@ -84,13 +86,11 @@ def check(wav, ms, vs, annot, n):
         tm._fill_gaps = real
         tm.OCTAVE_FIX = octave
     out = {}
-    for name, (octave, gap, rng) in VARIANTS.items():
+    for name, (octave, gap) in VARIANTS.items():
         t = got["target"]
         if octave:
-            t = tm._fold_octaves(t, got["mask"], got["notes"], max_cover=octave)
+            t = tm._fold_octaves(t, got["mask"], got["notes"])
         t = tm._fill_gaps(t, got["mask"], got["notes"], got["base"], gap)
-        if rng:
-            t = tm._clamp_to_notes(t, got["notes"], rng)
         want = (got["base"] + tm._pitd(t, got["base"], got["notes"], Options(**OPTS))) / 100
         out[name] = compare(want, got["mask"] & np.isfinite(got["target"]), got["notes"], ms, vs, annot, n)
         out[name]["method"] = res.pitch_method
@@ -160,15 +160,15 @@ def main():
             line = " · ".join(f"{name} {len(v['events'])}({sum(e['note_ok'] for e in v['events'])})" for name, v in r.items())
             print(f"vocadito {k} {label}: {line}", flush=True)
             if label == "깨끗한 보컬":  # 깨끗한 보컬에서 새로 생긴 곳 (나빠진 곳)
-                old = {(e["t"], e["kind"]) for e in r["지금"]["events"]}
+                old = {(e["t"], e["kind"]) for e in r["PR4 기본"]["events"]}
                 for name, v in r.items():
                     for e in v["events"]:
                         if (e["t"], e["kind"]) not in old:
                             print(f"    깨끗 · {name} 새로", json.dumps(e, ensure_ascii=False), flush=True)
             if label == "분리한 보컬":
-                base = r["지금"]["events"]
+                base = r["PR4 기본"]["events"]
                 for name, v in r.items():
-                    if name == "지금":
+                    if name == "PR4 기본":
                         continue
                     old = {(e["t"], e["kind"]) for e in base}
                     new = {(e["t"], e["kind"]) for e in v["events"]}
@@ -197,12 +197,12 @@ def main():
             ar = sum(r[name]["annot_rpa_n"] for r in rs) / max(1, sum(r[name]["annot_n"] for r in rs))
             print(f"| {name} | {len(evs) / minutes:.2f} | {ok / minutes:.2f} | {big / minutes:.2f} | {rpa:.4f} | {ao:.2f} | "
                   f"{ab:.2f} | {ar:.4f} |", flush=True)
-        evs = [e for r in rs for e in r["지금"]["events"]]
+        evs = [e for r in rs for e in r["PR4 기본"]["events"]]
         cnt = {}
         for e in evs:
             kk = f"{'음표 맞음' if e['note_ok'] else '음표도 다름'} · {e['why']} · {e['where']}"
             cnt[kk] = cnt.get(kk, 0) + 1
-        print("\n지금 방법 벗어남 종류: " + ", ".join(f"{k} {v}" for k, v in sorted(cnt.items(), key=lambda kv: -kv[1])), flush=True)
+        print("\nPR4 기본 벗어남 종류: " + ", ".join(f"{k} {v}" for k, v in sorted(cnt.items(), key=lambda kv: -kv[1])), flush=True)
 
 
 if __name__ == "__main__":

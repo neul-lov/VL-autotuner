@@ -28,7 +28,7 @@ jobs:
       matrix:
         include:
           - {id: 1, only: "새 기본,PR4 기본"}
-          - {id: 2, only: "긴 틈만,옥타브 접기만"}
+          - {id: 2, only: "다듬기 없음"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
