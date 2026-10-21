@@ -41,6 +41,7 @@ def variants():
 
 
 RENDER_VARIANTS = ("기본", "꺾기 남기기 6dB", "크기 창 30ms", "RMVPE")
+RENDER_REF_VARIANTS = ("기본", "모음 시작")
 OPTS = {"transpose": "0", "pitch_method": "harvest"}  # 방식마다 (None, 옵션 이름, 값)으로 바꾼다
 
 
@@ -221,6 +222,7 @@ def main():
     ap.add_argument("--vocadito")
     ap.add_argument("--render", nargs=2, metavar=("OPENUTAU", "WORK"))
     ap.add_argument("--render-songs", default="10,14")
+    ap.add_argument("--render-refs", type=int, default=0, help="테토 정답 노래 몇 곡을 조교해서 다시 렌더해 비교할지")
     ap.add_argument("--only", help="쉼표로 나눈 방식 이름만")
     args = ap.parse_args()
     refs = [Path(p) for p in args.refs if (Path(p) / "truth.json").exists()]
@@ -253,6 +255,24 @@ def main():
             hum = (f"{r['v_rpa']:.3f} | {r['v_vfa']:.3f} | {r['v_conp']:.3f} | {r['v_conpoff']:.3f} | {r['v_con']:.3f}"
                    ) if "v_rpa" in r else " | | | | "
             print(f"| {name} | {ref} | {hum} |")
+    if args.render and refs and args.render_refs:
+        print()
+        print("| 방식 | 테토 정답 노래 → 조교 → 렌더 | 음 높이 오차 중앙/90% (센트) | 50센트 안 | 크기 상관 |")
+        print("|---|---|---|---|---|")
+        for name in RENDER_REF_VARIANTS:
+            if name not in rows:
+                continue
+            cs = []
+            for d in refs[:args.render_refs]:
+                with patched(vs[name]), tempfile.TemporaryDirectory() as tmp:
+                    out = Path(tmp) / "o"
+                    run_tune(d / "ref_ref.wav", (d / "lyrics.txt").read_text(encoding="utf-8"), out)
+                    cs.append(render_compare(Path(args.render[0]), Path(args.render[1]), out))
+            med = np.mean([c["pitch_err_cents_median"] for c in cs])
+            p90 = np.mean([c["pitch_err_cents_p90"] for c in cs])
+            w50 = np.mean([c["within_50_cents"] for c in cs])
+            lc = np.mean([c["loudness_corr"] for c in cs])
+            print(f"| {name} | {len(cs)}곡 평균 | {med:.1f}/{p90:.1f} | {w50:.3f} | {lc:.3f} |", flush=True)
     if args.render and songs:
         want = {int(x) for x in args.render_songs.split(",")}
         print()

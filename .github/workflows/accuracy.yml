@@ -59,7 +59,7 @@ jobs:
           export CSC=$(ls -d "$DOTNET_ROOT"/sdk/*/Roslyn/bincore/csc.dll | tail -1)
           set -o pipefail
           python -W ignore devtools/accuracy.py --refs out/ref* --vocadito vocadito \
-            --render "$PWD/OpenUtau.app/Contents/MacOS" "$PWD/ourun" --render-songs 10,14,3,22 | tee out/accuracy.txt
+            --render "$PWD/OpenUtau.app/Contents/MacOS" "$PWD/ourun" --render-songs 10,14,3,22 --render-refs 6 | tee out/accuracy.txt
           sed -n '/^|/,$p' out/accuracy.txt >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
