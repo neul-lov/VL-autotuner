@@ -23,7 +23,6 @@ DYN_WIN = 0.02  # 초. 크기 윤곽을 잡는 최댓값 · 다듬기 창 (길�
 DYN_GAIN = 1 / 0.7  # 셈여림 0.7(앱 기본값)에서 원래 보컬 크기 차이를 그대로: 실제 테토 렌더 비교에서 이쪽이 더 닮았다
 LEGATO_GAP = 0.3  # 초. 음표 사이 이보다 짧은 틈은 앞 음표를 늘여 메운다 (자음 · 성대 닫힘에서 소리가 뚝 끊기지 않게). 0 = 끔
 FALL_LIMIT = 0.0  # 센트. 쉼 앞 음표 끝에서 음높이가 이보다 더 떨어지지 않게. 0 = 그대로
-DYN_FLOOR = None  # 음표 가운데에서 크기 곡선이 이보다 작아지지 않게 (dyn 값). None = 그대로
 GLITCH_CENTS = 0.0  # 센트. 원래 음높이가 앞뒤(150ms 중앙값)와 이보다 더 다른 짧은(GLITCH_LEN 안) 곳은 잘못 읽은 것으로 보고 지운다. 0 = 끔
 GLITCH_LEN = 0.08  # 초
 
@@ -352,8 +351,6 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
     rel = env - ref
     rel = np.where(rel < -6, -6 + (rel + 6) * 0.5, rel)  # 아주 작은 곳은 반만: 음원 소리가 묻히지 않게
     dyn = np.clip(rel * 10 * o.dynamics * DYN_GAIN, -120, 60) * near
-    if DYN_FLOOR is not None:
-        dyn = np.maximum(dyn, DYN_FLOOR * steady)
 
     stats = {}
 
