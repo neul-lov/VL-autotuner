@@ -227,6 +227,10 @@ def preview(name: str):
     folder = _result_folder(name)
     prev = json.loads((folder / "preview.json").read_text())
     prev["history"] = edit.history_count(folder)
+    try:  # 구간 다시 조교하기 창이 처음 조교한 설정에서 시작하게
+        prev["options"] = json.loads((folder / "report.json").read_text()).get("options")
+    except (OSError, ValueError):
+        pass
     return prev
 
 
@@ -285,6 +289,37 @@ def retune_result(name: str, start: float = Form(...), end: float = Form(...), o
         except Exception as e:
             traceback.print_exc()
             job.update(status="error", error=str(e) if isinstance(e, ValueError) else f"다시 조교하지 못했어요: {e}")
+    threading.Thread(target=run, daemon=True).start()
+    return {"job_id": job_id}
+
+
+@app.post("/api/results/{name}/render")
+def render_result(name: str):
+    """지금 project.ustx를 테토로 다시 불러서 미리 듣기(teto_preview.wav)를 새로 만든다 (고친 뒤에). job으로 따라간다."""
+    folder = _result_folder(name)
+    if not openutau.available():
+        raise HTTPException(400, "OpenUtau를 찾지 못했어요")
+    job_id = uuid.uuid4().hex[:12]
+    jobs[job_id] = {"status": "running", "step": "테토로 불러 보는 중", "progress": 0.1}
+
+    def run():
+        job = jobs[job_id]
+        work = folder / ".render"
+        try:
+            with work_lock:
+                wav = openutau.render(folder / "project.ustx", work)
+                shutil.move(str(wav), folder / "teto_preview.wav")
+                prev_path = folder / "preview.json"
+                prev = json.loads(prev_path.read_text(encoding="utf-8"))
+                prev.pop("teto_stale", None)
+                prev_path.write_text(json.dumps(prev, ensure_ascii=False), encoding="utf-8")
+                prev["history"] = edit.history_count(folder)
+            job.update(status="done", progress=1.0, step="끝", result=prev)
+        except Exception as e:
+            traceback.print_exc()
+            job.update(status="error", error=str(e))
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
     threading.Thread(target=run, daemon=True).start()
     return {"job_id": job_id}
 
