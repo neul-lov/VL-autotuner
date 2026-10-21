@@ -1,0 +1,250 @@
+name: Mac 앱 빌드 · 엔진 시험
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 같은 브랜치에 새로 올리면 앞의 실행은 멈춰요
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# 이 저장소에 쓰지 않아요 (OpenUtau 릴리스 받기 · 아티팩트 올리기만)
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # pipefail: `… | tee` 앞의 명령이 실패해도 단계가 실패로 보이게
+    shell: bash
+
+jobs:
+  engine:
+    name: 엔진 시험 (Python ${{ matrix.python }})
+    runs-on: macos-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 = Mac 기본 python3 (Command Line Tools), 3.13 = 최신
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -r requirements.txt -r requirements-extra.txt pytest httpx
+      - run: python -m pytest -q tests
+
+  app:
+    name: TetoTune.app
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.9
+            3.10
+            3.11
+            3.12
+            3.13
+            3.14
+      - name: pyworld 휠 만들기 (PyPI에 Mac용이 없어서 앱에 넣어요)
+        run: |
+          for v in 3.9 3.10 3.11 3.12 3.13 3.14; do
+            python$v -m pip wheel --no-deps "pyworld>=0.3.4" -w mac/wheels
+          done
+          ls mac/wheels
+      - run: swift --version
+      - name: 앱 빌드
+        run: cd mac && ./build.sh
+      - name: Apple Silicon · 인텔 Mac 둘 다 되는지
+        run: |
+          archs=$(lipo -archs mac/build/TetoTune.app/Contents/MacOS/TetoTune)
+          echo "$archs"; [[ "$archs" == *arm64* && "$archs" == *x86_64* ]]
+          cat mac/build/TetoTune.app/Contents/Resources/engine/wheels/constraints.txt
+          plutil -lint mac/build/TetoTune.app/Contents/Info.plist
+      - name: 압축
+        run: ditto -c -k --keepParent mac/build/TetoTune.app TetoTune-mac.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TetoTune-mac
+          path: TetoTune-mac.zip
+          retention-days: 30
+
+  app-smoke:
+    name: 앱 실행 시험 (처음 설치 → 엔진 → 조교)
+    needs: app
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: TetoTune-mac
+      - name: 앱 켜기
+        run: |
+          ditto -x -k TetoTune-mac.zip .
+          ls /opt/homebrew/bin/python3* /usr/local/bin/python3* 2>/dev/null || true
+          /opt/homebrew/bin/python3 --version || true
+          open --stdout "$PWD/app.out" --stderr "$PWD/app.err" TetoTune.app
+      - name: 엔진이 뜰 때까지 (처음 실행 설치 포함)
+        run: |
+          sup="$HOME/Library/Application Support/TetoTune"
+          for i in $(seq 1 180); do
+            # 앱이 엔진을 켤 때마다 고른 포트와 비밀값 (이 사용자만 읽을 수 있는 파일)
+            if [ -f "$sup/server.json" ]; then
+              port=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["port"])' "$sup/server.json")
+              token=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["token"])' "$sup/server.json")
+              if curl -sf -H "X-TetoTune-Token: $token" "http://127.0.0.1:$port/api/status" > status.json; then
+                cat status.json; echo; grep -h "^\[TetoTune\]" "$sup/setup.log" || true
+                ls -l "$sup/server.json"
+                echo "::add-mask::$token"
+                echo "port=$port" >> "$GITHUB_ENV"; echo "token=$token" >> "$GITHUB_ENV"
+                # 비밀값 없는 요청은 막혀야 한다
+                code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/api/results")
+                echo "비밀값 없이: $code"; [ "$code" = "403" ] || exit 1
+                # 앱에 넣은 pyworld 휠을 썼는지 (컴파일했다면 컴파일러 없는 Mac에서는 설치가 실패한다)
+                if grep -q "Building wheel for pyworld" "$sup/setup.log"; then echo "앱에 넣은 pyworld 휠을 안 썼어요"; exit 1; fi
+                grep -E "Processing .*pyworld-|pyworld.*\.whl" "$sup/setup.log" | head -n 2 || true
+                exit 0
+              fi
+            fi
+            if (( i % 12 == 0 )); then
+              echo "--- $((i * 5))초: $(pgrep -lf 'TetoTune|server.py|pip' | tr '\n' ' ')"
+              tail -n 2 "$sup/setup.log" 2>/dev/null || true
+              tail -n 5 "$sup/server-app.log" 2>/dev/null || true
+            fi
+            sleep 5
+          done
+          echo "엔진이 뜨지 않았어요"; exit 1
+      - name: 화면 찍기
+        if: always()
+        continue-on-error: true
+        run: screencapture -x screen.png
+      - name: 앱으로 조교 한 번
+        run: |
+          vocal="$PWD/devtools/testdata/vocadito_14.flac"
+          job=$(curl -sf -H "X-TetoTune-Token: $token" -X POST "http://127.0.0.1:$port/api/tune" --data-urlencode "vocal=$vocal" \
+                --data-urlencode "lyrics=" --data-urlencode 'options={}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["job_id"])')
+          for i in $(seq 1 120); do
+            s=$(curl -sf -H "X-TetoTune-Token: $token" "http://127.0.0.1:$port/api/jobs/$job")
+            st=$(echo "$s" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')
+            if [ "$st" != "running" ]; then echo "$s"; [ "$st" = "done" ] && exit 0 || exit 1; fi
+            sleep 2
+          done
+          exit 1
+      - name: 앱이 갑자기 꺼지면 엔진도 꺼지는지
+        run: |
+          pgrep -lf "server.py" || { echo "엔진이 없어요"; exit 1; }
+          pkill -9 -x TetoTune
+          for i in $(seq 1 10); do
+            pgrep -f "server.py" > /dev/null || { echo "엔진도 꺼졌어요 (${i}초)"; exit 0; }
+            sleep 1
+          done
+          echo "앱이 꺼졌는데 엔진이 남아 있어요"; pgrep -lf server.py; exit 1
+      - name: 기록 모으기
+        if: always()
+        run: |
+          sup="$HOME/Library/Application Support/TetoTune"
+          mkdir -p smoke
+          cp "$sup"/*.log smoke/ 2>/dev/null || true
+          cp screen.png status.json app.out app.err smoke/ 2>/dev/null || true
+          ls -la "$sup" "$sup/venv" 2>/dev/null || true
+          for f in "$sup/setup.log" "$sup/server-app.log" app.out app.err; do
+            echo "===== $f"; tail -n 80 "$f" 2>/dev/null || true
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: app-smoke
+          path: smoke
+          retention-days: 14
+
+  teto:
+    name: 실제 테토 음원으로 OpenUtau 렌더 (소리 재생 없음)
+    # 다른 사람 저장소(포크)에서 온 PR에서는 테토 음원을 받지 않아요
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - run: python -m pip install -r requirements.txt -r requirements-extra.txt matplotlib
+      - name: OpenUtau (Mac) 받기
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh release view -R stakira/OpenUtau --json tagName -q .tagName)
+          gh release download "$tag" -R stakira/OpenUtau -p "*osx-arm64*.dmg" -O ou.dmg
+          hdiutil attach ou.dmg -nobrowse -mountpoint /tmp/ou
+          cp -R /tmp/ou/OpenUtau.app ./
+          hdiutil detach /tmp/ou
+          echo "OpenUtau $tag" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: 테토 음원 받기 (공식 배포 · OpenUTAU용 통합 세트, 시험에만 쓰고 올리지 않아요)
+        run: |
+          curl -fL --retry 3 -o teto.zip https://kasaneteto.jp/assets/download/utau/TETO-OUset240323.zip
+          python devtools/install_voicebank.py teto.zip
+      - name: 조교
+        run: |
+          mkdir -p out
+          for k in 10 14; do python -m tetotune devtools/testdata/vocadito_$k.flac out/v$k | tail -n +1 > out/v$k.log; tail -20 out/v$k.log; done
+      - name: OpenUtau로 렌더
+        run: |
+          export CSC=$(ls -d "$DOTNET_ROOT"/sdk/*/Roslyn/bincore/csc.dll | tail -1)
+          for k in 10 14; do
+            devtools/openutau_harness/render.sh "$PWD/OpenUtau.app/Contents/MacOS" "$PWD/ourun" "$PWD/out/v$k/project.ustx" "$PWD/out/v$k/render.wav" | tee out/v$k/harness.txt
+          done
+      - name: 원래 보컬과 비교
+        run: |
+          for k in 10 14; do
+            python devtools/compare_render.py out/v$k "$(ls out/v$k/render_*.wav | head -1)" out/v$k/compare.png | tee out/v$k/compare.json
+          done
+      - name: 정답을 아는 테토 노래로 가사 · 음표 · 숨 맞추기
+        run: |
+          export CSC=$(ls -d "$DOTNET_ROOT"/sdk/*/Roslyn/bincore/csc.dll | tail -1)
+          ou="$PWD/OpenUtau.app/Contents/MacOS"
+          for seed in 7 3; do
+            d="$PWD/out/ref$seed"; mkdir -p "$d"
+            python devtools/make_reference_song.py "$d/ref.ustx" "$d/truth.json" $seed --teto --lyrics "$d/lyrics.txt"
+            devtools/openutau_harness/render.sh "$ou" "$PWD/ourun" "$d/ref.ustx" "$d/ref.wav" > "$d/harness_ref.txt"
+            grep -m1 phoneme_errors "$d/harness_ref.txt"
+            python -m tetotune "$d/ref_ref.wav" "$d/tuned" --lyrics "$d/lyrics.txt" > "$d/tune.log"
+            devtools/openutau_harness/render.sh "$ou" "$PWD/ourun" "$d/tuned/project.ustx" "$d/tuned/render.wav" > "$d/harness_tuned.txt"
+            grep -m1 phoneme_errors "$d/harness_tuned.txt"
+            echo "== 시드 $seed: $(cat "$d/lyrics.txt" | tr '\n' ' ')"
+            python devtools/eval_reference.py "$d/truth.json" "$d/tuned" | tee "$d/eval.txt"
+            python -c 'import json,sys; [print("경고:", w) for w in json.load(open(sys.argv[1]))["warnings"]]' "$d/tuned/report.json"
+            python devtools/breath_report.py "$d/truth.json" "$d/ref_ref.wav" "$d/tuned" 2>/dev/null | tee "$d/breath_report.txt"
+            python devtools/compare_render.py "$d/tuned" "$(ls "$d"/tuned/render_*.wav | head -1)" | tee "$d/compare.json"
+          done
+      - name: 테토 정답 노래 여러 곡으로 설정 비교 (렌더는 정답 노래만)
+        run: |
+          export CSC=$(ls -d "$DOTNET_ROOT"/sdk/*/Roslyn/bincore/csc.dll | tail -1)
+          ou="$PWD/OpenUtau.app/Contents/MacOS"
+          for seed in 1 2 5 11 13 21; do
+            d="$PWD/out/ref$seed"; mkdir -p "$d"
+            python devtools/make_reference_song.py "$d/ref.ustx" "$d/truth.json" $seed --teto --lyrics "$d/lyrics.txt" > /dev/null
+            devtools/openutau_harness/render.sh "$ou" "$PWD/ourun" "$d/ref.ustx" "$d/ref.wav" > "$d/harness_ref.txt"
+          done
+          python -W ignore devtools/sweep_reference.py out/ref* | tee out/sweep.txt
+          cat out/sweep.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: 결과 숫자 · 그림만 올리기 (테토 소리 파일은 올리지 않아요)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: teto-results
+          path: |
+            out
+            !out/**/*.wav
+            !out/**/*.flac
+          retention-days: 14
