@@ -183,13 +183,7 @@ jobs:
       - name: OpenUtau (Mac) 받기
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          tag=$(gh release view -R stakira/OpenUtau --json tagName -q .tagName)
-          gh release download "$tag" -R stakira/OpenUtau -p "*osx-arm64*.dmg" -O ou.dmg
-          hdiutil attach ou.dmg -nobrowse -mountpoint /tmp/ou
-          cp -R /tmp/ou/OpenUtau.app ./
-          hdiutil detach /tmp/ou
-          echo "OpenUtau $tag" | tee -a "$GITHUB_STEP_SUMMARY"
+        run: devtools/openutau_harness/get_openutau.sh | tee -a "$GITHUB_STEP_SUMMARY"
       - name: 테토 음원 받기 (공식 배포 · OpenUTAU용 통합 세트, 시험에만 쓰고 올리지 않아요)
         run: |
           curl -fL --retry 3 -o teto.zip https://kasaneteto.jp/assets/download/utau/TETO-OUset240323.zip

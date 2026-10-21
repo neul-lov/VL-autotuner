@@ -50,7 +50,7 @@ def _rmvpe(y16, n_frames):
     sess = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
     inputs = sess.get_inputs()
     wave_in = next((i for i in inputs if "wav" in i.name.lower()), inputs[0])
-    feeds = {wave_in.name: y16[None, :].astype(np.float32)}
+    feeds = {wave_in.name: np.clip(y16, -1, 1)[None, :].astype(np.float32)}
     for i in inputs:
         if i is not wave_in:  # threshold (OpenUtau는 0.03)
             feeds[i.name] = np.array(0.03, dtype=np.float32).reshape([1] * len(i.shape) if i.shape else [])
