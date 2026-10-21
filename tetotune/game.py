@@ -22,8 +22,8 @@ SEED = 20251021
 
 # 받을 모델은 판을 고정하고 SHA-256으로 확인한다 (배포처가 바뀌거나 망가져도 다른 파일을 쓰지 않게).
 # OpenUtau 패키지 목록(svs-index)의 game 항목에 있는 판. 새 판으로 올릴 때는 URL과 SHA-256을 같이 바꾼다
-MODEL_URL = "@@URL@@"
-MODEL_SHA256 = "@@SHA@@"
+MODEL_URL = "https://github.com/openvpi/GAME/releases/download/oudep/GAME-1.0.3-medium.oudep"  # 1.0.3-medium
+MODEL_SHA256 = "d7bda232352ee5cf275e54e58950401357902a99a8fb54e4dbb9b26ee63752e3"
 MAX_DOWNLOAD = 512 << 20  # 받는 압축 파일 크기 상한
 MAX_UNPACKED = 1 << 30  # 푼 크기 상한
 ALLOWED = {".onnx", ".json", ".yaml", ".yml", ".txt", ".md"}  # 압축 안에 있어도 되는 파일
