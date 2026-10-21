@@ -22,9 +22,10 @@ INTERVAL = 5  # OpenUtau 곡선 간격 (틱)
 DYN_WIN = 0.02  # 초. 크기 윤곽을 잡는 최댓값 · 다듬기 창 (길면 크기가 음 시작보다 먼저 커진다)
 DYN_GAIN = 1 / 0.7  # 셈여림 0.7(앱 기본값)에서 원래 보컬 크기 차이를 그대로: 실제 테토 렌더 비교에서 이쪽이 더 닮았다
 LEGATO_GAP = 0.3  # 초. 음표 사이 이보다 짧은 틈은 앞 음표를 늘여 메운다 (자음 · 성대 닫힘에서 소리가 뚝 끊기지 않게). 0 = 끔
-FINE_HZ = 0.0  # 원래 음높이의 빠른 움직임 중 이 Hz보다 빠른 떨림(음높이 읽기 잡음)은 거른다. 0 = 거르지 않음
 FALL_LIMIT = 0.0  # 센트. 쉼 앞 음표 끝에서 음높이가 이보다 더 떨어지지 않게. 0 = 그대로
 DYN_FLOOR = None  # 음표 가운데에서 크기 곡선이 이보다 작아지지 않게 (dyn 값). None = 그대로
+GLITCH_CENTS = 0.0  # 센트. 원래 음높이가 앞뒤(150ms 중앙값)와 이보다 더 다른 짧은(GLITCH_LEN 안) 곳은 잘못 읽은 것으로 보고 지운다. 0 = 끔
+GLITCH_LEN = 0.08  # 초
 
 
 @dataclass
@@ -145,6 +146,23 @@ def _legato(notes, breaths, db, sing_db, max_gap=None, silent=0.1):
             continue
         a.end = b.start
     return notes
+
+
+def _deglitch(target, mask, limit, max_len=None, win=0.15):
+    """분리한 보컬 · 자음 옆에서 음높이를 잠깐 잘못 읽은 곳(확 떨어졌다 돌아오거나 튀는 곳)을 앞뒤 중앙값으로 바꾼다.
+    중앙값은 음이 바뀌는 계단은 그대로 두니 음표 사이 오르내림 · 꺾기는 남는다 (max_len보다 긴 움직임도 그대로)."""
+    from scipy.ndimage import median_filter
+
+    max_len = GLITCH_LEN if max_len is None else max_len
+    med = median_filter(target, size=int(win / HOP) | 1, mode="nearest")
+    bad = mask & (np.abs(target - med) > limit)
+    w = np.zeros(len(target))
+    k = int(max_len / HOP)
+    for a, b in pitch._runs(bad):
+        if b - a <= k:
+            w[max(0, a - 2):b + 2] = 1.0
+    w = np.minimum(1.0, _smooth(w, 0.02) * 2)
+    return target * (1 - w) + med * w
 
 
 def _limit_falls(pitd, notes, limit, tail=0.25):
@@ -309,12 +327,12 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
     target = (midi + shift) * 100.0
     sing_mask = voiced & _note_mask(notes, n, 0.05, 0.05)
     target = _interp_gaps(target, sing_mask)
+    if GLITCH_CENTS > 0:
+        target = _deglitch(target, _note_mask(notes, n), GLITCH_CENTS)
     base = _base_cents(all_notes, t)
     dev = target - base
     lp = _lowpass(dev, 3.0)
     fine = dev - lp
-    if FINE_HZ > 0:
-        fine = _lowpass(fine, FINE_HZ)
     # 음 가운데(앞뒤 80ms 또는 25% 뺀 곳)에서만 음정 틀림을 바로잡는다 → 미끄러짐 · 꺾기는 그대로
     steady = np.zeros(n)
     for x in notes:

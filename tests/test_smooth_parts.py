@@ -99,3 +99,17 @@ def test_refine_keeps_best_round(tmp_path):
     r = refine.refine(tmp_path, render, rounds=2)
     assert len(calls) == 3 and r["best"] == 0
     assert (tmp_path / "teto_preview.wav").exists() and (tmp_path / "refine.json").exists()
+
+
+def test_deglitch_removes_short_dips_keeps_steps_and_long_bends():
+    from tetotune import tune
+    from tetotune.pitch import HOP
+    n = int(2.0 / HOP)
+    t = np.arange(n) * HOP
+    x = np.where(t < 1.0, 6000.0, 6200.0)  # 음이 바뀌는 계단
+    x[(t > 0.5) & (t < 0.55)] -= 700  # 50ms 확 떨어짐 (잘못 읽음)
+    x[(t > 1.4) & (t < 1.7)] += 300  # 300ms 꺾기 (진짜)
+    y = tune._deglitch(x, np.ones(n, bool), 150)
+    assert np.max(np.abs(y[(t > 0.48) & (t < 0.57)] - 6000)) < 40
+    assert abs(y[int(0.99 / HOP)] - 6000) < 1 and abs(y[int(1.01 / HOP)] - 6200) < 1
+    assert abs(y[int(1.55 / HOP)] - 6500) < 1

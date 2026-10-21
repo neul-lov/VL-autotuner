@@ -16,7 +16,7 @@ import yaml
 from . import audio, confidence, pitch
 from .pitch import HOP
 
-ROUNDS = 2          # 고치는 횟수 (렌더는 ROUNDS + 1번)
+ROUNDS = 3          # 고치는 횟수 (렌더는 ROUNDS + 1번). 2번보다 3번이 끊김 · 크기 차이가 조금 더 줄었다
 PITCH_GAIN = 0.8    # 한 번에 고치는 비율 (렌더 음높이 읽기 오차에 흔들리지 않게 조금 덜)
 DYN_GAIN = 0.7
 PITCH_STEP = 200.0  # 센트. 한 번에 고치는 최대
