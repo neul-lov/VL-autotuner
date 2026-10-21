@@ -16,6 +16,8 @@ LINE_MATCH = True  # 가사 줄 수 ≠ 프레이즈 수일 때 줄 경계를 �
 ONSET_MAX = 0.15  # 이보다 짧은 음표가 다음 음표 바로 앞에 붙어 있으면 앞 음표에 붙인다 (_merge_onsets, 0이면 끔)
 ONSET_ANY = True  # False면 자음 같은(무성 · 높은 대역) 짧은 음표만
 SYL_GAP = 0.12  # 음절 시작 후보 두 곳이 이보다 가까우면 약한 쪽은 마지막에 고른다 (_evidence, 0이면 끔)
+USE_GAME = True  # GAME 모델이 있으면 음표 나누기를 GAME으로 (game.py). 없으면 아래 비터비
+VOWEL_ONSET = True  # 울리는 자음(ま · な · ら · や · わ · が행 등)으로 시작하는 음절은 음표 시작을 모음 시작으로 옮긴다
 
 
 class Note:
@@ -175,6 +177,21 @@ def segment(midi, voiced, db, novelty=None, auto_split_db=6.0, noise=None, hiban
     return notes, offset
 
 
+def from_game(game_notes, midi, voiced):
+    """GAME 음표 [(시작, 끝, midi 소수)] → Note 목록. 쉼(REST_GAP보다 긴 틈) 뒤는 프레이즈 시작.
+    GAME이 나눈 곳은 새 음절일 가능성이 커서 무성 틈(자음)과 같은 세기로 둔다."""
+    offset = tuning_offset(midi, voiced)
+    out = []
+    for s, e, p in game_notes:
+        if e - s < 0.03:
+            continue
+        gap = s - out[-1].end if out else 99.0
+        if out and gap < 0:
+            out[-1].end = s
+        out.append(Note(s, e, int(np.round(p - offset)), strength=10.0 if gap > REST_GAP else 5.0))
+    return out, offset
+
+
 def _consonant_like(note, voiced, hiband):
     """음표 대부분이 무성(메운 자음 틈)이거나 바람 소리처럼 높은 대역이 센지."""
     fa, fb = int(round(note.start / HOP)), int(round(note.end / HOP))
@@ -247,6 +264,44 @@ def _merge_onsets(notes, consonant=lambda x: True, max_len=None):
             notes[i - 1].end = x.end
             notes[i - 1].dips += [(x.start, max(0.0, x.strength - 2.0))] + x.dips
         notes.pop(i)
+    return notes
+
+
+# 울리는 자음: 소리(유성)가 자음부터 나서 음표가 모음보다 일찍 시작한다
+_VOICED_KANA = set("まみむめもなにぬねのらりるれろやゆよわをがぎぐげござじずぜぞだぢづでどばびぶべぼゔ")
+_VOICED_ROMA = set("mnrywbdgzjv")
+
+
+def _voiced_onset(lyric):
+    if not lyric or lyric == "+":
+        return False
+    c = lyric[0]
+    if "가" <= c <= "힣":  # 첫소리 ㄴ · ㄹ · ㅁ (ㅇ은 소리 없음)
+        return (ord(c) - 0xAC00) // 588 in (2, 5, 6)
+    return c in _VOICED_KANA or c.lower() in _VOICED_ROMA
+
+
+def shift_to_vowels(notes, db, max_shift=0.2, drop=5.0, min_shift=0.02):
+    """울리는 자음으로 시작하는 음절의 음표 시작을 모음이 시작하는 곳(크기가 그 음표의 큰 쪽 크기 − drop dB에 처음 닿는 곳)으로
+    옮긴다. 앞 음표가 바로 붙어 있으면 그 끝도 같이 (자음은 앞 음표 끝 몫: OpenUtau가 선행발성만큼 앞에 부른다)."""
+    from scipy.ndimage import uniform_filter1d
+
+    db_s = uniform_filter1d(db, 3)
+    for i, x in enumerate(notes):
+        if not _voiced_onset(x.lyric):
+            continue
+        a, b = int(round(x.start / HOP)), int(round(x.end / HOP))
+        lim = min(b, a + int(max_shift / HOP))
+        if lim - a < 4 or b - a < 8:
+            continue
+        peak = np.percentile(db_s[a:b], 80)
+        k = next((j for j in range(a, lim) if db_s[j] >= peak - drop), None)
+        if k is None or (k - a) * HOP < min_shift or (b - k) * HOP < 0.06:
+            continue
+        t = k * HOP
+        if i and abs(notes[i - 1].end - x.start) < 1e-6:
+            notes[i - 1].end = t
+        x.start = t
     return notes
 
 

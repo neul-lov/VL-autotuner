@@ -2,9 +2,9 @@
 import PackageDescription
 
 let package = Package(
-    name: "TetoTune",
+    name: "AutoTuner",
     platforms: [.macOS(.v14)],
     targets: [
-        .executableTarget(name: "TetoTune", path: "Sources/TetoTune")
+        .executableTarget(name: "AutoTuner", path: "Sources/AutoTuner")
     ]
 )

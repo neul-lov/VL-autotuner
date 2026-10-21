@@ -384,7 +384,7 @@ final class Backend {
     private func note(_ text: String) {
         guard let h = try? FileHandle(forWritingTo: setupLog) else { return }
         _ = try? h.seekToEnd()
-        try? h.write(contentsOf: Data(("[TetoTune] " + text + "\n").utf8))
+        try? h.write(contentsOf: Data(("[AutoTuner] " + text + "\n").utf8))
         try? h.close()
     }
 

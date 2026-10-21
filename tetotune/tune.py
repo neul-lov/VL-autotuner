@@ -19,6 +19,8 @@ from .pitch import HOP
 
 TICKS = 480
 INTERVAL = 5  # OpenUtau 곡선 간격 (틱)
+DYN_WIN = 0.02  # 초. 크기 윤곽을 잡는 최댓값 · 다듬기 창 (길면 크기가 음 시작보다 먼저 커진다)
+DYN_GAIN = 1 / 0.7  # 셈여림 0.7(앱 기본값)에서 원래 보컬 크기 차이를 그대로: 실제 테토 렌더 비교에서 이쪽이 더 닮았다
 
 
 @dataclass
@@ -162,7 +164,18 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
         if not notes:
             raise ValueError("음표 파일에 음표가 없어요")
     else:
-        notes, _ = nt.segment(midi, voiced, db, feats["novelty"], noise=noise, hiband=feats["high_ratio"])
+        gnotes = None
+        if nt.USE_GAME:
+            from . import game
+            try:
+                gnotes = game.transcribe(y, sr, voiced, HOP, lyr.language(lyrics_text) if lines else None)
+            except Exception as e:  # 모델이 깨졌거나 onnxruntime이 맞지 않으면 원래 방법으로
+                warnings.append(f"GAME으로 음표를 나누지 못해서 원래 방법으로 했어요 ({e})")
+        if gnotes:
+            notes, _ = nt.from_game(gnotes, midi, voiced)
+            used += "+game"
+        else:
+            notes, _ = nt.segment(midi, voiced, db, feats["novelty"], noise=noise, hiband=feats["high_ratio"])
         if not notes:
             raise ValueError("음표를 만들지 못했어요")
     bpm = float(bpm or 120.0)
@@ -172,6 +185,8 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
             warnings.append(f"노래에서 숨 쉬는 곳(프레이즈)을 {phrases}개 찾았는데 가사는 {len(lines)}줄이에요. "
                             f"가사를 프레이즈마다 한 줄씩 나눠 주면 음절이 더 정확히 들어가요")
         notes = nt.align(notes, lines)
+        if nt.VOWEL_ONSET and not notes_file:
+            notes = nt.shift_to_vowels(notes, db)
         n_syl = sum(1 for line in lines for s in line if s != "+")  # ー · + (늘이기)는 음절이 아니다
         got = sum(1 for x in notes if x.lyric != "+")
         if got != n_syl:
@@ -249,12 +264,12 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
 
     near = _smooth(_note_mask(notes, n, 0.1, 0.06).astype(float), 0.04)
     ref = float(np.median(db[voiced]))
-    # 크기는 겉 윤곽만 (80ms 최댓값): 음절 사이 자음에서 잠깐 꺼지는 건 음원 자음이 이미 갖고 있다
+    # 크기는 겉 윤곽만 (DYN_WIN 최댓값): 음절 사이 자음에서 잠깐 꺼지는 건 음원 자음이 이미 갖고 있다
     from scipy.ndimage import maximum_filter1d
-    env = _smooth(maximum_filter1d(_interp_gaps(db, sing_mask), int(0.08 / HOP)), 0.08)
+    env = _smooth(maximum_filter1d(_interp_gaps(db, sing_mask), int(DYN_WIN / HOP)), DYN_WIN)
     rel = env - ref
     rel = np.where(rel < -6, -6 + (rel + 6) * 0.5, rel)  # 아주 작은 곳은 반만: 음원 소리가 묻히지 않게
-    dyn = np.clip(rel * 10 * o.dynamics, -120, 60) * near
+    dyn = np.clip(rel * 10 * o.dynamics * DYN_GAIN, -120, 60) * near
 
     def zcurve(raw, scale, lo, hi):
         v = raw[sing_mask & np.isfinite(raw)]
@@ -310,6 +325,7 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
         else [[round(a, 3), round(b, 3)] for a, b, *_ in breaths],
         "duration": len(y) / sr,
         "phrases": len(nt._phrases([x for x in notes])),
+        "offset": round(nt.tuning_offset(midi, voiced), 3),
     }
     (out / "preview.json").write_text(json.dumps(preview, ensure_ascii=False), encoding="utf-8")
     res = Result(str(out), str(out / "project.ustx"), len(notes),
@@ -374,7 +390,7 @@ def _write_ustx(path, name, bpm, notes, breath_ids, curves, waves, singer, phone
         wave_parts.append({"name": track_name, "comment": "", "track_no": i, "position": 0,
                            "relative_path": file, "file_duration_ms": float(ms), "skip_ms": 0.0, "trim_ms": 0.0})
     project = {
-        "name": name, "comment": "TetoTune 자동 조교. 1마디 첫 박 = 원래 보컬 0초",
+        "name": name, "comment": "AutoTuner 자동 조교. 1마디 첫 박 = 원래 보컬 0초",
         "output_dir": "Vocal", "cache_dir": "UCache", "ustx_version": "0.6", "key": 0,
         "time_signatures": [{"bar_position": 0, "beat_per_bar": 4, "beat_unit": 4}],
         "tempos": [{"position": 0, "bpm": float(round(bpm, 3))}],

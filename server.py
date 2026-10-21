@@ -1,4 +1,4 @@
-"""TetoTune 엔진 서버. Mac 앱(TetoTune.app)이 켜질 때 띄우고, 앱을 끄면 같이 꺼진다.
+"""AutoTuner 엔진 서버. Mac 앱(AutoTuner.app)이 켜질 때 띄우고, 앱을 끄면 같이 꺼진다.
 
 실행: python server.py  →  http://127.0.0.1:8766  (화면은 Mac 앱)
 앱이 띄울 때는 빈 포트(TETOTUNE_PORT)와 실행마다 새로 만든 비밀값(TETOTUNE_TOKEN)을 넘기고,
@@ -18,7 +18,7 @@ from pathlib import Path
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import JSONResponse
 
-from tetotune import __version__, pitch, stemmixer, voicebank
+from tetotune import __version__, game, pitch, stemmixer, voicebank
 from tetotune.tune import Options, tune
 
 # 설정 값마다 허용 범위 (숫자) 또는 고를 수 있는 값 (글자)
@@ -32,7 +32,8 @@ INCOMPLETE = ".incomplete"  # 조교 중인 폴더 표시 (엔진 pid). 끝나�
 
 PORT = int(os.environ.get("TETOTUNE_PORT", 8766))
 TOKEN = os.environ.get("TETOTUNE_TOKEN") or None
-OUTPUT = Path(os.environ.get("TETOTUNE_OUTPUT") or Path.home() / "Music" / "TetoTune")
+OUTPUT = Path(os.environ.get("TETOTUNE_OUTPUT") or Path.home() / "Music" / "AutoTuner")
+OLD_OUTPUT = Path.home() / "Music" / "TetoTune"  # 앱 이름을 바꾸기 전 결과 폴더: 처음 켤 때 옮긴다
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
 
 app = FastAPI()
@@ -47,11 +48,11 @@ async def only_this_computer(request, call_next):
     name = host if host.endswith("]") else host.rsplit(":", 1)[0]
     origin = request.headers.get("origin")
     if name not in LOCAL_HOSTS or (origin is not None and origin != f"http://{host}"):
-        return JSONResponse({"detail": "이 컴퓨터의 TetoTune에서 보낸 요청만 받아요"}, status_code=403)
+        return JSONResponse({"detail": "이 컴퓨터의 AutoTuner에서 보낸 요청만 받아요"}, status_code=403)
     # 머리글은 latin-1로 풀려 오니 바이트로 비교한다 (글자로 비교하면 ASCII가 아닌 값에서 오류가 난다)
     sent = request.headers.get("x-tetotune-token", "").encode("latin-1")
     if TOKEN and not hmac.compare_digest(sent, TOKEN.encode()):
-        return JSONResponse({"detail": "이 엔진을 켠 TetoTune에서 보낸 요청만 받아요"}, status_code=403)
+        return JSONResponse({"detail": "이 엔진을 켠 AutoTuner에서 보낸 요청만 받아요"}, status_code=403)
     return await call_next(request)
 
 
@@ -159,6 +160,11 @@ def _run(job_id, vocal, song, lyrics, notes, backing, opts):
                 backing = backing or (str(sm_backing) if sm_backing else None)
             out = OUTPUT / _folder_name(title)
             _mark(out)
+            if not notes:  # 음표 파일이 없으면 GAME으로 음표를 나눈다: 모델이 없으면 처음 한 번 받는다
+                try:
+                    game.ensure_model(lambda s: job.update(step=s, progress=0.01))
+                except Exception as e:
+                    print(f"GAME 모델을 받지 못했어요: {e}", flush=True)
             res = tune(vocal, out, lyrics or "", notes or None, backing or None, opts,
                        progress=lambda p, s: job.update(step=s, progress=round(p, 3)), title=title)
             (out / INCOMPLETE).unlink(missing_ok=True)
@@ -249,6 +255,11 @@ def _exit_with_parent(pid):
 if __name__ == "__main__":
     import uvicorn
 
+    if not os.environ.get("TETOTUNE_OUTPUT") and OLD_OUTPUT.is_dir() and not OUTPUT.exists():
+        try:
+            OLD_OUTPUT.rename(OUTPUT)
+        except OSError:
+            pass
     OUTPUT.mkdir(parents=True, exist_ok=True)
     sweep_unfinished()
     parent = os.environ.get("TETOTUNE_PARENT_PID")

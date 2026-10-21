@@ -2,11 +2,11 @@ import AppKit
 import SwiftUI
 
 @main
-struct TetoTuneApp: App {
+struct AutoTunerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {
-        Window("TetoTune", id: "main") {
+        Window("AutoTuner", id: "main") {
             ContentView(model: delegate.model)
                 .frame(minWidth: 940, minHeight: 640)
         }

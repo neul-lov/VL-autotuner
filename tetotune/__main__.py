@@ -18,6 +18,12 @@ def main():
     a = p.parse_args()
     opts = Options(**{f.name: getattr(a, f.name) for f in fields(Options)})
     text = open(a.lyrics, encoding="utf-8").read() if a.lyrics else ""
+    if not a.notes:
+        from . import game
+        try:
+            game.ensure_model(print)
+        except Exception as e:
+            print(f"GAME 모델을 받지 못했어요 (원래 방법으로 음표를 나눠요): {e}")
     res = tune(a.vocal, a.out, text, a.notes, a.backing, opts, progress=lambda v, s: print(f"{v:4.0%} {s}", flush=True))
     print(json.dumps(asdict(res), ensure_ascii=False, indent=1))
 
