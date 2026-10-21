@@ -59,6 +59,11 @@ jobs:
             python$v -m pip wheel --no-deps "pyworld>=0.3.4" -w mac/wheels
           done
           ls mac/wheels
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "6.0.x"
+      - name: 테토로 불러 보는 도구 만들기 (RenderHost.dll, .NET 6 이상 OpenUtau용)
+        run: devtools/openutau_harness/build_render_host.sh mac/RenderHost.dll
       - run: swift --version
       - name: 앱 빌드
         run: cd mac && ./build.sh
@@ -67,6 +72,7 @@ jobs:
           archs=$(lipo -archs mac/build/AutoTuner.app/Contents/MacOS/AutoTuner)
           echo "$archs"; [[ "$archs" == *arm64* && "$archs" == *x86_64* ]]
           cat mac/build/AutoTuner.app/Contents/Resources/engine/wheels/constraints.txt
+          ls -l mac/build/AutoTuner.app/Contents/Resources/engine/tetotune/render_host/RenderHost.dll
           plutil -lint mac/build/AutoTuner.app/Contents/Info.plist
       - name: 압축
         run: ditto -c -k --keepParent mac/build/AutoTuner.app AutoTuner-mac.zip
@@ -178,7 +184,9 @@ jobs:
           python-version: "3.13"
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: "10.0.x"
+          dotnet-version: |
+            6.0.x
+            10.0.x
       - run: python -m pip install -r requirements.txt -r requirements-extra.txt matplotlib
       - name: OpenUtau (Mac) 받기
         env:
@@ -194,7 +202,7 @@ jobs:
           for k in 10 14; do python -m tetotune devtools/testdata/vocadito_$k.flac out/v$k | tail -n +1 > out/v$k.log; tail -20 out/v$k.log; done
       - name: OpenUtau로 렌더
         run: |
-          export CSC=$(ls -d "$DOTNET_ROOT"/sdk/*/Roslyn/bincore/csc.dll | tail -1)
+          export CSC=$(ls -d "$DOTNET_ROOT"/sdk/10.*/Roslyn/bincore/csc.dll | tail -1)
           for k in 10 14; do
             devtools/openutau_harness/render.sh "$PWD/OpenUtau.app/Contents/MacOS" "$PWD/ourun" "$PWD/out/v$k/project.ustx" "$PWD/out/v$k/render.wav" | tee out/v$k/harness.txt
           done
@@ -205,7 +213,7 @@ jobs:
           done
       - name: 정답을 아는 테토 노래로 가사 · 음표 · 숨 맞추기
         run: |
-          export CSC=$(ls -d "$DOTNET_ROOT"/sdk/*/Roslyn/bincore/csc.dll | tail -1)
+          export CSC=$(ls -d "$DOTNET_ROOT"/sdk/10.*/Roslyn/bincore/csc.dll | tail -1)
           ou="$PWD/OpenUtau.app/Contents/MacOS"
           for seed in 7 3; do
             d="$PWD/out/ref$seed"; mkdir -p "$d"
@@ -221,9 +229,40 @@ jobs:
             python devtools/breath_report.py "$d/truth.json" "$d/ref_ref.wav" "$d/tuned" 2>/dev/null | tee "$d/breath_report.txt"
             python devtools/compare_render.py "$d/tuned" "$(ls "$d"/tuned/render_*.wav | head -1)" | tee "$d/compare.json"
           done
+      - name: 앱처럼 OpenUtau로 불러 보고 다듬기 (앱에 넣는 RenderHost.dll로)
+        run: |
+          devtools/openutau_harness/build_render_host.sh out/RenderHost.dll
+          export TETOTUNE_OPENUTAU="$PWD/OpenUtau.app" TETOTUNE_RENDER_HOST="$PWD/out/RenderHost.dll"
+          d="$PWD/out/ref7"
+          python -m tetotune "$d/ref_ref.wav" out/polish7 --lyrics "$d/lyrics.txt" > out/polish7.log
+          grep "다듬기" out/polish7.log | tail -3
+          python - <<'PY'
+          import json
+          r = json.load(open("out/polish7/report.json"))
+          print("다듬기:", json.dumps(r.get("refine"), ensure_ascii=False))
+          assert r.get("teto_preview") == "teto_preview.wav", r.get("warnings")
+          p = json.load(open("out/polish7/preview.json"))
+          print("확인할 곳:", len(p["flags"]), p["flags"][:5])
+          PY
+          python devtools/compare_render.py out/polish7 out/polish7/teto_preview.wav | tee out/polish7/compare.json
+          # 구간 다시 조교 · 음절 고치기 · 되돌리기도 실제 테토로
+          python - <<'PY'
+          import json
+          from tetotune import edit, retune
+          f = "out/polish7"
+          prev = retune.retune(f, 3.0, 4.0, {"vibrato": 0.0})
+          print("구간 다시 조교:", prev["range"], len(prev["notes"]), prev.get("warning"))
+          prev = edit.apply(f, "split", 2)
+          prev = edit.apply(f, "unextend", 3)
+          print("고친 뒤 음표:", len(prev["notes"]), "기록", prev["history"])
+          prev = edit.undo(f)
+          print("되돌린 뒤 음표:", len(prev["notes"]))
+          PY
+          export CSC=$(ls -d "$DOTNET_ROOT"/sdk/10.*/Roslyn/bincore/csc.dll | tail -1)
+          devtools/openutau_harness/render.sh "$PWD/OpenUtau.app/Contents/MacOS" "$PWD/ourun" "$PWD/out/polish7/project.ustx" "$PWD/out/polish7/render.wav" | grep -E "phoneme_errors|rendered"
       - name: 테토 정답 노래 여러 곡으로 설정 비교 (렌더는 정답 노래만)
         run: |
-          export CSC=$(ls -d "$DOTNET_ROOT"/sdk/*/Roslyn/bincore/csc.dll | tail -1)
+          export CSC=$(ls -d "$DOTNET_ROOT"/sdk/10.*/Roslyn/bincore/csc.dll | tail -1)
           ou="$PWD/OpenUtau.app/Contents/MacOS"
           for seed in 1 2 5 11 13 21; do
             d="$PWD/out/ref$seed"; mkdir -p "$d"

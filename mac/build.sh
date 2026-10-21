@@ -37,6 +37,18 @@ if ls wheels/*.whl >/dev/null 2>&1; then
     echo "pyworld==$PYWORLD" > "$ENGINE/wheels/constraints.txt"
 fi
 
+# 테토로 불러 보고 다듬는 도구 (OpenUtau로 렌더): CI가 만든 RenderHost.dll, 없으면 dotnet SDK가 있을 때 여기서 만든다.
+# 둘 다 없으면 이 기능만 빠지고 조교는 그대로 된다.
+if [[ ! -f RenderHost.dll ]] && command -v dotnet >/dev/null 2>&1; then
+    ../devtools/openutau_harness/build_render_host.sh RenderHost.dll || echo "RenderHost를 만들지 못했어요 (테토로 불러 보기만 빠져요)"
+fi
+if [[ -f RenderHost.dll ]]; then
+    mkdir -p "$ENGINE/tetotune/render_host"
+    cp RenderHost.dll "$ENGINE/tetotune/render_host/RenderHost.dll"
+    # 이 폴더의 엔진을 쓰는 앱(start-mac.command, 아래 TetoTuneBackend)도 쓰게
+    if [[ -x "$BACKEND/.venv/bin/python" ]]; then cp RenderHost.dll "$BACKEND/tetotune/render_host/RenderHost.dll"; fi
+fi
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

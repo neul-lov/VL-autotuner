@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from . import audio, pitch
+from . import audio, confidence, pitch
 from .pitch import HOP
 
 ROUNDS = 2          # 고치는 횟수 (렌더는 ROUNDS + 1번)
@@ -153,7 +153,7 @@ def refine(folder, render, rounds=None, progress=lambda p, s: None):
     ustx = folder / "project.ustx"
     work = folder / ".refine"
     work.mkdir(exist_ok=True)
-    history, best = [], None
+    history, best, measured = [], None, None
     try:
         for r in range(rounds + 1):
             progress(r / (rounds + 1), f"테토로 불러 보는 중 ({r + 1}/{rounds + 1})")
@@ -169,6 +169,7 @@ def refine(folder, render, rounds=None, progress=lambda p, s: None):
                 shutil.copy(ustx, work / "best.ustx")
                 shutil.copy(wav, work / "best.wav")
                 np.savez_compressed(work / "best.npz", pitd=z["pitd"], dyn=z["dyn"])
+                measured = (cents, voiced, db)
             if r == rounds:
                 break
             z = step(z, cents, voiced, db)
@@ -186,7 +187,35 @@ def refine(folder, render, rounds=None, progress=lambda p, s: None):
         prev = json.loads(prev_path.read_text(encoding="utf-8"))
         prev["pitch"] = [round(float(v / 100), 2) for v in (z["base"] + b["pitd"])[::2]]
         prev["dyn"] = [round(float(v), 1) for v in b["dyn"][::4]]
+        cents, voiced, db = measured
+        rf = confidence.render_flags(z["base"] + b["pitd"], z["sing"], z["voiced"], cents, voiced, z["rel"], _rel(z, db))
+        prev["flags"] = confidence.merge([f for f in prev.get("flags", []) if f[3] != "render"] + rf)
         prev_path.write_text(json.dumps(prev, ensure_ascii=False), encoding="utf-8")
     out = {"rounds": history, "best": best[1] if best else None, "preview": "teto_preview.wav"}
     (folder / "refine.json").write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
     return out
+
+
+def for_result(folder, progress=lambda p, s: None):
+    """앱 · 명령줄에서: 조교 결과 폴더를 사용자의 OpenUtau로 불러 보고 다듬는다. report.json에 결과를 적는다.
+    → 경고 문장 또는 None. OpenUtau · 렌더 도구가 없으면 아무것도 안 한다."""
+    from . import openutau
+
+    folder = Path(folder)
+    report_path = folder / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if not openutau.available() or not report.get("singer"):
+        return None
+    work = folder / ".render"
+    warning = None
+    try:
+        out = refine(folder, lambda u: openutau.render(u, work), progress=progress)
+        report["refine"] = out
+        report["teto_preview"] = out["preview"]
+    except Exception as e:  # 처음 조교한 결과는 그대로 남는다
+        warning = f"테토로 불러 보고 다듬지 못했어요 (조교 결과는 그대로예요): {e}"
+        report.setdefault("warnings", []).append(warning)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
+    return warning
