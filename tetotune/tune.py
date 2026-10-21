@@ -22,8 +22,9 @@ INTERVAL = 5  # OpenUtau 곡선 간격 (틱)
 DYN_WIN = 0.02  # 초. 크기 윤곽을 잡는 최댓값 · 다듬기 창 (길면 크기가 음 시작보다 먼저 커진다)
 DYN_GAIN = 1 / 0.7  # 셈여림 0.7(앱 기본값)에서 원래 보컬 크기 차이를 그대로: 실제 테토 렌더 비교에서 이쪽이 더 닮았다
 LEGATO_GAP = 0.3  # 초. 음표 사이 이보다 짧은 틈은 앞 음표를 늘여 메운다 (자음 · 성대 닫힘에서 소리가 뚝 끊기지 않게). 0 = 끔
-OCTAVE_FIX = True  # 음표에서도 앞뒤 음 높이에서도 한 옥타브쯤 떨어지게 읽은 조각을 접는다 (_fold_octaves)
+OCTAVE_FIX = False  # 음표에서도 앞뒤 음 높이에서도 한 옥타브쯤 떨어지게 읽은 조각을 접는다 (_fold_octaves)
 GAP_NOTE = 0.05  # 초. 음표 안 빈 곳이 이보다 길면 가운데는 음표 음으로 (_fill_gaps). 0 = 앞뒤를 바로 잇기만
+NOTE_RANGE = 0.0  # 센트. 음표 안 음 높이를 그 음표(경계 0.1초 안은 이어진 앞뒤 음표까지) ± 이만큼 안으로 (_clamp_to_notes). 0 = 끔
 
 
 @dataclass
@@ -208,6 +209,28 @@ def _fold_octaves(target, mask, notes, ctx=1.0):
     return out
 
 
+def _clamp_to_notes(target, notes, margin, edge=0.1):
+    """음표 안 음 높이를 그 음표 음 ± margin 센트 안으로 자른다. 음표 시작 · 끝 edge초 안은 이어진(0.3초 안) 앞 · 뒤 음표
+    음까지 넓혀서 음 바뀌는 곳의 미끄러짐은 그대로 둔다."""
+    out = target.copy()
+    n = len(out)
+    k = max(1, int(edge / HOP))
+    for i, x in enumerate(notes):
+        a, b = max(0, int(x.start / HOP)), min(n, int(x.end / HOP))
+        if b <= a:
+            continue
+        lo = np.full(b - a, x.tone * 100.0)
+        hi = lo.copy()
+        if i > 0 and x.start - notes[i - 1].end < 0.3:
+            p = notes[i - 1].tone * 100.0
+            lo[:k], hi[:k] = np.minimum(lo[:k], p), np.maximum(hi[:k], p)
+        if i + 1 < len(notes) and notes[i + 1].start - x.end < 0.3:
+            q = notes[i + 1].tone * 100.0
+            lo[-k:], hi[-k:] = np.minimum(lo[-k:], q), np.maximum(hi[-k:], q)
+        out[a:b] = np.clip(out[a:b], lo - margin, hi + margin)
+    return out
+
+
 def _fill_gaps(target, mask, notes, base, min_gap, blend=0.04):
     """음표 안 빈 곳(소리 없음으로 뺀 곳) 메우기. 짧은 틈은 앞뒤를 바로 잇고(전과 같음), min_gap초보다 긴 틈은
     앞뒤 끝 blend초만 이어 긋고 가운데는 그 음표의 음 높이(+ 그 음표에서 읽은 만큼 높낮이)로 부른다:
@@ -379,6 +402,8 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
     if OCTAVE_FIX:
         target = _fold_octaves(target, sing_mask, notes)
     target = _fill_gaps(target, sing_mask, notes, base, GAP_NOTE)
+    if NOTE_RANGE > 0:
+        target = _clamp_to_notes(target, notes, NOTE_RANGE)
     pitd = _pitd(target, base, notes, o)
 
     near = _smooth(_note_mask(notes, n, 0.1, 0.06).astype(float), 0.04)

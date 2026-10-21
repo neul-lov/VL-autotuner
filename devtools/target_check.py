@@ -54,11 +54,12 @@ def where(nl, t):
     return w, k
 
 
-VARIANTS = {  # 이름 → (옥타브 접기, 긴 틈 기준 초)
-    "지금": (False, 0.0),
-    "옥타브 접기": (True, 0.0),
-    "긴 틈은 음표 음 50ms": (False, 0.05),
-    "옥타브 접기 + 긴 틈 50ms": (True, 0.05),
+VARIANTS = {  # 이름 → (옥타브 접기, 긴 틈 기준 초, 음표 범위 센트)
+    "지금": (False, 0.0, 0),
+    "긴 틈은 음표 음 50ms": (False, 0.05, 0),
+    "긴 틈 50ms + 음표 범위 300센트": (False, 0.05, 300),
+    "긴 틈 50ms + 음표 범위 500센트": (False, 0.05, 500),
+    "긴 틈 50ms + 음표 범위 800센트": (False, 0.05, 800),
 }
 
 
@@ -84,11 +85,13 @@ def check(wav, ms, vs, annot, n):
         tm._fill_gaps = real
         tm.OCTAVE_FIX = octave
     out = {}
-    for name, (octave, gap) in VARIANTS.items():
+    for name, (octave, gap, rng) in VARIANTS.items():
         t = got["target"]
         if octave:
             t = tm._fold_octaves(t, got["mask"], got["notes"])
         t = tm._fill_gaps(t, got["mask"], got["notes"], got["base"], gap)
+        if rng:
+            t = tm._clamp_to_notes(t, got["notes"], rng)
         want = (got["base"] + tm._pitd(t, got["base"], got["notes"], Options(**OPTS))) / 100
         out[name] = compare(want, got["mask"] & np.isfinite(got["target"]), got["notes"], ms, vs, annot, n)
         out[name]["method"] = res.pitch_method
