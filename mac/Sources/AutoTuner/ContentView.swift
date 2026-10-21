@@ -645,7 +645,24 @@ private struct OptionsSection: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            Divider().padding(.vertical, 2)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("테토로 불러 보고 다듬기").font(.system(size: 12, weight: .semibold))
+                Segmented(selection: $model.options.refine, items: [("auto", "다듬기"), ("off", "안 하기")])
+                Text(refineDetail)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
+    }
+
+    private var refineDetail: String {
+        if model.options.refine == "off" { return "조교만 하고 바로 끝내요 (앱에서 테토 소리는 못 들어요)" }
+        if model.status?.openutau == false {
+            return "OpenUtau가 응용 프로그램 폴더에 없어서 지금은 건너뛰어요. 넣어 두면 테토 소리로 확인하고 다듬어요."
+        }
+        return "조교한 뒤 OpenUtau로 테토가 부르게 해서, 끊기거나 음이 어긋난 곳을 원래 보컬과 비교해 고쳐요. 시간이 더 걸려요."
     }
 
     private func row(_ title: String, _ help: String, _ value: Binding<Double>, _ range: ClosedRange<Double>,
@@ -700,6 +717,7 @@ struct Segmented: View {
 private struct ResultSection: View {
     let item: ResultItem
     @ObservedObject var model: AppModel
+    @State private var retuning = false
 
     var body: some View {
         Card(title: item.title, icon: "checkmark.seal.fill",
@@ -718,10 +736,26 @@ private struct ResultSection: View {
                 Spacer()
             }
             if let p = model.preview {
-                PreviewView(preview: p)
+                TransportBar(model: model, player: model.player)
+                PreviewView(preview: p, before: model.before, compareRange: model.compareRange,
+                            selectedNote: $model.selectedNote, selection: $model.selection, focus: $model.focusTime,
+                            player: model.player)
                     .frame(height: 260)
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 legend
+                if let job = model.resultJob {
+                    JobCard(job: job)
+                } else if let i = model.selectedNote, i < p.notes.count {
+                    NoteEditorBar(model: model, preview: p, index: i)
+                } else if let r = model.selection {
+                    RangeBar(model: model, range: r, retuning: $retuning)
+                } else {
+                    Text("음표를 누르면 가사 · 음절을 고칠 수 있고, 끌어서 구간을 고르면 그 구간만 다시 조교할 수 있어요. 빈 곳을 누르면 거기부터 들어요.")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                FlagList(model: model, flags: p.marks)
             } else if model.loadingPreview {
                 ProgressView().controlSize(.small).frame(maxWidth: .infinity, minHeight: 120)
             }
@@ -731,9 +765,13 @@ private struct ResultSection: View {
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Text("OpenUtau에서 열면 테토 트랙 아래에 원래 보컬(음소거) 트랙이 있어요. 비교해 들을 때만 켜 보세요.")
+            Text("OpenUtau에서 열면 테토 트랙 아래에 원래 보컬(음소거) 트랙이 있어요. 비교해 들을 때만 켜 보세요. 여기서 고친 뒤에는 OpenUtau에서 파일을 다시 열어 주세요.")
                 .font(.system(size: 10.5, weight: .medium))
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .sheet(isPresented: $retuning) {
+            if let r = model.selection { RetuneSheet(model: model, range: r) }
         }
     }
 
@@ -750,6 +788,8 @@ private struct ResultSection: View {
             swatch(Color.teto, "테토 조교 음 높이")
             swatch(Color.primary.opacity(0.25), "음표")
             swatch(Color.green.opacity(0.5), "숨")
+            swatch(Color.orange.opacity(0.8), "확인할 곳")
+            if model.compareRange != nil { swatch(Color.primary.opacity(0.45), "바꾸기 전 (점선)") }
             Spacer()
         }
         .font(.system(size: 10.5, weight: .medium))

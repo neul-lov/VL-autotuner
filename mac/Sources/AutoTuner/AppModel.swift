@@ -105,6 +105,22 @@ final class AppModel: ObservableObject {
     @Published var preview: Preview?
     @Published var loadingPreview = false
 
+    /// Listening to the result (original vocal · Teto · backing).
+    let player = Player()
+    /// The note being edited (its place in `preview.notes`).
+    @Published var selectedNote: Int?
+    /// The section picked on the roll (seconds).
+    @Published var selection: ClosedRange<Double>?
+    /// A time for the roll to scroll to.
+    @Published var focusTime: Double?
+    /// The preview before the last section re-tune, and that section: the roll draws the old pitch there to compare.
+    @Published var before: Preview?
+    @Published var compareRange: [Double]?
+    /// An edit is being saved.
+    @Published var editing = false
+    /// A section re-tune or a Teto re-render running for the shown result.
+    @Published var resultJob: Job?
+
     private var toastTask: Task<Void, Never>?
 
     // MARK: Server
@@ -367,8 +383,17 @@ final class AppModel: ObservableObject {
 
     func select(_ item: ResultItem) {
         guard selected?.id != item.id || preview == nil else { return }
+        guard resultJob == nil else {
+            show("구간 다시 조교가 끝난 뒤에 다른 결과를 골라 주세요", success: false)
+            return
+        }
         selected = item
         preview = nil
+        selectedNote = nil
+        selection = nil
+        before = nil
+        compareRange = nil
+        player.load(item)
         loadingPreview = true
         Task {
             let p = try? await backend.preview(item.id)
@@ -430,6 +455,7 @@ final class AppModel: ObservableObject {
             if selected?.id == item.id {
                 selected = nil
                 preview = nil
+                player.load(nil)
             }
         }
         if selected == nil, let first = results.first { select(first) }
@@ -441,6 +467,149 @@ final class AppModel: ObservableObject {
         let url = URL(fileURLWithPath: path)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         NSWorkspace.shared.open(url)
+    }
+
+    // MARK: Fixing a result
+
+    /// After a change to project.ustx: OpenUtau shows the file as it was when opened.
+    private func edited(_ message: String) {
+        if NSRunningApplication.runningApplications(withBundleIdentifier: Backend.openUtauID).first != nil {
+            show(message + " · OpenUtau에서는 project.ustx를 다시 열어 주세요")
+        } else {
+            show(message)
+        }
+    }
+
+    /// One of the note edits in tetotune/edit.py on the selected note.
+    func edit(_ op: String, text: String? = nil, time: Double? = nil, done: String = "고쳤어요") {
+        guard let item = selected, let index = selectedNote, !editing, resultJob == nil else { return }
+        editing = true
+        Task {
+            defer { editing = false }
+            do {
+                let p = try await backend.edit(item.id, op: op, index: index, text: text, time: time)
+                guard selected?.id == item.id else { return }
+                withAnimation(.easeOut(duration: 0.15)) {
+                    preview = p
+                    if index >= p.notes.count { selectedNote = p.notes.isEmpty ? nil : p.notes.count - 1 }
+                }
+                edited(done)
+            } catch let error as BackendError {
+                show(error.message, success: false)
+            } catch {
+                show("엔진과 연결이 끊겼어요", success: false)
+            }
+        }
+    }
+
+    func undo() {
+        guard let item = selected, !editing, resultJob == nil else { return }
+        editing = true
+        Task {
+            defer { editing = false }
+            do {
+                let p = try await backend.undo(item.id)
+                guard selected?.id == item.id else { return }
+                withAnimation(.easeOut(duration: 0.15)) {
+                    preview = p
+                    before = nil
+                    compareRange = nil
+                    if let i = selectedNote, i >= p.notes.count { selectedNote = nil }
+                }
+                edited("되돌렸어요")
+            } catch let error as BackendError {
+                show(error.message, success: false)
+            } catch {
+                show("엔진과 연결이 끊겼어요", success: false)
+            }
+        }
+    }
+
+    /// Tunes the picked section again with other settings (`options`: tune.py names → values).
+    func retune(_ range: ClosedRange<Double>, options: [String: Double], lyrics: String?, renote: Bool) {
+        guard let item = selected, resultJob == nil else { return }
+        player.pause()
+        let old = preview
+        withAnimation { resultJob = Job(label: "\(formatTime(range.lowerBound)) – \(formatTime(range.upperBound))") }
+        Task {
+            do {
+                let id = try await backend.startRetune(item.id, start: range.lowerBound, end: range.upperBound,
+                                                       options: options, lyrics: lyrics, renote: renote)
+                guard let p = try await followResult(id) else { return }
+                guard selected?.id == item.id else { return }
+                withAnimation(.easeOut(duration: 0.2)) {
+                    preview = p
+                    before = old
+                    compareRange = p.range
+                    if let r = p.range, r.count == 2 { selection = r[0]...r[1] }
+                    selectedNote = nil
+                }
+                await reloadAudio(item)
+                if let w = p.warning { show(w, success: false) } else { edited("다시 조교했어요 (점선: 바꾸기 전)") }
+            } catch let error as BackendError {
+                withAnimation { resultJob = nil }
+                show(error.message, success: false)
+            } catch {
+                withAnimation { resultJob = nil }
+                show("엔진과 연결이 끊겼어요", success: false)
+            }
+        }
+    }
+
+    /// Sings the edited project with Teto again, so the Teto preview matches it.
+    func renderTeto() {
+        guard let item = selected, resultJob == nil else { return }
+        player.pause()
+        withAnimation { resultJob = Job(label: "고친 결과를 테토로", step: "테토로 불러 보는 중") }
+        Task {
+            do {
+                let id = try await backend.startRender(item.id)
+                guard let p = try await followResult(id), selected?.id == item.id else { return }
+                withAnimation { preview = p }
+                await reloadAudio(item)
+                player.voice = .teto
+                show("테토 미리 듣기를 새로 만들었어요")
+            } catch let error as BackendError {
+                withAnimation { resultJob = nil }
+                show(error.message, success: false)
+            } catch {
+                withAnimation { resultJob = nil }
+                show("엔진과 연결이 끊겼어요", success: false)
+            }
+        }
+    }
+
+    /// Follows a re-tune / re-render job; nil after an error (already shown).
+    private func followResult(_ id: String) async throws -> Preview? {
+        while true {
+            try await Task.sleep(for: .milliseconds(400))
+            let s = try await backend.previewJob(id)
+            if s.status == "running" {
+                resultJob?.step = s.step ?? "다시 조교하는 중"
+                resultJob?.progress = s.progress ?? 0
+                continue
+            }
+            withAnimation { resultJob = nil }
+            if s.status == "error" || s.result == nil {
+                show(s.error ?? "하지 못했어요", success: false)
+                return nil
+            }
+            return s.result
+        }
+    }
+
+    /// The Teto preview file changed (or appeared): read the list again and reopen the audio.
+    private func reloadAudio(_ item: ResultItem) async {
+        if let list = try? await backend.results() {
+            results = list
+            if let fresh = list.first(where: { $0.id == item.id }) { selected = fresh }
+        }
+        player.load(selected, force: true)
+    }
+
+    /// Plays a section with the voice picked in the player (a little before and after it).
+    func play(_ start: Double, _ end: Double) {
+        player.play(from: max(0, start - 0.4), to: end + 0.3)
     }
 
     // MARK: Toast

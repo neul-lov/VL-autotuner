@@ -75,3 +75,59 @@ def test_folder_names(client, monkeypatch):
     assert "/" not in a and not a.startswith(".") and ":" not in a
     (server.OUTPUT / a).mkdir(parents=True)
     assert server._folder_name("../.hidden:name") != a
+
+
+def test_edit_and_undo_endpoints(client, tmp_path):
+    import yaml
+    import server
+    folder = server.OUTPUT / "곡 2026"
+    folder.mkdir(parents=True)
+    notes = [{"position": 480, "duration": 240, "tone": 60, "lyric": "あ"},
+             {"position": 720, "duration": 240, "tone": 62, "lyric": "+"}]
+    (folder / "project.ustx").write_text(yaml.safe_dump({"tempos": [{"position": 0, "bpm": 120.0}],
+                                                          "voice_parts": [{"notes": notes, "curves": []}]}))
+    (folder / "report.json").write_text(json.dumps({"notes": 2, "breath_aliases": []}))
+    (folder / "preview.json").write_text(json.dumps({"notes": []}))
+    r = client.post(f"/api/results/{folder.name}/edit", data={"op": "lyric", "index": 1, "text": "い"})
+    assert r.status_code == 200 and [n[3] for n in r.json()["notes"]] == ["あ", "い"] and r.json()["history"] == 1
+    r = client.post(f"/api/results/{folder.name}/edit", data={"op": "move_left", "index": 0})
+    assert r.status_code == 400 and "음절" in r.json()["detail"]
+    r = client.post(f"/api/results/{folder.name}/undo")
+    assert r.status_code == 200 and [n[3] for n in r.json()["notes"]] == ["あ", "+"]
+    assert client.post(f"/api/results/{folder.name}/undo").status_code == 400
+    listed = client.get("/api/results").json()[0]
+    assert listed["teto"] is None and listed["backing"] is None
+    r = client.post(f"/api/results/{folder.name}/retune", data={"start": 2, "end": 1})
+    assert r.status_code == 400
+
+
+def test_render_endpoint_refreshes_teto_preview(client, monkeypatch):
+    import time as _time
+    import yaml
+    import server
+    folder = server.OUTPUT / "곡 렌더"
+    folder.mkdir(parents=True)
+    notes = [{"position": 480, "duration": 480, "tone": 60, "lyric": "あ"}]
+    (folder / "project.ustx").write_text(yaml.safe_dump({"tempos": [{"position": 0, "bpm": 120.0}],
+                                                          "voice_parts": [{"notes": notes, "curves": []}]}))
+    (folder / "report.json").write_text(json.dumps({"notes": 1, "breath_aliases": [], "options": {"vibrato": 0.5}}))
+    (folder / "preview.json").write_text(json.dumps({"notes": []}))
+    (folder / "teto_preview.wav").write_bytes(b"old")
+    r = client.post(f"/api/results/{folder.name}/edit", data={"op": "lyric", "index": 0, "text": "い"})
+    assert r.json()["teto_stale"] is True  # 고친 뒤에는 미리 듣기가 예전 것
+    assert client.get(f"/api/results/{folder.name}/preview").json()["options"] == {"vibrato": 0.5}
+
+    def fake_render(ustx, out_dir, name=None):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "render_x.wav").write_bytes(b"new")
+        return out_dir / "render_x.wav"
+    monkeypatch.setattr(server.openutau, "available", lambda: True)
+    monkeypatch.setattr(server.openutau, "render", fake_render)
+    job = client.post(f"/api/results/{folder.name}/render").json()["job_id"]
+    for _ in range(100):
+        s = client.get(f"/api/jobs/{job}").json()
+        if s["status"] != "running":
+            break
+        _time.sleep(0.02)
+    assert s["status"] == "done" and "teto_stale" not in s["result"]
+    assert (folder / "teto_preview.wav").read_bytes() == b"new" and not (folder / ".render").exists()

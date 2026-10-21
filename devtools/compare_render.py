@@ -1,5 +1,6 @@
 """OpenUtau가 렌더링한 wav를 원래 보컬과 비교한다 (재생 없음, 숫자만).
-사용: python compare_render.py <결과 폴더> <렌더 wav> [그림.png]"""
+사용: python compare_render.py <결과 폴더> <렌더 wav> [그림.png] [--truth 정답 보컬.wav]
+--truth: 조교에 넣은 보컬(guide_vocals.wav) 대신 이 보컬과 비교 (분리한 보컬로 조교했을 때 깨끗한 원래 보컬)"""
 import json
 import sys
 from pathlib import Path
@@ -11,10 +12,87 @@ from tetotune import audio, features, pitch  # noqa: E402
 from tetotune.pitch import HOP  # noqa: E402
 
 
+def _runs(mask, min_len=1):
+    m = np.concatenate([[False], mask, [False]]).astype(np.int8)
+    d = np.diff(m)
+    return [(a, b) for a, b in zip(np.where(d == 1)[0], np.where(d == -1)[0]) if b - a >= min_len]
+
+
+def _wobble(m, mask):
+    """50ms 중앙값에서 벗어나는 정도 (센트 RMS): 비브라토보다 빠른 떨림 · 튐."""
+    from scipy.ndimage import median_filter
+
+    dev = []
+    for a, b in _runs(mask, 12):
+        seg = m[a:b]
+        dev.append((seg - median_filter(seg, size=11, mode="nearest")) * 100)
+    return float(np.sqrt(np.mean(np.concatenate(dev) ** 2))) if dev else float("nan")
+
+
+def smoothness(prev, ms, vs, dbs, mr, vr, dbr, notes):
+    """끊김 · 갑자기 떨어짐 · 흔들림을 센다 (1분마다 몇 번). 일어난 곳마다 무엇 때문인지도 적는다.
+    - 끊김: 원래 보컬은 음표 안에서 소리 나는데 렌더는 원래보다 15dB 넘게 더 작아진 곳이 30ms 넘게 (노래 크기 기준)
+    - 떨어짐 · 튐: 둘 다 소리 나는데 렌더 음 높이가 원래보다 150센트 넘게 낮은 · 높은 곳이 30ms 넘게
+    - 흔들림: 렌더가 원래보다 얼마나 더 떨리는지 (1 = 같음)"""
+    n = len(ms)
+    minutes = max(1e-6, n * HOP / 60)
+    sing_r = float(np.median(dbr[vr])) if vr.any() else -60.0
+    both = vs & vr
+    sing_s = float(np.median(dbs[vs])) if vs.any() else -60.0
+    # 원래 보컬도 작아진 곳(콧소리 · 여린 소리)은 끊김이 아니다: 원래보다 15dB 넘게 더 작아진 곳만
+    drop = _runs(vs & notes & (dbr < sing_r - 12) & ((dbr - sing_r) < (dbs - sing_s) - 15), 6)
+    diff = np.where(both, (mr - ms) * 100, 0.0)
+    low = _runs(diff < -150, 6)
+    high = _runs(diff > 150, 6)
+    intended = np.array([np.nan if v is None else v for v in prev["pitch"]], dtype=float)
+    nl = prev["notes"]
+
+    def why(a, b, kind):
+        t = (a + b) / 2 * HOP
+        k = next((i for i, x in enumerate(nl) if x[0] <= t < x[1]), None)
+        if k is None:
+            nxt = next((x for x in nl if x[0] > t), None)
+            prv = next((x for x in reversed(nl) if x[1] <= t), None)
+            gap = (nxt[0] - prv[1]) if nxt and prv else 99
+            where = f"음표 사이 틈 {gap * 1000:.0f}ms" if gap < 0.5 else "쉼"
+        else:
+            x = nl[k]
+            where = "음표 시작" if t - x[0] < 0.08 else ("음표 끝" if x[1] - t < 0.08 else "음표 가운데")
+            if k and abs(nl[k - 1][1] - x[0]) < 1e-3 and t - x[0] < 0.08:
+                where = "이어진 음표 경계"
+        i = min(len(intended) - 1, int(t / HOP / 2))
+        src = ms[int(t / HOP)]
+        curve = abs(intended[i] - src) * 100 > 100 if np.isfinite(src) and np.isfinite(intended[i]) else False
+        cons = not vs[max(0, a - 6):b + 6].all()
+        return {"t": round(t, 2), "ms": int((b - a) * HOP * 1000), "kind": kind, "where": where,
+                "lyric": nl[k][3] if k is not None else "", "curve": bool(curve), "near_unvoiced": bool(cons),
+                "cents": int(np.nanmedian(diff[a:b])) if kind != "끊김" else None,
+                "db": round(float(np.median(dbr[a:b]) - sing_r), 1)}
+    events = [why(a, b, "끊김") for a, b in drop] + [why(a, b, "떨어짐") for a, b in low] + \
+        [why(a, b, "튐") for a, b in high]
+    kinds = {}
+    for e in events:
+        key = f"{e['kind']} · {e['where'].split(' ')[0] if e['where'].startswith('음표 사이') else e['where']}" \
+            f"{' · 곡선' if e['curve'] else ''}{' · 자음 옆' if e['near_unvoiced'] else ''}"
+        kinds[key] = kinds.get(key, 0) + 1
+    wr, ws = _wobble(mr, both), _wobble(ms, both)
+    return {"dropouts_per_min": round(len(drop) / minutes, 2), "pitch_drops_per_min": round(len(low) / minutes, 2),
+            "pitch_jumps_per_min": round(len(high) / minutes, 2),
+            "wobble_ratio": round(wr / ws, 3) if ws > 0 else None, "wobble_cents": round(wr, 1),
+            "event_kinds": dict(sorted(kinds.items(), key=lambda kv: -kv[1])), "events": events[:60]}
+
+
 def main():
-    folder, render = Path(sys.argv[1]), sys.argv[2]
+    argv = sys.argv[1:]
+    truth = None
+    if "--truth" in argv:
+        k = argv.index("--truth")
+        truth = argv[k + 1]
+        argv = argv[:k] + argv[k + 2:]
+    folder, render = Path(argv[0]), argv[1]
+    png = argv[2] if len(argv) > 2 else None
     prev = json.loads((folder / "preview.json").read_text())
-    ys, sr = audio.load(folder / "guide_vocals.wav")
+    ys, sr = audio.load(truth or folder / "guide_vocals.wav")
     yr, _ = audio.load(render)
     n = int(len(ys) / sr / HOP) + 1
     yr = np.pad(yr, (0, max(0, len(ys) - len(yr))))[:len(ys)]
@@ -46,6 +124,10 @@ def main():
     okb = vs & np.isfinite(step)
     err_step = np.abs(step[okb] - ms[okb]) * 100
     corr = np.corrcoef(dbs[both], dbr[both])[0, 1]
+    # 크기 윤곽 차이 (dB): 원래 보컬이 음표 안에서 소리 나는 곳, 각자 노래 크기(중앙값) 기준
+    m = vs & notes
+    rel_s, rel_r = dbs - np.median(dbs[m]), dbr - np.median(dbr[m])
+    loud_mae = float(np.mean(np.abs(np.clip(rel_r[m], -40, 20) - np.clip(rel_s[m], -40, 20))))
     out = {
         "pitch_err_cents_median": round(float(np.median(err)), 1),
         "pitch_err_cents_p90": round(float(np.percentile(err, 90)), 1),
@@ -54,6 +136,7 @@ def main():
         "notes_only_err_cents_p90": round(float(np.percentile(err_step, 90)), 1),
         "voiced_overlap": round(float(both.sum() / max(1, vs.sum())), 3),
         "loudness_corr": round(float(corr), 3),
+        "loudness_mae_db": round(loud_mae, 2),
     }
     sing = np.median(dbr[vr])
     br = []
@@ -64,8 +147,9 @@ def main():
     sing_s = np.median(dbs[vs])
     out["source_breath_db_vs_singing"] = [round(float(np.percentile(dbs[int(s / HOP):int(e / HOP)], 90) - sing_s), 1)
                                           for s, e in prev["breaths"]]
-    print(json.dumps(out, indent=1))
-    if len(sys.argv) > 3:
+    out.update(smoothness(prev, ms, vs, dbs, mr, vr, dbr, notes))
+    print(json.dumps(out, indent=1, ensure_ascii=False))
+    if png:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
@@ -80,7 +164,7 @@ def main():
         ax[1].plot(t, dbs, "k", lw=0.8)
         ax[1].plot(t, dbr, "r", lw=0.8)
         plt.tight_layout()
-        plt.savefig(sys.argv[3], dpi=75)
+        plt.savefig(png, dpi=75)
 
 
 # Mac은 Harvest 조각을 새 프로세스(spawn)로 읽어서, 이 파일을 다시 불러도 비교가 또 돌지 않게 막아 둔다
