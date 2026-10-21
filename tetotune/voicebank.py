@@ -108,8 +108,10 @@ def list_singers(roots=None):
 
 
 def _otos(folder, enc=None):
-    """→ {별칭: (wav 경로, offset, cutoff)} (같은 별칭이 여럿이면 처음 것)."""
+    """→ {별칭: (wav 경로, offset, cutoff)} (같은 별칭이 여럿이면 처음 것).
+    wav 경로가 음원 폴더 밖(절대 경로 · "../")이면 None: 출처를 모르는 음원이어도 폴더 밖 파일은 읽지 않는다."""
     out = {}
+    root = Path(folder).resolve()
     for oto in Path(folder).rglob("oto.ini"):
         for line in _read_text(oto, enc).splitlines():
             if "=" not in line:
@@ -121,8 +123,20 @@ def _otos(folder, enc=None):
                 offset, cutoff = float(parts[1] or 0), float(parts[3] or 0)
             except (IndexError, ValueError):
                 offset, cutoff = 0.0, 0.0
-            out.setdefault(alias, (oto.parent / wav.strip(), offset, cutoff))
+            if alias not in out:
+                out[alias] = (_sample(root, oto.parent, wav.strip()), offset, cutoff)
     return out
+
+
+def _sample(root, base, name):
+    """oto.ini의 wav 이름 → 음원 폴더(root) 안의 경로, 밖이면 None."""
+    if not name or Path(name).is_absolute():
+        return None
+    try:
+        path = (base / name).resolve()
+    except (OSError, ValueError):
+        return None
+    return path if path.is_relative_to(root) else None
 
 
 def _level(entry):
@@ -132,6 +146,8 @@ def _level(entry):
     import soundfile as sf
 
     path, offset, cutoff = entry
+    if path is None:
+        return None
     try:
         y, sr = sf.read(str(path), dtype="float32", always_2d=True)
     except Exception:

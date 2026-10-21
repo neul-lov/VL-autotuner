@@ -527,10 +527,15 @@ def _tick_to_sec(tempos):
         return s0 + (tick - t0) / TICKS * 60 / bpm
     return conv
 
+MAX_FILE_BYTES = 20 << 20  # 음표 파일 크기 · 음표 수 상한 (이상하게 큰 파일로 멈추지 않게)
+MAX_NOTES = 50000
+
 
 def read_file(path):
     """MIDI · OpenUtau(.ustx) · UTAU(.ust) → (음표 목록, 첫 빠르기). 파일의 0초 = 오디오 0초."""
     path = Path(path)
+    if path.stat().st_size > MAX_FILE_BYTES:
+        raise ValueError("음표 파일이 너무 커요")
     suffix = path.suffix.lower()
     if suffix == ".ustx":
         import yaml
@@ -561,6 +566,8 @@ def read_file(path):
         bpm = float(d.get("tempo") or 120)
     else:
         raise ValueError("음표 파일은 MIDI(.mid) · OpenUtau(.ustx) · UTAU(.ust) · StemMixer 음표만 돼요")
+    if len(raw) > MAX_NOTES:
+        raise ValueError(f"음표가 너무 많아요 ({len(raw)}개, {MAX_NOTES}개까지)")
     # 같은 때 시작하는 음(화음 · 겹친 음)은 하나만 남긴다: 높은 음이 뒤에 오게 놓아서 그것이 남는다 (보통 맨 위가 멜로디)
     raw.sort(key=lambda r: (r[0], r[2], r[1]))
     notes = []
