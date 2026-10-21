@@ -163,7 +163,18 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
         if not notes:
             raise ValueError("음표 파일에 음표가 없어요")
     else:
-        notes, _ = nt.segment(midi, voiced, db, feats["novelty"], noise=noise, hiband=feats["high_ratio"])
+        gnotes = None
+        if nt.USE_GAME:
+            from . import game
+            try:
+                gnotes = game.transcribe(y, sr, voiced, HOP, lyr.language(lyrics_text) if lines else None)
+            except Exception as e:  # 모델이 깨졌거나 onnxruntime이 맞지 않으면 원래 방법으로
+                warnings.append(f"GAME으로 음표를 나누지 못해서 원래 방법으로 했어요 ({e})")
+        if gnotes:
+            notes, _ = nt.from_game(gnotes, midi, voiced)
+            used += "+game"
+        else:
+            notes, _ = nt.segment(midi, voiced, db, feats["novelty"], noise=noise, hiband=feats["high_ratio"])
         if not notes:
             raise ValueError("음표를 만들지 못했어요")
     bpm = float(bpm or 120.0)

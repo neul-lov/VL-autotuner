@@ -40,7 +40,7 @@ jobs:
       - name: OpenUtau (Mac) 받기
         env:
           GH_TOKEN: ${{ github.token }}
-        run: devtools/openutau_harness/get_openutau.sh --rmvpe
+        run: devtools/openutau_harness/get_openutau.sh rmvpe game
       - name: 테토 음원 받기 (공식 배포, 시험에만 쓰고 올리지 않아요)
         run: |
           curl -fL --retry 3 -o teto.zip https://kasaneteto.jp/assets/download/utau/TETO-OUset240323.zip

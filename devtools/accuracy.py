@@ -37,11 +37,12 @@ def variants():
         "꺾기 남기기 12dB": [(pitch, "EDGE_KEEP_DB", 12.0)],
         "크기 창 30ms": [(tune_mod, "DYN_WIN", 0.03)],
         "RMVPE": [(None, "pitch_method", "rmvpe")],
+        "GAME 음표": [(notes, "USE_GAME", True)],
     }
 
 
 RENDER_VARIANTS = ("기본", "꺾기 남기기 6dB", "크기 창 30ms", "RMVPE")
-RENDER_REF_VARIANTS = ("기본", "모음 시작")
+RENDER_REF_VARIANTS = ("기본", "모음 시작", "GAME 음표")
 OPTS = {"transpose": "0", "pitch_method": "harvest"}  # 방식마다 (None, 옵션 이름, 값)으로 바꾼다
 
 
@@ -91,8 +92,8 @@ def patched(patches):
 
 def run_tune(wav, lyrics_text, out):
     res = tune(wav, out, lyrics_text, options=Options(**OPTS), title="t")
-    if res.pitch_method != OPTS["pitch_method"]:
-        raise RuntimeError(f"{OPTS['pitch_method']}를 쓰지 못했어요 ({res.pitch_method})")
+    if not res.pitch_method.startswith(OPTS["pitch_method"]) or (notes.USE_GAME and "+game" not in res.pitch_method):
+        raise RuntimeError(f"고른 방법을 쓰지 못했어요 ({res.pitch_method}, {res.warnings})")
     return json.loads((Path(out) / "preview.json").read_text())
 
 
