@@ -10,6 +10,7 @@
 """
 import argparse
 import csv
+import functools
 import hashlib
 import json
 import subprocess
@@ -28,21 +29,27 @@ from tetotune.tune import Options, tune  # noqa: E402
 
 def variants():
     """이름 → [(모듈, 이름, 값)]. 첫 번째가 지금 기본값."""
+    vo, dw = (notes, "VOWEL_ONSET", True), (tune_mod, "DYN_WIN", 0.03)
     return {
         "기본": [],
-        "모음 시작": [(notes, "VOWEL_ONSET", True)],
-        "구간 음정 10초": [(notes, "LOCAL_OFFSET", 10.0)],
-        "구간 음정 20초": [(notes, "LOCAL_OFFSET", 20.0)],
-        "꺾기 남기기 6dB": [(pitch, "EDGE_KEEP_DB", 6.0)],
-        "꺾기 남기기 12dB": [(pitch, "EDGE_KEEP_DB", 12.0)],
-        "크기 창 30ms": [(tune_mod, "DYN_WIN", 0.03)],
+        "모음 시작": [vo],
+        "모음 시작 3dB": [vo, (notes, "shift_to_vowels", functools.partial(notes.shift_to_vowels, drop=3.0))],
+        "모음 시작 8dB": [vo, (notes, "shift_to_vowels", functools.partial(notes.shift_to_vowels, drop=8.0))],
+        "크기 창 30ms": [dw],
+        "크기 창 20ms": [(tune_mod, "DYN_WIN", 0.02)],
+        "크기 창 45ms": [(tune_mod, "DYN_WIN", 0.045)],
+        "크기 창 30ms · 크기 1.0": [dw, (None, "dynamics", 1.0)],
         "RMVPE": [(None, "pitch_method", "rmvpe")],
+        "RMVPE 유성 + Harvest": [(None, "pitch_method", "hybrid")],
         "GAME 음표": [(notes, "USE_GAME", True)],
+        "모음 시작 · 크기 30ms": [vo, dw],
+        "모음 · 크기 30ms · GAME": [vo, dw, (notes, "USE_GAME", True)],
     }
 
 
-RENDER_VARIANTS = ("기본", "꺾기 남기기 6dB", "크기 창 30ms", "RMVPE")
-RENDER_REF_VARIANTS = ("기본", "모음 시작", "GAME 음표")
+RENDER_VARIANTS = ("기본", "크기 창 30ms", "크기 창 20ms", "크기 창 45ms", "크기 창 30ms · 크기 1.0",
+                   "RMVPE 유성 + Harvest", "GAME 음표")
+RENDER_REF_VARIANTS = ("기본", "모음 시작", "모음 시작 · 크기 30ms", "모음 · 크기 30ms · GAME")
 OPTS = {"transpose": "0", "pitch_method": "harvest"}  # 방식마다 (None, 옵션 이름, 값)으로 바꾼다
 
 

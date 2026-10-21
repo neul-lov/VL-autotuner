@@ -119,6 +119,16 @@ def extract(y, sr, method="auto"):
     y16 = audio.resample(y, sr, 16000)
     n = int(len(y16) / 16000 / HOP) + 1
     f0, used = None, "harvest"
+    if method == "hybrid":  # RMVPE로 소리 나는 곳 · 옥타브를 정하고, 값은 Harvest (센트 단위로 더 세밀)
+        try:
+            r = _rmvpe(y16, n)
+        except Exception:
+            r = None
+        if r is not None:
+            h = np.pad(_harvest(y16), (0, n))[:n]
+            r = np.pad(r, (0, n))[:n]
+            far = (h <= 0) | (np.abs(12 * np.log2(np.maximum(h, 1e-3) / np.maximum(r, 1e-3))) > 1.0)
+            return np.where(r > 0, np.where(far, r, h), 0.0), "hybrid"
     if method in ("auto", "rmvpe"):
         try:
             f0 = _rmvpe(y16, n)
