@@ -36,5 +36,7 @@ jobs:
           mkdir -p vocadito && unzip -q vocadito.zip -d vocadito && rm -rf vocadito/__MACOSX
       - name: 분리한 보컬 만들기 (40곡, 올리지 않아요)
         run: python -W ignore devtools/make_separated.py vocadito out/sep "$(seq -s, 1 40)"
-      - name: 방법별 비교
-        run: python -W ignore devtools/f0_robust.py vocadito out/sep | tee out/f0.txt && grep -A100 "^| 방법" out/f0.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: GAME 음표 모델 받기 (앱이 처음 조교할 때 받는 것과 같은 것)
+        run: python -c "from tetotune import game; d = game.ensure_model(); print(d); assert d"
+      - name: 넣는 음 높이가 깨끗한 보컬과 다른 곳 (렌더 없이)
+        run: python -W ignore devtools/target_check.py vocadito out/sep | tee out/target.txt && grep -A100 "^### " out/target.txt >> "$GITHUB_STEP_SUMMARY"
