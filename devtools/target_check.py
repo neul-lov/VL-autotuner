@@ -58,8 +58,7 @@ VARIANTS = {  # 이름 → (옥타브 접기, 긴 틈 기준 초)
     "지금": (False, 0.0),
     "옥타브 접기": (True, 0.0),
     "긴 틈은 음표 음 50ms": (False, 0.05),
-    "긴 틈은 음표 음 80ms": (False, 0.08),
-    "옥타브 접기 + 긴 틈 80ms": (True, 0.08),
+    "옥타브 접기 + 긴 틈 50ms": (True, 0.05),
 }
 
 
@@ -77,11 +76,13 @@ def check(wav, ms, vs, annot, n):
         return real(target, mask, notes, base, min_gap, **kw)
 
     tm._fill_gaps = grab
+    octave, tm.OCTAVE_FIX = tm.OCTAVE_FIX, False  # 접기 전 음 높이를 받는다
     try:
         with tempfile.TemporaryDirectory() as tmp:
             res = tune(wav, tmp, "", options=Options(**OPTS), title="t")
     finally:
         tm._fill_gaps = real
+        tm.OCTAVE_FIX = octave
     out = {}
     for name, (octave, gap) in VARIANTS.items():
         t = got["target"]
