@@ -39,7 +39,7 @@ jobs:
       - run: python -m pytest -q tests
 
   app:
-    name: TetoTune.app
+    name: AutoTuner.app
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -64,16 +64,16 @@ jobs:
         run: cd mac && ./build.sh
       - name: Apple Silicon · 인텔 Mac 둘 다 되는지
         run: |
-          archs=$(lipo -archs mac/build/TetoTune.app/Contents/MacOS/TetoTune)
+          archs=$(lipo -archs mac/build/AutoTuner.app/Contents/MacOS/AutoTuner)
           echo "$archs"; [[ "$archs" == *arm64* && "$archs" == *x86_64* ]]
-          cat mac/build/TetoTune.app/Contents/Resources/engine/wheels/constraints.txt
-          plutil -lint mac/build/TetoTune.app/Contents/Info.plist
+          cat mac/build/AutoTuner.app/Contents/Resources/engine/wheels/constraints.txt
+          plutil -lint mac/build/AutoTuner.app/Contents/Info.plist
       - name: 압축
-        run: ditto -c -k --keepParent mac/build/TetoTune.app TetoTune-mac.zip
+        run: ditto -c -k --keepParent mac/build/AutoTuner.app AutoTuner-mac.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: TetoTune-mac
-          path: TetoTune-mac.zip
+          name: AutoTuner-mac
+          path: AutoTuner-mac.zip
           retention-days: 30
 
   app-smoke:
@@ -85,13 +85,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: TetoTune-mac
+          name: AutoTuner-mac
       - name: 앱 켜기
         run: |
-          ditto -x -k TetoTune-mac.zip .
+          ditto -x -k AutoTuner-mac.zip .
           ls /opt/homebrew/bin/python3* /usr/local/bin/python3* 2>/dev/null || true
           /opt/homebrew/bin/python3 --version || true
-          open --stdout "$PWD/app.out" --stderr "$PWD/app.err" TetoTune.app
+          open --stdout "$PWD/app.out" --stderr "$PWD/app.err" AutoTuner.app
       - name: 엔진이 뜰 때까지 (처음 실행 설치 포함)
         run: |
           sup="$HOME/Library/Application Support/TetoTune"
@@ -101,7 +101,7 @@ jobs:
               port=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["port"])' "$sup/server.json")
               token=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["token"])' "$sup/server.json")
               if curl -sf -H "X-TetoTune-Token: $token" "http://127.0.0.1:$port/api/status" > status.json; then
-                cat status.json; echo; grep -h "^\[TetoTune\]" "$sup/setup.log" || true
+                cat status.json; echo; grep -h "^\[AutoTuner\]" "$sup/setup.log" || true
                 ls -l "$sup/server.json"
                 echo "::add-mask::$token"
                 echo "port=$port" >> "$GITHUB_ENV"; echo "token=$token" >> "$GITHUB_ENV"
@@ -115,7 +115,7 @@ jobs:
               fi
             fi
             if (( i % 12 == 0 )); then
-              echo "--- $((i * 5))초: $(pgrep -lf 'TetoTune|server.py|pip' | tr '\n' ' ')"
+              echo "--- $((i * 5))초: $(pgrep -lf 'AutoTuner|server.py|pip' | tr '\n' ' ')"
               tail -n 2 "$sup/setup.log" 2>/dev/null || true
               tail -n 5 "$sup/server-app.log" 2>/dev/null || true
             fi
@@ -141,7 +141,7 @@ jobs:
       - name: 앱이 갑자기 꺼지면 엔진도 꺼지는지
         run: |
           pgrep -lf "server.py" || { echo "엔진이 없어요"; exit 1; }
-          pkill -9 -x TetoTune
+          pkill -9 -x AutoTuner
           for i in $(seq 1 10); do
             pgrep -f "server.py" > /dev/null || { echo "엔진도 꺼졌어요 (${i}초)"; exit 0; }
             sleep 1

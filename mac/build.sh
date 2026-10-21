@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Builds TetoTune.app into ./build. Pass --install to copy it to /Applications as well.
+# Builds AutoTuner.app into ./build. Pass --install to copy it to /Applications as well.
 #
 # The app carries its own copy of the engine (Resources/engine) and installs its Python packages into
 # ~/Library/Application Support/TetoTune on first launch. When this checkout already has a .venv
@@ -17,11 +17,11 @@ if ! swift build -c release "${ARCHS[@]}"; then
     swift build -c release
 fi
 
-APP=build/TetoTune.app
+APP=build/AutoTuner.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/engine/tetotune"
-cp "$(swift build -c release "${ARCHS[@]}" --show-bin-path)/TetoTune" "$APP/Contents/MacOS/TetoTune"
-lipo -archs "$APP/Contents/MacOS/TetoTune"
+cp "$(swift build -c release "${ARCHS[@]}" --show-bin-path)/AutoTuner" "$APP/Contents/MacOS/AutoTuner"
+lipo -archs "$APP/Contents/MacOS/AutoTuner"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp ../LICENSE ../THIRD_PARTY_NOTICES.txt "$APP/Contents/Resources/"
 
@@ -42,10 +42,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>TetoTune</string>
-    <key>CFBundleDisplayName</key><string>TetoTune</string>
+    <key>CFBundleName</key><string>AutoTuner</string>
+    <key>CFBundleDisplayName</key><string>AutoTuner</string>
     <key>CFBundleIdentifier</key><string>com.neul.tetotune</string>
-    <key>CFBundleExecutable</key><string>TetoTune</string>
+    <key>CFBundleExecutable</key><string>AutoTuner</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>0.3</string>
@@ -65,7 +65,12 @@ codesign --force --deep --sign - "$APP"
 echo "Built $APP"
 
 if [[ "${1:-}" == "--install" ]]; then
-    rm -rf /Applications/TetoTune.app
+    rm -rf /Applications/AutoTuner.app
+    # 예전 이름(TetoTune)으로 깐 같은 앱은 지운다 (설정 · 가사 기억은 그대로 남는다)
+    if [[ -d /Applications/TetoTune.app ]]; then
+        osascript -e 'quit app "TetoTune"' 2>/dev/null || true
+        rm -rf /Applications/TetoTune.app
+    fi
     cp -R "$APP" /Applications/
-    echo "Installed to /Applications/TetoTune.app"
+    echo "Installed to /Applications/AutoTuner.app"
 fi
