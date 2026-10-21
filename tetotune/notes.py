@@ -16,6 +16,8 @@ LINE_MATCH = True  # 가사 줄 수 ≠ 프레이즈 수일 때 줄 경계를 �
 ONSET_MAX = 0.15  # 이보다 짧은 음표가 다음 음표 바로 앞에 붙어 있으면 앞 음표에 붙인다 (_merge_onsets, 0이면 끔)
 ONSET_ANY = True  # False면 자음 같은(무성 · 높은 대역) 짧은 음표만
 SYL_GAP = 0.12  # 음절 시작 후보 두 곳이 이보다 가까우면 약한 쪽은 마지막에 고른다 (_evidence, 0이면 끔)
+LOCAL_OFFSET = 0.0  # 초. 0보다 크면 음정 기준을 이만큼 창으로 따로 잡는다 (무반주로 부르면 곡 뒤로 갈수록 처진다)
+VOWEL_ONSET = False  # 울리는 자음(ま · な · ら · や · わ · が행 등)으로 시작하는 음절은 음표 시작을 모음 시작으로 옮긴다
 
 
 class Note:
@@ -39,10 +41,29 @@ def tuning_offset(midi, voiced):
     return float(np.angle(np.mean(np.exp(1j * ang))) / (2 * np.pi))
 
 
+def local_offsets(midi, voiced, win):
+    """프레임마다 음정 기준: 앞뒤 win/2초 안의 원형 평균. 곡 전체 기준에서 ±0.5 안으로 펼쳐서 반음 경계에서 튀지 않게.
+    노래가 적은 곳은 곡 전체 기준 쪽으로 당긴다."""
+    from scipy.ndimage import uniform_filter1d
+
+    glob = tuning_offset(midi, voiced)
+    ok = voiced & np.isfinite(midi)
+    m = np.where(ok, midi, 0.0)
+    z = np.where(ok, np.exp(2j * np.pi * (m - np.round(m))), 0)
+    w = max(1, int(win / HOP))
+    cnt = uniform_filter1d(ok.astype(float), w, mode="nearest")
+    c = uniform_filter1d(z.real, w, mode="nearest") + 1j * uniform_filter1d(z.imag, w, mode="nearest")
+    c = c + 0.1 * np.exp(2j * np.pi * glob)  # 노래가 거의 없으면 전체 기준
+    d = np.angle(c * np.exp(-2j * np.pi * glob)) / (2 * np.pi)
+    return glob + d * np.clip(cnt / 0.3, 0, 1)
+
+
 def _viterbi(seg, weight, offset, switch=6.0):
     lo, hi = int(np.floor(np.nanmin(seg))) - 1, int(np.ceil(np.nanmax(seg))) + 2
     states = np.arange(lo, hi)
-    cost = np.minimum((seg[:, None] - offset - states[None, :]) ** 2, 4.0) * weight[:, None]
+    off = np.asarray(offset, dtype=float)
+    off = off[:, None] if off.ndim else off
+    cost = np.minimum((seg[:, None] - off - states[None, :]) ** 2, 4.0) * weight[:, None]
     n, k = cost.shape
     acc = cost[0].copy()
     back = np.zeros((n, k), dtype=np.int32)
@@ -94,8 +115,9 @@ def segment(midi, voiced, db, novelty=None, auto_split_db=6.0, noise=None, hiban
     from scipy.ndimage import uniform_filter1d
 
     offset = tuning_offset(midi, voiced)
-    db_s = uniform_filter1d(db, 5)
     n = len(midi)
+    offs = local_offsets(midi, voiced, LOCAL_OFFSET) if LOCAL_OFFSET > 0 else np.full(n, offset)
+    db_s = uniform_filter1d(db, 5)
     if novelty is None:
         novelty = np.zeros(n)
     ref = np.median(novelty[voiced]) if voiced.any() else 1.0
@@ -121,7 +143,7 @@ def segment(midi, voiced, db, novelty=None, auto_split_db=6.0, noise=None, hiban
     for a, b in _runs(bridged):
         seg = filled[a:b]
         weight = np.where(voiced[a:b], 1.0, 0.25)
-        path = _viterbi(seg, weight, offset)
+        path = _viterbi(seg, weight, offs[a:b])
         starts = [0] + [i for i in range(1, len(path)) if path[i] != path[i - 1]]
         # 무성 틈(자음) 끝 = 새 음절 시작
         for g0, g1 in gaps:
@@ -141,7 +163,7 @@ def segment(midi, voiced, db, novelty=None, auto_split_db=6.0, noise=None, hiban
                 continue
             core = seg[s + (e - s) // 5:e - (e - s) // 5 or e]
             core = core[np.isfinite(core)] if len(core) else seg[s:e]
-            tone = int(np.round(np.median(core) - offset))
+            tone = int(np.round(np.median(core) - np.median(offs[a + s:a + e])))
             is_gap = any(g1 - a == s for _, g1 in gaps)
             if not phrase:
                 strength = 10.0
@@ -247,6 +269,44 @@ def _merge_onsets(notes, consonant=lambda x: True, max_len=None):
             notes[i - 1].end = x.end
             notes[i - 1].dips += [(x.start, max(0.0, x.strength - 2.0))] + x.dips
         notes.pop(i)
+    return notes
+
+
+# 울리는 자음: 소리(유성)가 자음부터 나서 음표가 모음보다 일찍 시작한다
+_VOICED_KANA = set("まみむめもなにぬねのらりるれろやゆよわをがぎぐげござじずぜぞだぢづでどばびぶべぼゔ")
+_VOICED_ROMA = set("mnrywbdgzjv")
+
+
+def _voiced_onset(lyric):
+    if not lyric or lyric == "+":
+        return False
+    c = lyric[0]
+    if "가" <= c <= "힣":  # 첫소리 ㄴ · ㄹ · ㅁ (ㅇ은 소리 없음)
+        return (ord(c) - 0xAC00) // 588 in (2, 5, 6)
+    return c in _VOICED_KANA or c.lower() in _VOICED_ROMA
+
+
+def shift_to_vowels(notes, db, max_shift=0.2, drop=5.0, min_shift=0.02):
+    """울리는 자음으로 시작하는 음절의 음표 시작을 모음이 시작하는 곳(크기가 그 음표의 큰 쪽 크기 − drop dB에 처음 닿는 곳)으로
+    옮긴다. 앞 음표가 바로 붙어 있으면 그 끝도 같이 (자음은 앞 음표 끝 몫: OpenUtau가 선행발성만큼 앞에 부른다)."""
+    from scipy.ndimage import uniform_filter1d
+
+    db_s = uniform_filter1d(db, 3)
+    for i, x in enumerate(notes):
+        if not _voiced_onset(x.lyric):
+            continue
+        a, b = int(round(x.start / HOP)), int(round(x.end / HOP))
+        lim = min(b, a + int(max_shift / HOP))
+        if lim - a < 4 or b - a < 8:
+            continue
+        peak = np.percentile(db_s[a:b], 80)
+        k = next((j for j in range(a, lim) if db_s[j] >= peak - drop), None)
+        if k is None or (k - a) * HOP < min_shift or (b - k) * HOP < 0.06:
+            continue
+        t = k * HOP
+        if i and abs(notes[i - 1].end - x.start) < 1e-6:
+            notes[i - 1].end = t
+        x.start = t
     return notes
 
 

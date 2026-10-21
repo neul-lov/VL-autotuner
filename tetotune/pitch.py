@@ -13,6 +13,7 @@ from . import audio
 
 HOP = 0.005  # 초. OpenUtau 곡선 간격(5틱)과 비슷하게
 FMIN, FMAX = 65.0, 1100.0
+EDGE_KEEP_DB = 0.0  # 0보다 크면: 소리 시작 · 끝의 튀는 음높이라도 크기가 이어지는 부분보다 이 dB 안이면 남긴다 (진짜 꺾기)
 
 
 def hz_to_midi(f):
@@ -178,12 +179,14 @@ def clean(f0, db):
         if b - a <= edge + look:
             continue
         ref = np.median(out[a + edge:a + edge + look])
+        loud_ref = np.median(db[a + edge:a + edge + look])
         for i in range(a, a + edge):
-            if abs(out[i] - ref) > 2.5:
+            if abs(out[i] - ref) > 2.5 and not (EDGE_KEEP_DB > 0 and db[i] >= loud_ref - EDGE_KEEP_DB):
                 voiced[i] = False
         ref = np.median(out[b - edge - look:b - edge])
+        loud_ref = np.median(db[b - edge - look:b - edge])
         for i in range(b - edge, b):
-            if abs(out[i] - ref) > 2.5:
+            if abs(out[i] - ref) > 2.5 and not (EDGE_KEEP_DB > 0 and db[i] >= loud_ref - EDGE_KEEP_DB):
                 voiced[i] = False
         # 가운데의 40ms보다 짧은 튐: 앞뒤 90ms 중앙값으로 바꾼다
         seg = out[a:b]

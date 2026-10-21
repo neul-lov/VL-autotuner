@@ -19,6 +19,7 @@ from .pitch import HOP
 
 TICKS = 480
 INTERVAL = 5  # OpenUtau 곡선 간격 (틱)
+DYN_WIN = 0.08  # 초. 크기 윤곽을 잡는 최댓값 · 다듬기 창
 
 
 @dataclass
@@ -172,6 +173,8 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
             warnings.append(f"노래에서 숨 쉬는 곳(프레이즈)을 {phrases}개 찾았는데 가사는 {len(lines)}줄이에요. "
                             f"가사를 프레이즈마다 한 줄씩 나눠 주면 음절이 더 정확히 들어가요")
         notes = nt.align(notes, lines)
+        if nt.VOWEL_ONSET and not notes_file:
+            notes = nt.shift_to_vowels(notes, db)
         n_syl = sum(1 for line in lines for s in line if s != "+")  # ー · + (늘이기)는 음절이 아니다
         got = sum(1 for x in notes if x.lyric != "+")
         if got != n_syl:
@@ -251,7 +254,7 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
     ref = float(np.median(db[voiced]))
     # 크기는 겉 윤곽만 (80ms 최댓값): 음절 사이 자음에서 잠깐 꺼지는 건 음원 자음이 이미 갖고 있다
     from scipy.ndimage import maximum_filter1d
-    env = _smooth(maximum_filter1d(_interp_gaps(db, sing_mask), int(0.08 / HOP)), 0.08)
+    env = _smooth(maximum_filter1d(_interp_gaps(db, sing_mask), int(DYN_WIN / HOP)), DYN_WIN)
     rel = env - ref
     rel = np.where(rel < -6, -6 + (rel + 6) * 0.5, rel)  # 아주 작은 곳은 반만: 음원 소리가 묻히지 않게
     dyn = np.clip(rel * 10 * o.dynamics, -120, 60) * near
@@ -310,6 +313,7 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
         else [[round(a, 3), round(b, 3)] for a, b, *_ in breaths],
         "duration": len(y) / sr,
         "phrases": len(nt._phrases([x for x in notes])),
+        "offset": round(nt.tuning_offset(midi, voiced), 3),
     }
     (out / "preview.json").write_text(json.dumps(preview, ensure_ascii=False), encoding="utf-8")
     res = Result(str(out), str(out / "project.ustx"), len(notes),
