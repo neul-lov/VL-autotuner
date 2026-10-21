@@ -169,12 +169,13 @@ def _pitd(target, base, notes, o):
     return o.pitch_follow * (lp * (1 - o.correct * steady) + o.vibrato * fine)
 
 
-def _fold_octaves(target, mask, notes, ctx=1.0):
+def _fold_octaves(target, mask, notes, ctx=1.0, max_cover=1.0):
     """한 옥타브쯤 잘못 읽은 조각을 접는다. 분리한 보컬은 반주 · 잔향 때문에 Harvest가 0.1~0.8초씩 한 옥타브 아래 · 위를
     읽을 때가 있다 (pitch.clean의 150ms 중앙값보다 길어서 거기서는 못 접는다).
     두 쪽이 다 그렇다고 할 때만 접는다: (1) 그 음표(GAME)에서 한 옥타브(±2반음) 떨어져 있고 앞뒤 음표와도 멀다,
     (2) 앞뒤 ctx초에 읽은 음 높이(그 조각 빼고)의 중앙값에 접은 쪽이 6반음 넘게 더 가깝다.
-    음표가 틀린 곳(GAME이 옥타브를 틀림)에서 맞게 읽은 음을 접어 버리지 않게 (2)가 막는다."""
+    음표가 틀린 곳(GAME이 옥타브를 틀림)에서 맞게 읽은 음을 접어 버리지 않게 (2)가 막는다.
+    max_cover: 한 음표에서 읽은 프레임의 이만큼 넘게 덮는 조각은 접지 않는다 (음표 전체가 옥타브 다르면 음표 쪽이 틀렸을 수 있다)."""
     out = target.copy()
     n = len(out)
     ok = mask & np.isfinite(out)
@@ -201,6 +202,12 @@ def _fold_octaves(target, mask, notes, ctx=1.0):
         around = ok[lo:hi] & ~cand[lo:hi]
         if around.sum() < 20:
             continue
+        if max_cover < 1.0:
+            cover = [np.sum(ok[max(a, int(x.start / HOP)):min(b, int(x.end / HOP))])
+                     / max(1, np.sum(ok[int(x.start / HOP):int(x.end / HOP)]))
+                     for x in notes if x.end / HOP > a and x.start / HOP < b]
+            if cover and max(cover) > max_cover:
+                continue
         ref = float(np.median(out[lo:hi][around]))
         seg = out[a:b]
         k = float(np.median(kk[a:b]))

@@ -54,12 +54,12 @@ def where(nl, t):
     return w, k
 
 
-VARIANTS = {  # 이름 → (옥타브 접기, 긴 틈 기준 초, 음표 범위 센트)
-    "지금": (False, 0.0, 0),
-    "긴 틈은 음표 음 50ms": (False, 0.05, 0),
-    "긴 틈 50ms + 음표 범위 300센트": (False, 0.05, 300),
-    "긴 틈 50ms + 음표 범위 500센트": (False, 0.05, 500),
-    "긴 틈 50ms + 음표 범위 800센트": (False, 0.05, 800),
+VARIANTS = {  # 이름 → (옥타브 접기 (음표를 덮는 비율 한도, 0 = 안 접음), 긴 틈 기준 초, 음표 범위 센트)
+    "지금": (0, 0.0, 0),
+    "긴 틈 50ms": (0, 0.05, 0),
+    "옥타브 접기 + 긴 틈": (1.0, 0.05, 0),
+    "옥타브 접기(음표 일부만 70%) + 긴 틈": (0.7, 0.05, 0),
+    "옥타브 접기(음표 일부만 50%) + 긴 틈": (0.5, 0.05, 0),
 }
 
 
@@ -88,7 +88,7 @@ def check(wav, ms, vs, annot, n):
     for name, (octave, gap, rng) in VARIANTS.items():
         t = got["target"]
         if octave:
-            t = tm._fold_octaves(t, got["mask"], got["notes"])
+            t = tm._fold_octaves(t, got["mask"], got["notes"], max_cover=octave)
         t = tm._fill_gaps(t, got["mask"], got["notes"], got["base"], gap)
         if rng:
             t = tm._clamp_to_notes(t, got["notes"], rng)
@@ -155,6 +155,12 @@ def main():
             out[label].append(r)
             line = " · ".join(f"{name} {len(v['events'])}({sum(e['note_ok'] for e in v['events'])})" for name, v in r.items())
             print(f"vocadito {k} {label}: {line}", flush=True)
+            if label == "깨끗한 보컬":  # 깨끗한 보컬에서 새로 생긴 곳 (나빠진 곳)
+                old = {(e["t"], e["kind"]) for e in r["지금"]["events"]}
+                for name, v in r.items():
+                    for e in v["events"]:
+                        if (e["t"], e["kind"]) not in old:
+                            print(f"    깨끗 · {name} 새로", json.dumps(e, ensure_ascii=False), flush=True)
             if label == "분리한 보컬":
                 base = r["지금"]["events"]
                 for name, v in r.items():
