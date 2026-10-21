@@ -1,8 +1,8 @@
-TetoTune third-party notices
+AutoTuner third-party notices
 ============================
 
-TetoTune's own code is under the MIT License (see LICENSE).
-The built app (TetoTune.app) also ships pyworld wheels, which contain the WORLD vocoder.
+AutoTuner's own code is under the MIT License (see LICENSE).
+The built app (AutoTuner.app) also ships pyworld wheels, which contain the WORLD vocoder.
 Their notices follow.
 
 ----------------------------------------------------------------------

@@ -93,7 +93,7 @@ struct Sidebar: View {
                     .foregroundStyle(.white)
             }
             VStack(alignment: .leading, spacing: 0) {
-                Text("TetoTune")
+                Text("AutoTuner")
                     .font(.system(size: 15, weight: .bold))
                 Text(subtitle)
                     .font(.system(size: 11, weight: .medium))
@@ -146,7 +146,7 @@ struct Sidebar: View {
             }
             Button("새로 고침") { Task { await model.refresh() } }
             Divider()
-            Button("TetoTune 종료") { NSApp.terminate(nil) }
+            Button("AutoTuner 종료") { NSApp.terminate(nil) }
         } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 13, weight: .semibold))
