@@ -1,14 +1,14 @@
-"""분리한 보컬로 조교했을 때 테토에게 부르라고 넣는 음 높이(렌더 전)가 깨끗한 원래 보컬과 어디서 크게 다른지 찾는다.
+"""분리한 보컬로 조교했을 때 테토에게 부르라고 넣는 음 높이(렌더 전)가 깨끗한 원래 보컬과 어디서 크게 다른지 찾고,
+넣는 음 높이를 만드는 방법(VARIANTS)마다 비교한다.
 
 렌더 비교(compare_render.py --truth)의 "떨어짐 · 튐"과 같은 기준으로 센다: 깨끗한 보컬도 소리 나는 음표 안에서
 넣은 음 높이가 깨끗한 보컬(Harvest)보다 150센트 넘게 낮은 · 높은 곳이 30ms 넘게. 렌더 없이 조교만 하니까 빠르다.
 같은 곳을 깨끗한 보컬로 조교했을 때와도 비교한다 (분리 때문인지, 조교 방법 때문인지).
-
-곳마다 무엇 때문인지:
-- 정답 의심: 깨끗한 보컬 Harvest가 사람이 표시한 음 높이(vocadito f0)와 150센트 넘게 다르다 (비교 기준이 틀림)
-- 빈 곳 잇기: 분리한 보컬이 거기서 소리 없음(무성 · 숨으로 뺌)이라 앞뒤를 이어 그었다
-- 읽기 틀림: 분리한 보컬에서 읽은 음 높이부터 다르다
-- 바로잡기: 읽은 음 높이는 맞는데 음 가운데 바로잡기(correct)가 음표 쪽으로 당겼다 (음표가 틀림)
+- 음표는 맞는데 벗어남: 그 자리 음표가 깨끗한 보컬과 150센트 안인데 넣은 음 높이만 벗어난 곳 = 테토가 맞는 음에서 확
+  떨어지거나 튀는 곳. 음표도 깨끗한 보컬과 다른 곳은 대부분 사람이 음절 사이 · 음 끝에서 잠깐 꺾은 것을 분리한 보컬(잔향)이
+  덮어서 테토가 음표 음을 그대로 부르는 곳이다.
+- 왜: 정답 의심(깨끗한 보컬 Harvest가 사람이 표시한 vocadito f0와 150센트 넘게 다름) · 빈 곳 잇기(분리한 보컬이 거기서
+  소리 없음이라 앞뒤를 이어 그음) · 읽기 틀림(분리한 보컬에서 읽은 음 높이부터 다름)
 
 사용: python target_check.py <vocadito 폴더> <분리한 보컬 폴더 (sep_<번호>.wav)> [번호,번호,...]
 """
@@ -54,18 +54,50 @@ def where(nl, t):
     return w, k
 
 
+VARIANTS = {  # 이름 → (옥타브 접기, 긴 틈 기준 초)
+    "지금": (False, 0.0),
+    "옥타브 접기": (True, 0.0),
+    "긴 틈은 음표 음 50ms": (False, 0.05),
+    "긴 틈은 음표 음 80ms": (False, 0.08),
+    "옥타브 접기 + 긴 틈 80ms": (True, 0.08),
+}
+
+
 def check(wav, ms, vs, annot, n):
-    """wav로 조교 → 넣은 음 높이를 깨끗한 보컬 음 높이(ms, vs)와 비교."""
-    with tempfile.TemporaryDirectory() as tmp:
-        res = tune(wav, tmp, "", options=Options(**OPTS), title="t")
-        prev = json.loads((Path(tmp) / "preview.json").read_text())
-        z = {k: v for k, v in np.load(Path(tmp) / "curves.npz").items()}
-    m = min(n, len(z["base"]))
-    ms, vs, annot = ms[:m], vs[:m], annot[:m]
-    want = (z["base"][:m] + z["pitd"][:m]) / 100
-    target = z["target"][:m] / 100
-    sv = z["voiced"][:m]
-    nl = prev["notes"]
+    """wav로 한 번 조교하고(음 높이 읽기 · 음표는 같으니까), 넣는 음 높이만 방법마다 다시 만들어 깨끗한 보컬과 비교."""
+    import copy
+
+    import tetotune.tune as tm
+
+    got = {}
+    real = tm._fill_gaps
+
+    def grab(target, mask, notes, base, min_gap, **kw):
+        got.update(target=target.copy(), mask=mask.copy(), notes=copy.deepcopy(notes), base=base.copy())
+        return real(target, mask, notes, base, min_gap, **kw)
+
+    tm._fill_gaps = grab
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            res = tune(wav, tmp, "", options=Options(**OPTS), title="t")
+    finally:
+        tm._fill_gaps = real
+    out = {}
+    for name, (octave, gap) in VARIANTS.items():
+        t = got["target"]
+        if octave:
+            t = tm._fold_octaves(t, got["mask"], got["notes"])
+        t = tm._fill_gaps(t, got["mask"], got["notes"], got["base"], gap)
+        want = (got["base"] + tm._pitd(t, got["base"], got["notes"], Options(**OPTS))) / 100
+        out[name] = compare(want, got["mask"] & np.isfinite(got["target"]), got["notes"], ms, vs, annot, n)
+        out[name]["method"] = res.pitch_method
+    return out
+
+
+def compare(want, sv, notes, ms, vs, annot, n):
+    m = min(n, len(want))
+    ms, vs, annot, want, sv = ms[:m], vs[:m], annot[:m], want[:m], sv[:m]
+    nl = [[x.start, x.end, x.tone, x.lyric] for x in notes]
     inside = np.zeros(m, bool)
     step = np.full(m, np.nan)
     for s, e, tone, _ in nl:
@@ -82,7 +114,6 @@ def check(wav, ms, vs, annot, n):
             t = (a + b) / 2 * HOP
             w, k = where(nl, t)
             c = float(np.median(diff[sl]))
-            terr = float(np.nanmedian((target[sl] - ms[sl]) * 100))
             aerr = (ms[sl] - annot[sl]) * 100
             aerr = float(np.nanmedian(aerr)) if np.isfinite(aerr).any() else float("nan")
             nerr = float(np.nanmedian((step[sl] - ms[sl]) * 100))
@@ -91,16 +122,15 @@ def check(wav, ms, vs, annot, n):
                 why = "정답 의심"
             elif voiced < 0.5:
                 why = "빈 곳 잇기"
-            elif abs(terr) > 150:
-                why = "읽기 틀림"
             else:
-                why = "바로잡기"
+                why = "읽기 틀림"
             events.append({"t": round(t, 2), "ms": int((b - a) * HOP * 1000), "kind": kind, "where": w, "why": why,
-                           "cents": int(c), "target": int(terr), "note": int(nerr) if np.isfinite(nerr) else None,
+                           "cents": int(c), "note": int(nerr) if np.isfinite(nerr) else None,
+                           "note_ok": bool(np.isfinite(nerr) and abs(nerr) < 150),
                            "truth_vs_annot": int(aerr) if np.isfinite(aerr) else None, "sep_voiced": round(voiced, 2)})
     err = np.abs(diff[use])
     return {"minutes": m * HOP / 60, "events": events, "rpa": float((err <= 50).mean()) if use.any() else 0.0,
-            "notes": len(nl), "method": res.pitch_method}
+            "notes": len(nl)}
 
 
 def main():
@@ -118,29 +148,43 @@ def main():
         annot, _ = truth(k, root, n)
         for label, w in (("분리한 보컬", wav), ("깨끗한 보컬", clean_wav)):
             r = check(w, ms, vs, annot, n)
-            r["song"] = k
             out[label].append(r)
-            print(f"vocadito {k} {label}: {len(r['events'])}곳 / {r['minutes']:.2f}분 · 50센트 안 {r['rpa']:.3f} · "
-                  f"음표 {r['notes']} ({r['method']})", flush=True)
+            line = " · ".join(f"{name} {len(v['events'])}({sum(e['note_ok'] for e in v['events'])})" for name, v in r.items())
+            print(f"vocadito {k} {label}: {line}", flush=True)
             if label == "분리한 보컬":
-                for e in r["events"]:
-                    print("   ", json.dumps(e, ensure_ascii=False), flush=True)
+                base = r["지금"]["events"]
+                for name, v in r.items():
+                    if name == "지금":
+                        continue
+                    old = {(e["t"], e["kind"]) for e in base}
+                    new = {(e["t"], e["kind"]) for e in v["events"]}
+                    for e in base:
+                        if e["note_ok"] and (e["t"], e["kind"]) not in new:
+                            print(f"    {name} 없앰", json.dumps(e, ensure_ascii=False), flush=True)
+                    for e in v["events"]:
+                        if (e["t"], e["kind"]) not in old:
+                            print(f"    {name} 새로", json.dumps(e, ensure_ascii=False), flush=True)
+                for e in base:
+                    if e["note_ok"]:
+                        print("    음표 맞는데 벗어남", json.dumps(e, ensure_ascii=False), flush=True)
     print()
     for label, rs in out.items():
-        minutes = sum(r["minutes"] for r in rs)
-        evs = [e for r in rs for e in r["events"]]
-        print(f"\n### {label}: {len(evs) / max(1e-9, minutes):.2f}곳/분 (떨어짐 {sum(e['kind'] == '떨어짐' for e in evs) / minutes:.2f} · "
-              f"튐 {sum(e['kind'] == '튐' for e in evs) / minutes:.2f}), 50센트 안 {np.mean([r['rpa'] for r in rs]):.3f}")
-        for key in ("why", "where"):
-            cnt = {}
-            for e in evs:
-                cnt[e[key]] = cnt.get(e[key], 0) + 1
-            print("| " + " | ".join(f"{k} {v / minutes:.2f}" for k, v in sorted(cnt.items(), key=lambda kv: -kv[1])) + " |")
-        both = {}
+        print(f"\n### {label}\n")
+        print("| 방법 | 벗어남 /분 | 음표는 맞는데 벗어남 /분 | 600센트 넘게 /분 | 50센트 안 |")
+        print("|---|---|---|---|---|")
+        for name in VARIANTS:
+            minutes = sum(r[name]["minutes"] for r in rs)
+            evs = [e for r in rs for e in r[name]["events"]]
+            ok = sum(e["note_ok"] for e in evs)
+            big = sum(abs(e["cents"]) > 600 for e in evs)
+            rpa = np.mean([r[name]["rpa"] for r in rs])
+            print(f"| {name} | {len(evs) / minutes:.2f} | {ok / minutes:.2f} | {big / minutes:.2f} | {rpa:.4f} |", flush=True)
+        evs = [e for r in rs for e in r["지금"]["events"]]
+        cnt = {}
         for e in evs:
-            kk = f"{e['why']} · {e['where']}"
-            both[kk] = both.get(kk, 0) + 1
-        print("| " + " | ".join(f"{k} {v}" for k, v in sorted(both.items(), key=lambda kv: -kv[1])[:10]) + " |", flush=True)
+            kk = f"{'음표 맞음' if e['note_ok'] else '음표도 다름'} · {e['why']} · {e['where']}"
+            cnt[kk] = cnt.get(kk, 0) + 1
+        print("\n지금 방법 벗어남 종류: " + ", ".join(f"{k} {v}" for k, v in sorted(cnt.items(), key=lambda kv: -kv[1])), flush=True)
 
 
 if __name__ == "__main__":
