@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+server-app.log
+mac/.build/
+mac/build/
+mac/wheels/
