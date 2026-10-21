@@ -18,7 +18,7 @@ from pathlib import Path
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import JSONResponse
 
-from tetotune import __version__, pitch, stemmixer, voicebank
+from tetotune import __version__, game, pitch, stemmixer, voicebank
 from tetotune.tune import Options, tune
 
 # 설정 값마다 허용 범위 (숫자) 또는 고를 수 있는 값 (글자)
@@ -160,6 +160,11 @@ def _run(job_id, vocal, song, lyrics, notes, backing, opts):
                 backing = backing or (str(sm_backing) if sm_backing else None)
             out = OUTPUT / _folder_name(title)
             _mark(out)
+            if not notes:  # 음표 파일이 없으면 GAME으로 음표를 나눈다: 모델이 없으면 처음 한 번 받는다
+                try:
+                    game.ensure_model(lambda s: job.update(step=s, progress=0.01))
+                except Exception as e:
+                    print(f"GAME 모델을 받지 못했어요: {e}", flush=True)
             res = tune(vocal, out, lyrics or "", notes or None, backing or None, opts,
                        progress=lambda p, s: job.update(step=s, progress=round(p, 3)), title=title)
             (out / INCOMPLETE).unlink(missing_ok=True)

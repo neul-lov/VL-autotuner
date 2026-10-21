@@ -1,9 +1,13 @@
-"""GAME (OpenVPI의 노래 → 음표 모델, MIT): OpenUtau에 GAME을 설치해 두었으면 그 모델로 음표를 나눈다.
+"""GAME (OpenVPI의 노래 → 음표 모델, MIT): 노래를 음표로 나눈다. OpenUtau에 GAME을 설치해 두었으면 그 모델을,
+없으면 앱이 처음 조교할 때 OpenUtau 패키지 목록에서 받아 둔 모델(models_home())을 쓴다.
+실제 테토 · 사람 노래 비교(devtools/accuracy.py)에서 원래 방법보다 가사 · 음표가 더 잘 맞았다.
 
 OpenUtau의 GameOnnxBackend와 같은 순서로 모델 넷을 돌린다:
 encoder → segmenter (D3PM 8번) → bd2dur → estimator. 긴 곡은 쉼표(조용한 곳)에서 20초 안쪽 조각으로 잘라 넣는다.
 """
 import json
+import os
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -15,17 +19,75 @@ STEPS, SEG_THRESHOLD, SEG_RADIUS, EST_THRESHOLD = 8, 0.2, 2, 0.2
 MAX_CHUNK = 20.0
 
 
+REGISTRY = "https://openutau.github.io/svs-index/registry/v1/softwares/all.json"
+
+
+def models_home():
+    """앱이 받은 모델을 두는 곳 (TETOTUNE_MODELS로 바꿀 수 있다)."""
+    if os.environ.get("TETOTUNE_MODELS"):
+        return Path(os.environ["TETOTUNE_MODELS"])
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "TetoTune" / "models"
+    return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "AutoTuner" / "models"
+
+
+def _complete(d):
+    return (d / "config.json").exists() and all((d / f).exists() for f in FILES)
+
+
 def model_dir():
-    """OpenUtau 의존성 폴더의 GAME (OpenUtau → 의존성 설치). onnxruntime이 없거나 모델이 없으면 None."""
+    """쓸 GAME 모델 폴더: OpenUtau 의존성 폴더(OpenUtau → 의존성 설치) → 앱이 받아 둔 것. onnxruntime이 없거나 모델이 없으면 None."""
     import importlib.util
 
     if importlib.util.find_spec("onnxruntime") is None:
         return None
     for home in (Path.home() / "Library" / "OpenUtau", Path.home() / ".local" / "share" / "OpenUtau"):
-        d = home / "Dependencies" / "game"
-        if (d / "config.json").exists() and all((d / f).exists() for f in FILES):
-            return d
-    return None
+        if _complete(home / "Dependencies" / "game"):
+            return home / "Dependencies" / "game"
+    return models_home() / "game" if _complete(models_home() / "game") else None
+
+
+def ensure_model(progress=lambda s: None):
+    """GAME 모델이 없으면 OpenUtau 패키지 목록(svs-index)에서 받아 models_home()/game에 푼다 → 폴더 또는 None (못 받음)."""
+    import importlib.util
+    import shutil
+    import tempfile
+    import urllib.request
+    import zipfile
+
+    if importlib.util.find_spec("onnxruntime") is None:
+        return None
+    found = model_dir()
+    if found:
+        return found
+    dest = models_home() / "game"
+    progress("음표 나누기 모델(GAME) 받는 중 (처음 한 번)")
+    req = urllib.request.Request(REGISTRY, headers={"User-Agent": "OpenUtau", "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        items = json.load(r)["items"]
+    sw = next(s for s in items if s.get("id") == "game")
+    url = sw["versions"][-1]["mirrors"][0]["url"]
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=dest.parent) as tmp:
+        zpath = Path(tmp) / "game.oudep"
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "OpenUtau"}), timeout=60) as r, \
+                open(zpath, "wb") as f:
+            shutil.copyfileobj(r, f)
+        out = Path(tmp) / "game"
+        with zipfile.ZipFile(zpath) as z:
+            for m in z.namelist():  # 압축 밖으로 나가는 경로는 풀지 않는다
+                if m.startswith("/") or ".." in Path(m).parts:
+                    raise ValueError("GAME 모델 압축 파일이 이상해요")
+            z.extractall(out)
+        if not _complete(out):  # 폴더 하나 안에 들어 있는 압축
+            inner = next((d for d in out.iterdir() if d.is_dir() and _complete(d)), None)
+            if inner is None:
+                raise ValueError("GAME 모델 파일이 모자라요")
+            out = inner
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.move(str(out), str(dest))
+    return dest
 
 
 class Game:

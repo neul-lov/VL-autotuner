@@ -10,7 +10,6 @@
 """
 import argparse
 import csv
-import functools
 import hashlib
 import json
 import subprocess
@@ -22,34 +21,28 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from tetotune import features, notes, pitch  # noqa: E402
+from tetotune import features, game, notes, pitch  # noqa: E402
 from tetotune import tune as tune_mod  # noqa: E402
 from tetotune.tune import Options, tune  # noqa: E402
 
 
 def variants():
     """이름 → [(모듈, 이름, 값)]. 첫 번째가 지금 기본값."""
-    vo, dw = (notes, "VOWEL_ONSET", True), (tune_mod, "DYN_WIN", 0.03)
+    old = [(notes, "VOWEL_ONSET", False), (notes, "USE_GAME", False), (tune_mod, "DYN_WIN", 0.08), (tune_mod, "DYN_GAIN", 1.0)]
     return {
-        "기본": [],
-        "모음 시작": [vo],
-        "모음 시작 3dB": [vo, (notes, "shift_to_vowels", functools.partial(notes.shift_to_vowels, drop=3.0))],
-        "모음 시작 8dB": [vo, (notes, "shift_to_vowels", functools.partial(notes.shift_to_vowels, drop=8.0))],
-        "크기 창 30ms": [dw],
-        "크기 창 20ms": [(tune_mod, "DYN_WIN", 0.02)],
-        "크기 창 45ms": [(tune_mod, "DYN_WIN", 0.045)],
-        "크기 창 30ms · 크기 1.0": [dw, (None, "dynamics", 1.0)],
-        "RMVPE": [(None, "pitch_method", "rmvpe")],
-        "RMVPE 유성 + Harvest": [(None, "pitch_method", "hybrid")],
-        "GAME 음표": [(notes, "USE_GAME", True)],
-        "모음 시작 · 크기 30ms": [vo, dw],
-        "모음 · 크기 30ms · GAME": [vo, dw, (notes, "USE_GAME", True)],
+        "새 기본": [],
+        "예전 기본": old,
+        "GAME 없이": [(notes, "USE_GAME", False)],
+        "모음 시작 없이": [(notes, "VOWEL_ONSET", False)],
+        "크기 창 12ms": [(tune_mod, "DYN_WIN", 0.012)],
+        "크기 창 30ms": [(tune_mod, "DYN_WIN", 0.03)],
+        "셈여림 ×1.2": [(tune_mod, "DYN_GAIN", 1.2 / 0.7)],
+        "셈여림 ×0.85": [(tune_mod, "DYN_GAIN", 0.85 / 0.7)],
     }
 
 
-RENDER_VARIANTS = ("기본", "크기 창 30ms", "크기 창 20ms", "크기 창 45ms", "크기 창 30ms · 크기 1.0",
-                   "RMVPE 유성 + Harvest", "GAME 음표")
-RENDER_REF_VARIANTS = ("기본", "모음 시작", "모음 시작 · 크기 30ms", "모음 · 크기 30ms · GAME")
+RENDER_VARIANTS = ("새 기본", "예전 기본", "크기 창 12ms", "크기 창 30ms", "셈여림 ×1.2", "셈여림 ×0.85")
+RENDER_REF_VARIANTS = ("새 기본", "예전 기본")
 OPTS = {"transpose": "0", "pitch_method": "harvest"}  # 방식마다 (None, 옵션 이름, 값)으로 바꾼다
 
 
@@ -69,12 +62,16 @@ def _memo(fn):
         if k not in cache:
             cache[k] = fn(*args, **kw)
         v = cache[k]
-        return {a: (b.copy() if isinstance(b, np.ndarray) else b) for a, b in v.items()} if isinstance(v, dict) else \
-            tuple(x.copy() if isinstance(x, np.ndarray) else x for x in v)
+        if isinstance(v, dict):
+            return {a: (b.copy() if isinstance(b, np.ndarray) else b) for a, b in v.items()}
+        if isinstance(v, tuple):
+            return tuple(x.copy() if isinstance(x, np.ndarray) else x for x in v)
+        return list(v) if isinstance(v, list) else v
     return wrapped
 
 
 pitch.extract = _memo(pitch.extract)
+game.transcribe = _memo(game.transcribe)
 features.analyze = _memo(features.analyze)
 
 
@@ -101,6 +98,8 @@ def run_tune(wav, lyrics_text, out):
     res = tune(wav, out, lyrics_text, options=Options(**OPTS), title="t")
     if not res.pitch_method.startswith(OPTS["pitch_method"]) or (notes.USE_GAME and "+game" not in res.pitch_method):
         raise RuntimeError(f"고른 방법을 쓰지 못했어요 ({res.pitch_method}, {res.warnings})")
+    if not notes.USE_GAME and "+game" in res.pitch_method:
+        raise RuntimeError("GAME을 껐는데 썼어요")
     return json.loads((Path(out) / "preview.json").read_text())
 
 

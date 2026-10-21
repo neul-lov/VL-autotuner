@@ -19,7 +19,8 @@ from .pitch import HOP
 
 TICKS = 480
 INTERVAL = 5  # OpenUtau 곡선 간격 (틱)
-DYN_WIN = 0.08  # 초. 크기 윤곽을 잡는 최댓값 · 다듬기 창
+DYN_WIN = 0.02  # 초. 크기 윤곽을 잡는 최댓값 · 다듬기 창 (길면 크기가 음 시작보다 먼저 커진다)
+DYN_GAIN = 1 / 0.7  # 셈여림 0.7(앱 기본값)에서 원래 보컬 크기 차이를 그대로: 실제 테토 렌더 비교에서 이쪽이 더 닮았다
 
 
 @dataclass
@@ -263,12 +264,12 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
 
     near = _smooth(_note_mask(notes, n, 0.1, 0.06).astype(float), 0.04)
     ref = float(np.median(db[voiced]))
-    # 크기는 겉 윤곽만 (80ms 최댓값): 음절 사이 자음에서 잠깐 꺼지는 건 음원 자음이 이미 갖고 있다
+    # 크기는 겉 윤곽만 (DYN_WIN 최댓값): 음절 사이 자음에서 잠깐 꺼지는 건 음원 자음이 이미 갖고 있다
     from scipy.ndimage import maximum_filter1d
     env = _smooth(maximum_filter1d(_interp_gaps(db, sing_mask), int(DYN_WIN / HOP)), DYN_WIN)
     rel = env - ref
     rel = np.where(rel < -6, -6 + (rel + 6) * 0.5, rel)  # 아주 작은 곳은 반만: 음원 소리가 묻히지 않게
-    dyn = np.clip(rel * 10 * o.dynamics, -120, 60) * near
+    dyn = np.clip(rel * 10 * o.dynamics * DYN_GAIN, -120, 60) * near
 
     def zcurve(raw, scale, lo, hi):
         v = raw[sing_mask & np.isfinite(raw)]
