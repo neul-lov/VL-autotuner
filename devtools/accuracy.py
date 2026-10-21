@@ -38,8 +38,7 @@ def variants():
     return {
         "새 기본": [],
         "PR4 기본": pr4,
-        "긴 틈만": [(tune_mod, "OCTAVE_FIX", False), (tune_mod, "GAP_NOTE", 0.05)],
-        "옥타브 접기만": [(tune_mod, "OCTAVE_FIX", True), (tune_mod, "GAP_NOTE", 0.0)],
+        "다듬기 없음": [(Cfg, "refine", 0)],
     }
 
 
