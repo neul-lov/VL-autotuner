@@ -37,9 +37,6 @@ def variants():
     pr3 = [(tune_mod, "LEGATO_GAP", 0.0), (Cfg, "refine", 0)]  # main (PR #3)
     return {
         "새 기본": [],
-        "튐 막기 150": [(tune_mod, "GLITCH_CENTS", 150.0)],
-        "튐 막기 100": [(tune_mod, "GLITCH_CENTS", 100.0)],
-        "튐 막기 150 + 끝 처짐 제한": [(tune_mod, "GLITCH_CENTS", 150.0), (tune_mod, "FALL_LIMIT", 150.0)],
         "다듬기 없음": [(Cfg, "refine", 0)],
         "PR3 기본": pr3,
     }
