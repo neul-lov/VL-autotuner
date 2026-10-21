@@ -1,8 +1,8 @@
 """사용자의 OpenUtau로 조교 결과를 실제로 불러 보기 (렌더, 소리는 재생하지 않고 wav로만).
 
 OpenUtau 프로그램 폴더(Mac: OpenUtau.app/Contents/MacOS)를 앱 데이터 폴더에 복사해 두고(Mac은 APFS 복제라 자리를
-거의 차지하지 않는다) OpenUtau.dll 자리에 render_host/RenderHost.dll을 넣어 돌린다. OpenUtau의 음원 · 설정 ·
-렌더 캐시는 OpenUtau가 쓰던 것을 그대로 쓴다. OpenUtau 앱 자체는 건드리지 않는다.
+거의 차지하지 않는다) OpenUtau.dll 자리에 render_host/RenderHost.dll을 넣어 돌린다. OpenUtau의 음원 · 설정은
+OpenUtau가 쓰던 것을 그대로 쓰고, 렌더 캐시만 AutoTuner 전용 폴더(cache_dir())를 쓴다. OpenUtau 앱 자체는 건드리지 않는다.
 RenderHost.dll은 앱을 만들 때 컴파일해서 넣는다 (devtools/openutau_harness/build_render_host.sh).
 """
 import json
@@ -108,16 +108,19 @@ def prepare():
 def _has_sound(path):
     import soundfile as sf
 
-    try:
-        y, sr = sf.read(str(path), dtype="float32", always_2d=True)
+    try:  # 소리가 나는 곳을 찾을 때까지만 조금씩 읽는다 (다듬기가 같은 파일을 또 읽으니 전체를 두 번 읽지 않게)
+        info = sf.info(str(path))
+        if info.frames <= info.samplerate * 0.2:
+            return False
+        return any(float(abs(b).max()) > 1e-3 for b in sf.blocks(str(path), blocksize=1 << 16, dtype="float32") if len(b))
     except Exception:
         return False
-    return len(y) > sr * 0.2 and float(abs(y).max()) > 1e-3
 
 
-def _cache_dirs():
-    home = Path.home()
-    return [home / "Library" / "Caches" / "OpenUtau", Path(os.environ.get("XDG_CACHE_HOME") or home / ".cache") / "OpenUtau"]
+def cache_dir():
+    """렌더할 때 OpenUtau가 쓰는 캐시 (AutoTuner 전용, RenderHost가 TETOTUNE_OU_CACHE로 받는다).
+    사용자 OpenUtau 캐시(~/Library/Caches/OpenUtau)는 쓰지도 지우지도 않는다."""
+    return support_dir() / "cache"
 
 
 def render(ustx, out_dir, name=TRACK, tries=3):
@@ -133,7 +136,8 @@ def render(ustx, out_dir, name=TRACK, tries=3):
             f.unlink()
         try:
             r = subprocess.run(["./OpenUtau", "RenderHost.dll", str(Path(ustx).resolve()), str((out_dir / "render.wav").resolve())],
-                               cwd=host, capture_output=True, text=True, timeout=TIMEOUT)
+                               cwd=host, capture_output=True, text=True, timeout=TIMEOUT,
+                               env={**os.environ, "TETOTUNE_OU_CACHE": str(cache_dir())})
             log = (r.stdout or "") + (r.stderr or "")
         except subprocess.TimeoutExpired:
             log = "렌더가 너무 오래 걸려요"
@@ -144,8 +148,7 @@ def render(ustx, out_dir, name=TRACK, tries=3):
         if r.returncode == 0 and files and _has_sound(files[0]):
             _last_error = None
             return files[0]
-        if attempt == 0 and r.returncode == 0:  # 소리 없는 렌더: 캐시를 비우고 다시
-            for c in _cache_dirs():
-                shutil.rmtree(c, ignore_errors=True)
+        if attempt == 0 and r.returncode == 0:  # 소리 없는 렌더: (AutoTuner 전용) 캐시를 비우고 다시
+            shutil.rmtree(cache_dir(), ignore_errors=True)
     _last_error = log.strip().splitlines()[-3:] if log else ["렌더 기록 없음"]
     raise RuntimeError("OpenUtau로 불러 보지 못했어요: " + " / ".join(_last_error))

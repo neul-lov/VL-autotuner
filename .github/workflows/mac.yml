@@ -37,6 +37,9 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python -m pip install -r requirements.txt -r requirements-extra.txt pytest httpx
       - run: python -m pytest -q tests
+      - name: 앱이 받는 GAME 모델 (고정한 판 · SHA-256 확인)
+        if: matrix.python == '3.13'
+        run: python devtools/check_game_model.py
 
   app:
     name: AutoTuner.app
@@ -250,6 +253,19 @@ jobs:
           import json
           from tetotune import edit, retune
           f = "out/polish7"
+          import hashlib, os
+          from pathlib import Path
+          from tetotune import openutau
+          cache = openutau.cache_dir()
+          print("AutoTuner 렌더 캐시:", cache, sum(1 for _ in cache.rglob("*")) if cache.exists() else "없음")
+          assert cache.exists(), "렌더가 AutoTuner 전용 캐시를 쓰지 않았어요"
+          wav_hash = lambda: hashlib.sha256(Path(f, "teto_preview.wav").read_bytes()).hexdigest()
+          before = wav_hash()
+          prev = retune.retune(f, 0.0, 1.5, {})  # 곡 첫 음절 (미리 듣기 wav 처음을 바꾼다)
+          print("첫 구간 다시 조교:", prev["range"], len(prev["notes"]), prev.get("warning"))
+          prev = edit.undo(f)
+          assert wav_hash() == before, "되돌리기가 미리 듣기 소리를 되돌리지 않았어요"
+          assert not [x for x in os.listdir(f) if x.startswith(".retune_")]
           prev = retune.retune(f, 3.0, 4.0, {"vibrato": 0.0})
           print("구간 다시 조교:", prev["range"], len(prev["notes"]), prev.get("warning"))
           prev = edit.apply(f, "split", 2)
