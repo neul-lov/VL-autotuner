@@ -3,7 +3,8 @@ StemMixer로 분리한 보컬처럼 반주가 조금 새고, 반주가 큰 곳�
 소리는 재생하지 않는다. 결과 오디오는 시험에만 쓰고 올리지 않는다.
 
 사용: python make_separated.py <vocadito 폴더> <결과 폴더> 3,10,14,22
-결과 폴더/sep_<번호>.wav (Demucs 보컬, 44.1kHz 모노)
+      python make_separated.py --csd <CSD 폴더> <결과 폴더> 12   (CSD 한국 동요 12곡, accuracy.py와 같은 곡)
+결과 폴더/sep_<번호 또는 이름>.wav (Demucs 보컬, 44.1kHz 모노)
 """
 import sys
 from pathlib import Path
@@ -110,19 +111,29 @@ def main():
     from demucs.apply import apply_model
     from demucs.pretrained import get_model
 
-    src, out = Path(sys.argv[1]), Path(sys.argv[2])
-    want = [int(x) for x in sys.argv[3].split(",")]
+    argv = sys.argv[1:]
+    csd = argv[0] == "--csd"
+    if csd:
+        argv = argv[1:]
+    src, out = Path(argv[0]), Path(argv[1])
+    if csd:
+        sys.path.insert(0, str(ROOT / "devtools"))
+        from accuracy import csd_songs
+
+        items = [(name, wav, np.array([[a, 440 * 2 ** ((m - 69) / 12), b - a] for a, b, m, _ in rows]))
+                 for name, wav, rows in csd_songs(src, int(argv[2]))]
+    else:
+        items = [(k, next(src.rglob(f"vocadito_{k}.wav")), _read_notes(next(src.rglob(f"vocadito_{k}_notesA1.csv"))))
+                 for k in (int(x) for x in argv[2].split(","))]
     out.mkdir(parents=True, exist_ok=True)
     model = get_model("htdemucs")
     model.eval()
-    for k in want:
-        wav = next(src.rglob(f"vocadito_{k}.wav"))
-        notes = _read_notes(next(src.rglob(f"vocadito_{k}_notesA1.csv")))
+    for k, wav, notes in items:
         y, sr = audio.load(wav)
         if sr != SR:
             y = audio.resample(y, sr, SR)
         v = reverb(y)
-        acc = accompaniment(notes, len(v) / SR, seed=k)
+        acc = accompaniment(notes, len(v) / SR, seed=k if isinstance(k, int) else sum(map(ord, k)))
         acc = np.pad(acc, (0, max(0, len(v) - len(acc))))[:len(v)]  # 초 → 샘플 반올림으로 한 샘플 모자랄 때가 있다
         acc *= np.sqrt(np.mean(v ** 2)) / max(1e-9, np.sqrt(np.mean(acc ** 2)))  # 보컬 : 반주 = 0dB
         mix = v + acc
@@ -133,7 +144,7 @@ def main():
         voc = s[model.sources.index("vocals")].mean(0).numpy().astype(np.float64)
         audio.write(out / f"sep_{k}.wav", voc, SR)
         leak = 10 * np.log10(np.mean((voc[: len(v)] - v[: len(voc)]) ** 2) / np.mean(v ** 2))
-        print(f"vocadito {k}: {len(v) / SR:.1f}s, 분리 보컬 오차 {leak:.1f}dB (원래 보컬 대비)", flush=True)
+        print(f"{k}: {len(v) / SR:.1f}s, 분리 보컬 오차 {leak:.1f}dB (원래 보컬 대비)", flush=True)
 
 
 if __name__ == "__main__":

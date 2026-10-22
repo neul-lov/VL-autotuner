@@ -149,6 +149,9 @@ def _quantize(all_notes, breath_ids, tps):
         a, b = int(round(x.start * tps)), int(round(x.end * tps))
         a2 = max(a, out[-1]["position"] + 15) if out and a < out[-1]["position"] + out[-1]["duration"] else a
         if b - a2 < 15:
+            if out and a <= out[-1]["position"] + out[-1]["duration"] and not out[-1]["breath"]:
+                # 아주 짧은 음표는 앞 음표에 합친다 (빼기만 하면 뒤 음표가 앞 음표에 붙지 않아서 "+"가 소리 없이 남는다)
+                out[-1]["duration"] = max(out[-1]["duration"], b - out[-1]["position"])
             continue
         if a2 != a:
             out[-1]["duration"] = a2 - out[-1]["position"]
@@ -325,7 +328,7 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
             except Exception as e:  # 모델이 깨졌거나 onnxruntime이 맞지 않으면 원래 방법으로
                 warnings.append(f"GAME으로 음표를 나누지 못해서 원래 방법으로 했어요 ({e})")
         if gnotes:
-            notes, _ = nt.from_game(gnotes, midi, voiced)
+            notes, _ = nt.from_game(gnotes, midi, voiced, db, feats["novelty"])
             used += "+game"
         else:
             notes, _ = nt.segment(midi, voiced, db, feats["novelty"], noise=noise, hiband=feats["high_ratio"])
@@ -338,7 +341,7 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
             warnings.append(f"노래에서 숨 쉬는 곳(프레이즈)을 {phrases}개 찾았는데 가사는 {len(lines)}줄이에요. "
                             f"가사를 프레이즈마다 한 줄씩 나눠 주면 음절이 더 정확히 들어가요")
         notes = nt.align(notes, lines)
-        if nt.VOWEL_ONSET and not notes_file:
+        if nt.VOWEL_ONSET and not notes_file and (nt.VOWEL_ONSET_GAME or "+game" not in used):
             notes = nt.shift_to_vowels(notes, db)
         n_syl = sum(1 for line in lines for s in line if s != "+")  # ー · + (늘이기)는 음절이 아니다
         got = sum(1 for x in notes if x.lyric != "+")
@@ -398,6 +401,8 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
 
     if LEGATO_GAP > 0:
         _legato(notes, breath_notes if mode == "voicebank" else breaths, db, float(np.median(db[voiced])))
+    if nt.PLUS_FIX:  # 모음으로 바꾼 음표는 weak로 표시돼 "확인할 곳"에 나온다
+        nt.fix_plus(notes, breath_notes if mode == "voicebank" else breaths, default=o.default_lyric)
 
     # 곡선
     progress(0.7, "곡선 만드는 중")
