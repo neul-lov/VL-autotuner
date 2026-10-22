@@ -34,11 +34,11 @@ class Cfg:
 
 def variants():
     """이름 → [(모듈, 이름, 값)]. 첫 번째가 지금 기본값. (None, 옵션 이름, 값)은 조교 설정을 바꾼다."""
-    pr3 = [(tune_mod, "LEGATO_GAP", 0.0), (Cfg, "refine", 0)]  # main (PR #3)
+    pr4 = [(tune_mod, "OCTAVE_FIX", False), (tune_mod, "GAP_NOTE", 0.0)]  # main (PR #4)
     return {
         "새 기본": [],
+        "PR4 기본": pr4,
         "다듬기 없음": [(Cfg, "refine", 0)],
-        "PR3 기본": pr3,
     }
 
 
@@ -244,7 +244,7 @@ def compare_wav(folder, wav, truth=None):
 
 RENDER_KEYS = ("pitch_err_cents_median", "pitch_err_cents_p90", "within_50_cents", "loudness_corr", "loudness_mae_db",
                "dropouts_per_min",
-               "pitch_drops_per_min", "pitch_jumps_per_min", "wobble_ratio")
+               "pitch_drops_per_min", "pitch_jumps_per_min", "off_note_ok_per_min", "wobble_ratio")
 
 
 def _mean(cs, k):
@@ -288,6 +288,7 @@ def main():
     ap.add_argument("--separated", help="make_separated.py 결과 폴더 (sep_<번호>.wav)")
     ap.add_argument("--render", nargs=2, metavar=("OPENUTAU", "WORK"))
     ap.add_argument("--render-songs", default="10,14")
+    ap.add_argument("--render-sep-songs", help="분리한 보컬은 이 곡들을 렌더 (없으면 --render-songs)")
     ap.add_argument("--render-refs", type=int, default=0, help="테토 정답 노래 몇 곡을 조교해서 다시 렌더해 비교할지 (한글도 같은 수)")
     ap.add_argument("--only", help="쉼표로 나눈 방식 이름만")
     ap.add_argument("--json", help="결과를 이 파일에 (여러 잡 결과를 합칠 때)")
@@ -337,7 +338,8 @@ def main():
                 "ref": [(d.name, d / "ref_ref.wav", (d / "lyrics.txt").read_text(encoding="utf-8"), None) for d in refs[:n]],
                 "kref": [(d.name, d / "ref_ref.wav", (d / "lyrics.txt").read_text(encoding="utf-8"), None) for d in krefs[:n]],
                 "vocadito": [(str(k), wav, "", None) for k, wav, _, _ in songs if k in want],
-                "sep": [(str(k), f, "", clean) for k, f, _, _, clean in sep if k in want],
+                "sep": [(str(k), f, "", clean) for k, f, _, _, clean in sep
+                        if k in ({int(x) for x in args.render_sep_songs.split(",")} if args.render_sep_songs else want)],
             }
             for key, items in sets.items():
                 if items:
@@ -374,14 +376,15 @@ def print_tables(results):
             continue
         print()
         print(f"| 방식 | {label} → 조교 → 테토 렌더 | 음 높이 오차 중앙/90% | 50센트 안 | 크기 상관 | 크기 차이 dB | "
-              f"끊김 /분 | 떨어짐 /분 | 튐 /분 | 흔들림 (1=원래) |")
-        print("|---|---|---|---|---|---|---|---|---|---|")
+              f"끊김 /분 | 떨어짐 /분 | 튐 /분 | 음표는 맞는데 벗어남 /분 | 흔들림 (1=원래) |")
+        print("|---|---|---|---|---|---|---|---|---|---|---|")
         for name, cs in have:
             print(f"| {name} | {len(cs)}곡 평균 | {_mean(cs, 'pitch_err_cents_median'):.1f}/{_mean(cs, 'pitch_err_cents_p90'):.1f}"
                   f" | {_mean(cs, 'within_50_cents'):.3f} | {_mean(cs, 'loudness_corr'):.3f} | "
                   f"{_mean(cs, 'loudness_mae_db'):.2f} | "
                   f"{_mean(cs, 'dropouts_per_min'):.2f} | {_mean(cs, 'pitch_drops_per_min'):.2f} | "
-                  f"{_mean(cs, 'pitch_jumps_per_min'):.2f} | {_mean(cs, 'wobble_ratio'):.2f} |")
+                  f"{_mean(cs, 'pitch_jumps_per_min'):.2f} | {_mean(cs, 'off_note_ok_per_min'):.2f} | "
+                  f"{_mean(cs, 'wobble_ratio'):.2f} |")
         kinds = {}
         for name, cs in have:
             for c in cs:
