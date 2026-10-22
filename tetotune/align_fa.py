@@ -1,0 +1,430 @@
+"""노래 가사 맞추기 모델 (HubertFA, 로컬): 프레이즈마다 가사 음절의 모음이 시작하는 곳을 소리에서 직접 찾는다.
+
+지금까지는 음표 경계(GAME) 중 소리 증거(자음 틈 · 크기 꺼짐)가 센 곳에 음절을 넣었는데, 한 모음을 여러 음으로 부르거나
+같은 음으로 다른 음절을 부르면 틀렸다. 가사 맞추기 모델은 가사 음소 순서를 알고 소리에 맞추니까 음절마다 시작(모음)을
+10ms 단위로 준다. 그 시각으로 음표 경계를 옮기거나 음표를 나눈다 (UTAU처럼 음표 시작 = 모음 시작, 자음은 그 앞).
+
+모델: wolfgitpr/HubertFA v0.0.7 일본어 노래 모델 (처음 쓸 때 한 번 받는다, 판 고정 + SHA-256). 한글은 OpenUtau KO→JA처럼
+일본어 음소로 바꿔서 맞춘다. 디코더는 HubertFA(Apache-2.0)의 tools/decoder.py를 옮겼다.
+"""
+import importlib.util
+import json
+from pathlib import Path
+
+import numpy as np
+
+HFA_URL = "https://github.com/wolfgitpr/HubertFA/releases/download/v0.0.7/1218_hfa_model_new_dict.zip"
+HFA_SHA256 = "48bd6dbcc293e47cc6cbcc556baf575e3d91d61d0ac88ddeccd6098f8f346fa2"
+HFA_MAX = 400 << 20
+USE_FA = True  # 모델이 있으면 가사를 넣은 뒤 프레이즈마다 맞춘다 (CI 시험에서 끄고 켜서 비교)
+MIN_CONF = 0.0  # 프레이즈 맞추기 확신이 이보다 낮으면 그 프레이즈는 원래대로 (CI에서 값을 보고 정한다)
+NEAR = 0.08  # 초. 음절 시작 가까이(이 안) 음표 경계가 있으면 그 경계를 옮기고, 없으면 음표를 나눈다
+MAX_PHRASE = 40.0  # 초. 모델이 배운 길이(45초)보다 긴 프레이즈는 맞추지 않는다
+VOWELS = {"a", "i", "u", "e", "o", "N"}
+LAST = []  # 마지막 조교의 프레이즈마다 {확신, 맞춤 여부, 옮긴 거리} (시험 기록용)
+
+
+def _ort():
+    return importlib.util.find_spec("onnxruntime") is not None
+
+
+def _complete(d):
+    return all((d / f).exists() for f in ("model.onnx", "vocab.json", "config.json"))
+
+
+def model_dir():
+    from .game import models_home
+
+    d = models_home() / "hfa"
+    return d if _ort() and _complete(d) else None
+
+
+def ensure_model(progress=lambda s: None):
+    import shutil
+    import tempfile
+    import zipfile
+
+    from .game import _download, models_home
+
+    if not _ort():
+        return None
+    found = model_dir()
+    if found:
+        return found
+    dest = models_home() / "hfa"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    progress("가사 맞추기 모델(HubertFA) 받는 중 (처음 한 번)")
+    with tempfile.TemporaryDirectory(dir=dest.parent) as tmp:
+        zpath = Path(tmp) / "hfa.zip"
+        _download(HFA_URL, zpath, HFA_SHA256, HFA_MAX, "가사 맞추기 모델(HubertFA)")
+        out = Path(tmp) / "hfa"
+        with zipfile.ZipFile(zpath) as z:
+            _check_zip(z)
+            z.extractall(out)
+        inner = next((p.parent for p in out.rglob("model.onnx") if _complete(p.parent)), None)
+        if inner is None:
+            raise ValueError("가사 맞추기 모델 파일이 모자라요")
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.move(str(inner), str(dest))
+    return dest
+
+
+def _check_zip(z, max_unpacked=1 << 30):
+    total = 0
+    for m in z.infolist():
+        parts = Path(m.filename).parts
+        if m.filename.startswith(("/", "\\")) or ".." in parts or ":" in m.filename or "\\" in m.filename:
+            raise ValueError("가사 맞추기 모델 압축 파일이 이상해요")
+        if (m.external_attr >> 16) & 0o170000 == 0o120000:
+            raise ValueError("가사 맞추기 모델 압축 파일이 이상해요")
+        if m.is_dir():
+            continue
+        name = Path(m.filename).name
+        if (Path(name).suffix.lower() not in {".onnx", ".json", ".txt", ".md", ".yaml"} and name != "VERSION") \
+                or len(parts) > 4:
+            raise ValueError(f"가사 맞추기 모델 압축 안에 모르는 파일이 있어요: {m.filename}")
+        total += m.file_size
+        if total > max_unpacked:
+            raise ValueError("가사 맞추기 모델 압축을 풀면 너무 커요")
+
+
+# ---------------------------------------------------------------- 가사 → 음소
+_KANA = {}
+for _row, _cons in (("あいうえお", ""), ("かきくけこ", "k"), ("さしすせそ", "s"), ("たちつてと", "t"), ("なにぬねの", "n"),
+                    ("はひふへほ", "h"), ("まみむめも", "m"), ("らりるれろ", "r"), ("がぎぐげご", "g"), ("ざじずぜぞ", "z"),
+                    ("だぢづでど", "d"), ("ばびぶべぼ", "b"), ("ぱぴぷぺぽ", "p")):
+    for _k, _v in zip(_row, "aiueo"):
+        _KANA[_k] = _cons + _v
+_KANA.update({"し": "shi", "ち": "chi", "つ": "tsu", "ふ": "fu", "じ": "ji", "ぢ": "ji", "づ": "zu", "や": "ya", "ゆ": "yu",
+              "よ": "yo", "わ": "wa", "を": "o", "ん": "n", "ゔ": "vu", "っ": "cl"})
+_YOON = {"ゃ": "a", "ゅ": "u", "ょ": "o"}
+_SMALL = {"ぁ": "a", "ぃ": "i", "ぅ": "u", "ぇ": "e", "ぉ": "o"}
+
+
+def kana_romaji(syl):
+    """가나 음절(か · きゃ · ふぁ) → 로마자 (사전 키). 모르면 None."""
+    if not syl:
+        return None
+    if len(syl) == 1:
+        return _KANA.get(syl)
+    head, tail = _KANA.get(syl[0]), syl[1:]
+    if head is None or len(tail) != 1:
+        return None
+    if tail in _YOON:
+        if head in ("shi", "chi", "ji"):
+            return head[:-1] + _YOON[tail]
+        return head[:-1] + "y" + _YOON[tail]
+    if tail in _SMALL:
+        v = _SMALL[tail]
+        if head in ("fu", "vu"):
+            return head[0] + v
+        if head in ("te", "de"):
+            return head[0] + v
+        if head in ("to", "do"):
+            return head[0] + v
+        if head == "u":
+            return "w" + v
+        if head == "i":
+            return "y" + v
+        if head in ("shi", "chi", "ji"):
+            return head[:-1] + v
+        if head == "tsu":
+            return "ts" + v
+        if head in ("ku", "gu"):
+            return head[0] + "w" + v
+        return head[:-1] + v
+    return None
+
+
+_CHO = ["k", "k", "n", "t", "t", "r", "m", "p", "p", "s", "s", "", "ch", "ch", "ch", "k", "t", "p", "h"]
+_CHO_VOICED = {0: "g", 3: "d", 7: "b", 12: "j"}  # 모음 · ㄴ · ㄹ · ㅁ · ㅇ 뒤 ㄱ · ㄷ · ㅂ · ㅈ은 울린다
+_JUNG = [["a"], ["e"], ["y", "a"], ["y", "e"], ["o"], ["e"], ["y", "o"], ["y", "e"], ["o"], ["w", "a"], ["w", "e"],
+         ["w", "e"], ["y", "o"], ["u"], ["w", "o"], ["w", "e"], ["w", "i"], ["y", "u"], ["u"], ["u", "i"], ["i"]]
+_JONG = [None, "cl", "cl", "cl", "N", "N", "N", "cl", "r", "cl", "N", "cl", "r", "r", "cl", "r", "N", "cl", "cl", "cl",
+         "cl", "N", "cl", "cl", "cl", "cl", "cl", "cl"]
+_PAL = {"k": "ky", "g": "gy", "n": "ny", "h": "hy", "m": "my", "r": "ry", "b": "by", "p": "py", "s": "sh", "t": "ch",
+        "d": "j", "z": "j"}
+
+
+def hangul_phones(syl, prev=None):
+    """한글 한 글자 → 일본어 음소 (OpenUtau KO→JA처럼). prev: 앞 글자 (울림 판단)."""
+    code = ord(syl) - 0xAC00
+    cho, jung, jong = code // 588, (code % 588) // 28, code % 28
+    c = _CHO[cho]
+    if cho in _CHO_VOICED and prev is not None and "가" <= prev <= "힣" and _JONG[(ord(prev) - 0xAC00) % 28] in (None, "N", "r"):
+        c = _CHO_VOICED[cho]
+    v = list(_JUNG[jung])
+    out = []
+    if c and v[0] == "y":
+        out.append(_PAL.get(c, c))
+        v = v[1:]
+    elif c == "s" and v[0] == "i":  # 시 = [ɕi]
+        out.append("sh")
+    elif c in ("k", "g") and v[0] == "w":
+        out.append(c + "w")
+        v = v[1:]
+    elif c:
+        out.append(c)
+    out += v
+    if _JONG[jong]:
+        out.append(_JONG[jong])
+    return out
+
+
+class Aligner:
+    def __init__(self, folder):
+        import onnxruntime as ort
+
+        folder = Path(folder)
+        self.vocab = json.loads((folder / "vocab.json").read_text(encoding="utf-8"))
+        cfg = json.loads((folder / "config.json").read_text(encoding="utf-8"))
+        self.mel = cfg["mel_spec_config"]
+        self.sr, self.hop = int(self.mel["sample_rate"]), int(self.mel["hop_size"])
+        opts = ort.SessionOptions()
+        opts.log_severity_level = 3
+        self.sess = ort.InferenceSession(str(folder / "model.onnx"), opts, providers=["CPUExecutionProvider"])
+        self.prefix = "ja/" if self.vocab.get("language_prefix") else ""
+        self.dict = {}
+        dpath = folder / (self.vocab.get("dictionaries") or {}).get("ja", "")
+        if dpath.is_file():
+            for line in dpath.read_text(encoding="utf-8").splitlines():
+                if "\t" in line:
+                    k, v = line.split("\t", 1)
+                    self.dict[k.strip()] = v.strip().split()
+        self.ids = self.vocab["vocab"]
+
+    def phones(self, syl, prev=None):
+        """음절 → 모델 음소 목록 (없는 음소가 있으면 None)."""
+        if len(syl) == 1 and "가" <= syl <= "힣":
+            ph = hangul_phones(syl, prev)
+        else:
+            r = kana_romaji(syl)
+            if r is None:
+                return None
+            ph = self.dict.get(r) or self.dict.get({"n": "N", "cl": "cl"}.get(r, r)) or ([r] if r in ("N", "cl") else None)
+            if ph is None and r == "n":
+                ph = ["N"]
+        if not ph:
+            return None
+        ph = [self.prefix + p if p not in ("SP", "AP") else p for p in ph]
+        return ph if all(p in self.ids for p in ph) else None
+
+    def sequence(self, syls):
+        """음절 목록 → (음소 순서 (앞뒤 · 사이에 SP), 음소마다 음절 번호 (SP는 −1)) 또는 None (모르는 음절)."""
+        ph_seq, ph_word, prev = ["SP"], [-1], None
+        for i, s in enumerate(syls):
+            ph = self.phones(s, prev)
+            prev = s
+            if ph is None:
+                return None
+            ph_seq += ph + ["SP"]
+            ph_word += [i] * len(ph) + [-1]
+        return ph_seq, ph_word
+
+    def align(self, y, sr, syls):
+        """y: 프레이즈 소리 (앞뒤 조금 여유), syls: 음절 목록 → ([(시작, 모음 시작, 끝)] 음절마다 또는 None, 확신)."""
+        from . import audio
+
+        seq = self.sequence(syls)
+        if seq is None:
+            return None, 0.0
+        ph_seq, ph_word = seq
+        wav = audio.resample(y, sr, self.sr).astype(np.float32)
+        outs = self.sess.run(None, {"waveform": wav[None, :]})
+        res = dict(zip([o.name for o in self.sess.get_outputs()], outs))
+        ph_times, conf = _decode(self.vocab, self.hop, self.sr, len(wav), res["ph_frame_logits"],
+                                 res["ph_edge_logits"], ph_seq)
+        return _syllable_times(ph_times, ph_seq, ph_word, len(syls), self.prefix), conf
+
+
+def _syllable_times(ph_times, ph_seq, ph_word, n, prefix=""):
+    """디코더 결과 [(시작, 끝, 음소 번호)] → 음절마다 (시작, 모음 시작, 끝). 한 음절이라도 빠지면 None."""
+    out = [None] * n
+    for a, b, k in ph_times:
+        w = ph_word[k]
+        if w < 0:
+            continue
+        name = ph_seq[k][len(prefix):] if prefix and ph_seq[k].startswith(prefix) else ph_seq[k]
+        cur = out[w] or [a, None, b]
+        cur[2] = b
+        if cur[1] is None and (name in VOWELS or name == "cl"):
+            cur[1] = a
+        out[w] = cur
+    if any(x is None for x in out):
+        return None
+    return [(a, v if v is not None else a, b) for a, v, b in out]
+
+
+# ---------------------------------------------------------------- 디코더 (HubertFA tools/decoder.py, Apache-2.0)
+def _softmax(x, axis):
+    e = np.exp(x - x.max(axis=axis, keepdims=True))
+    return e / e.sum(axis=axis, keepdims=True)
+
+
+def _log_softmax(x, axis):
+    m = x.max(axis=axis, keepdims=True)
+    return x - m - np.log(np.exp(x - m).sum(axis=axis, keepdims=True))
+
+
+def _decode(vocab, hop, sr, n_samples, frame_logits, edge_logits, ph_seq):
+    """→ ([(시작초, 끝초, ph_seq 번호)], 확신)."""
+    frame_logits, edge_logits = frame_logits[0], edge_logits[0]
+    seq_id = np.array([vocab["vocab"][p] for p in ph_seq])
+    mask = np.full(vocab["vocab_size"], 1e9)
+    mask[seq_id], mask[0] = 0, 0
+    frame = hop / sr
+    T = min(frame_logits.shape[1], int((n_samples + 0.5) / hop))
+    frame_logits, edge_logits = frame_logits[:, :T], edge_logits[:T]
+    adj = frame_logits - mask[:, None]
+    prob_log = _log_softmax(adj, 0).astype(np.float32)
+    edge_pred = np.clip(1 / (1 + np.exp(-edge_logits)), 0, 1).astype(np.float32)
+    edge_diff = np.concatenate((np.diff(edge_pred), [0]))
+    edge_prob = (edge_pred + np.concatenate(([0], edge_pred[:-1]))).clip(0, 1)
+    idx_seq, t_int, fconf = _viterbi(seq_id, prob_log, edge_prob)
+    conf = float(np.exp(np.mean(np.log(fconf + 1e-6)) / 3))
+    t_int = np.array(t_int, dtype=np.int64)
+    frac = (edge_diff[t_int] / 2).clip(-0.5, 0.5)
+    t = np.clip(frame * np.concatenate([t_int + frac, [T]]), 0, None)
+    return [(float(t[i]), float(t[i + 1]), int(k)) for i, k in enumerate(idx_seq)], conf
+
+
+def _viterbi(seq_id, ph_prob_log, edge_prob):
+    S = len(seq_id)
+    T = ph_prob_log.shape[1]
+    prob_log = ph_prob_log[seq_id, :]
+    cur_max = np.full(S, -np.inf)
+    dp = np.full((S, T), -np.inf, dtype=np.float32)
+    dp[0, 0] = prob_log[0, 0]
+    cur_max[0] = prob_log[0, 0]
+    if seq_id[0] == 0 and S > 1:
+        dp[1, 0] = prob_log[1, 0]
+        cur_max[1] = prob_log[1, 0]
+    back = np.full_like(dp, -1, dtype=np.int32)
+    e_log, ne_log = np.log(edge_prob + 1e-6), np.log(1 - edge_prob + 1e-6)
+    reset = seq_id == 0
+    pad = 2 if S >= 2 else 1
+    p1 = np.empty(S, dtype=np.float32)
+    p2 = np.full(S, -np.inf, dtype=np.float32)
+    p3 = np.full(S, -np.inf, dtype=np.float32)
+    iv = np.arange(pad, S)
+    ia = np.clip(iv - pad + 1, 0, S - 1)
+    cond3 = (ia >= S - 1) | (seq_id[ia] == 0)
+    for t in range(1, T):
+        pl = prob_log[:, t]
+        prev = dp[:, t - 1]
+        p1[:] = prev + pl + ne_log[t]
+        p2[1:] = prev[:S - 1] + pl[:S - 1] + e_log[t] + cur_max[:S - 1] * (T / S)
+        cand = prev[:S - pad] + pl[:S - pad] + e_log[t] + cur_max[:S - pad] * (T / S)
+        p3[iv] = np.where(cond3, cand, -np.inf)
+        st = np.vstack((p1, p2, p3))
+        k = st.argmax(0)
+        dp[:, t], back[:, t] = st[k, np.arange(S)], k
+        stay = k == 0
+        np.maximum(cur_max, pl, out=cur_max, where=stay)
+        np.copyto(cur_max, pl, where=~stay)
+        cur_max[reset] = 0.0
+        p2[1:], p3[iv] = -np.inf, -np.inf
+    s = 0 if S == 1 else (S - 2 if dp[-2, -1] > dp[-1, -1] and seq_id[-1] == 0 else S - 1)
+    idx_seq, t_int, fconf = [], [], []
+    for t in range(T - 1, -1, -1):
+        fconf.append(dp[s, t])
+        if back[s, t] != 0:
+            idx_seq.append(s)
+            t_int.append(t)
+            if back[s, t] == 1:
+                s -= 1
+            elif back[s, t] == 2:
+                s -= 2
+    idx_seq.reverse()
+    t_int.reverse()
+    fconf.reverse()
+    fconf = np.exp(np.diff(np.pad(fconf, (1, 0), "constant", constant_values=0.0), 1))
+    return idx_seq, t_int, fconf
+
+
+# ---------------------------------------------------------------- 음표에 넣기
+def refine(notes, y, sr):
+    """가사를 넣은 음표(notes.align 뒤) → 프레이즈마다 모델로 음절 모음 시작을 찾아 음표 경계를 옮기거나 나눈다.
+    모델이 없거나 맞추지 못한 프레이즈는 그대로. → (notes, 고친 프레이즈 수)."""
+    from . import notes as nt
+
+    LAST.clear()
+    folder = model_dir() if USE_FA else None
+    if folder is None:
+        return notes, 0
+    al = Aligner(folder)
+    groups = nt._phrases(notes)
+    out, fixed = [], 0
+    for gi, g in enumerate(groups):
+        syls = [x.lyric for x in g if x.lyric != "+"]
+        a = max(0.0, g[0].start - 0.4, groups[gi - 1][-1].end if gi else 0.0)
+        b = g[-1].end + 0.3
+        if gi + 1 < len(groups):
+            b = min(b, groups[gi + 1][0].start)
+        if not syls or b - a > MAX_PHRASE:
+            out.extend(g)
+            continue
+        try:
+            times, conf = al.align(y[int(a * sr):int(b * sr)], sr, syls)
+        except Exception as e:  # 모델이 이 소리를 못 다루면 이 프레이즈만 원래대로
+            times, conf = None, 0.0
+            LAST.append({"phrase": gi, "error": str(e)[:200]})
+        new = _place(g, [a + v for _, v, _ in times], syls) if times is not None and conf >= MIN_CONF else None
+        old = [x.start for x in g if x.lyric != "+"]
+        moved = [abs(x.start - o) for x, o in zip([x for x in new if x.lyric != "+"], old)] if new else []
+        LAST.append({"phrase": gi, "conf": round(float(conf), 3), "n": len(syls), "placed": new is not None,
+                     "moved_ms": round(1000 * float(np.median(moved)), 1) if moved else None})
+        if new is None:
+            out.extend(g)
+            continue
+        out.extend(new)
+        fixed += 1
+    return out, fixed
+
+
+def _place(g, onsets, syls, near=NEAR):
+    """프레이즈 음표 g에 음절 syls를 onsets(모음 시작) 자리로 넣는다. 가까운 음표 경계(near 안)는 그 자리로 옮기고,
+    없으면 그 자리에서 음표를 나눈다 (같은 음으로 다른 음절). 음 높이 · 길이가 너무 짧아지면 None (원래대로)."""
+    from . import notes as nt
+
+    g = [nt.Note(x.start, x.end, x.tone, "+", x.strength) for x in g]
+    picked = []  # 음절마다 고른 음표
+    for j, v in enumerate(onsets):
+        if picked:
+            v = max(v, picked[-1].start + 0.04)
+        if j == 0:
+            x = g[0]
+            if abs(v - x.start) <= 0.2 and x.end - v > 0.05:
+                x.start = v
+            picked.append(x)
+            continue
+        last = g.index(picked[-1])
+        cands = [i for i in range(last + 1, len(g)) if abs(g[i].start - v) <= near]
+        if cands:
+            k = min(cands, key=lambda i: abs(g[i].start - v))
+            x, prev = g[k], g[k - 1]
+            if abs(prev.end - x.start) < 1e-6:  # 붙은 경계: 두 음표 모두 30ms는 남게
+                if v - prev.start > 0.03 and x.end - v > 0.03:
+                    prev.end = x.start = v
+            elif prev.end + 0.005 < v < x.end - 0.03:  # 틈 뒤 음표: 시작만
+                x.start = v
+            picked.append(x)
+            continue
+        k = next((i for i in range(last, len(g)) if g[i].start < v < g[i].end), None)
+        if k is not None:
+            x = g[k]
+            if v - x.start < 0.04 or x.end - v < 0.04:
+                return None
+            g.insert(k + 1, nt.Note(v, x.end, x.tone, "+", 3.0))
+            x.end = v
+            picked.append(g[k + 1])
+            continue
+        # 틈 안: 바로 뒤 음표가 가까우면 그 음표
+        k = next((i for i in range(last + 1, len(g)) if g[i].start >= v), None)
+        if k is None or g[k].start - v > 0.15:
+            return None
+        picked.append(g[k])
+    for x, syl in zip(picked, syls):
+        x.lyric = syl
+    return g
