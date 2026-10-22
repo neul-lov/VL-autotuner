@@ -15,6 +15,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 TIMEOUT = 1800  # 초. 아주 긴 곡도
 TRACK = "테토 (자동 조교)"  # tune._write_ustx의 첫 트랙 이름
+# 렌더 도구 실행 파일 이름. OpenUtau는 같은 이름("OpenUtau")의 프로세스가 이미 있으면 켜자마자 꺼져서,
+# 렌더 중에 "OpenUtau에서 열기"를 누르면 OpenUtau가 안 열렸다. 이름을 달리 해서 겹치지 않게 한다
+EXE = "AutoTunerRender"
 _last_error = None
 
 
@@ -89,6 +92,8 @@ def prepare():
     host = root / "host"
     stamp = _stamp(src, dll)
     if (host / ".stamp").is_file() and (host / ".stamp").read_text() == stamp:
+        if not (host / EXE).is_file():  # 이름을 바꾸기 전에 준비해 둔 폴더
+            shutil.copy2(host / "OpenUtau", host / EXE)
         return host
     tmp = root / "host.new"
     shutil.rmtree(tmp, ignore_errors=True)
@@ -97,6 +102,7 @@ def prepare():
     _make_deps(tmp)
     shutil.copy(dll, tmp / "RenderHost.dll")
     shutil.copy(dll, tmp / "OpenUtau.dll")
+    shutil.copy2(tmp / "OpenUtau", tmp / EXE)  # 실행 파일(apphost)은 이름이 달라도 OpenUtau.dll을 돌린다
     if sys.platform == "darwin":  # 복사본에 붙은 "인터넷에서 받음" 표시만 뗀다 (OpenUtau 앱은 그대로)
         subprocess.run(["/usr/bin/xattr", "-dr", "com.apple.quarantine", str(tmp)], capture_output=True)
     (tmp / ".stamp").write_text(stamp)
@@ -165,7 +171,7 @@ def render(ustx, out_dir, name=TRACK, tries=3):
         for f in out_dir.glob("render_*.wav"):
             f.unlink()
         try:
-            r = subprocess.run(["./OpenUtau", "RenderHost.dll", str(Path(ustx).resolve()), str((out_dir / "render.wav").resolve())],
+            r = subprocess.run(["./" + EXE, "RenderHost.dll", str(Path(ustx).resolve()), str((out_dir / "render.wav").resolve())],
                                cwd=host, capture_output=True, text=True, timeout=TIMEOUT,
                                env=_env(own_cache=attempt < tries - 1 or tries == 1))
             log = (r.stdout or "") + (r.stderr or "")
