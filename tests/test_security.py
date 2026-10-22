@@ -224,3 +224,16 @@ def test_render_error_is_reported(tmp_path):
         raise RuntimeError("OpenUtau로 불러 보지 못했어요: 가수를 찾지 못함")
     assert refine._render_checked(broken, tmp_path / "p.ustx") == (None, None)
     assert "가수를 찾지 못함" in refine.last_render_error
+
+
+def test_silent_render_reason():
+    from tetotune import openutau
+    assert "찾지 못했어요" in openutau._why_silent("singer=teto found=False\nphonemes=10 phoneme_errors=0\nrendered")
+    assert "바꾸지 못했어요" in openutau._why_silent("singer=teto found=True\nphonemizer=X renderer=CLASSIC\nphonemes=10 phoneme_errors=9")
+    assert "렌더러 CLASSIC" in openutau._why_silent("singer=teto found=True\nphonemizer=X renderer=CLASSIC\nphonemes=10 phoneme_errors=0")
+
+
+def test_render_without_files_reason():
+    from tetotune import openutau
+    log = "openutau_core=0.1.5.0\nsinger=teto found=True\nphonemes=10 phoneme_errors=0\ntrack0 muted=False renderer=WORLDLINE-R\nexported=0 \nrendered"
+    assert "내보낸 파일이 없어요" in openutau._why_silent(log)

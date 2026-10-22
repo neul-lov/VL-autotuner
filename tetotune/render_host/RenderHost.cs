@@ -86,6 +86,7 @@ static class RenderHost {
     static int Run(string ustx, string outWav) {
         System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
         core = Assembly.Load("OpenUtau.Core");
+        Console.WriteLine("openutau_core=" + core.GetName().Version);
         try {  // OpenUtau 기록은 경고만 (없으면 그냥 둔다)
             var serilog = Assembly.Load("Serilog");
             var config = Activator.CreateInstance(serilog.GetType("Serilog.LoggerConfiguration"));
@@ -136,6 +137,11 @@ static class RenderHost {
         var track = tracks[0];
         var singer = Get(track, "Singer");
         Console.WriteLine("singer=" + (singer == null ? "null" : Get(singer, "Id")) + " found=" + (singer == null ? "False" : Get(singer, "Found")));
+        try {  // 소리가 안 날 때 까닭을 찾으려고: 음소 변환기 · 렌더러
+            var ph = Get(track, "Phonemizer");
+            var rs = Get(track, "RendererSettings");
+            Console.WriteLine("phonemizer=" + (ph == null ? "null" : ph.GetType().Name) + " renderer=" + Get(rs, "renderer"));
+        } catch (Exception) { }
         var voicePart = T("OpenUtau.Core.Ustx.UVoicePart");
         var part = ((IEnumerable)Get(project, "parts")).Cast<object>().First(p => voicePart.IsInstanceOfType(p));
         Pump(() => ((ICollection)Get(part, "phonemes")).Count > 0 && (bool)Get(part, "PhonemesUpToDate"), 30);
@@ -148,6 +154,26 @@ static class RenderHost {
         while (queue.TryTake(out var rest)) rest();
         if (!task.IsCompleted) throw new Exception("렌더가 끝나지 않았어요");
         if (task.IsFaulted) throw task.Exception.GetBaseException();
+        // 예전 OpenUtau(2025년 판 등)는 RenderToFiles가 렌더를 뒤에서 돌려 놓고 바로 끝난다: 파일이 다 써질 때까지 기다린다
+        var outDir = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(outWav));
+        long Size() => System.IO.Directory.GetFiles(outDir, "*.wav").Sum(f => new System.IO.FileInfo(f).Length);
+        Pump(() => Size() > 0, 180);
+        for (long last = -1, now = Size(); now != last; last = now, now = Size()) {
+            Pump(() => false, 2);
+        }
+        try {  // 무엇을 내보냈는지 (트랙이 음소거됐거나 렌더러가 없으면 파일이 안 생긴다)
+            int i = 0;
+            foreach (var t in tracks) {
+                object rs = null;
+                try { rs = Get(Get(t, "RendererSettings"), "renderer"); } catch (Exception) { }
+                Console.WriteLine("track" + i++ + " muted=" + Get(t, "Muted") + " renderer=" + (rs ?? "null"));
+            }
+            var dir = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(outWav));
+            var files = System.IO.Directory.GetFiles(dir, "*.wav");
+            Console.WriteLine("exported=" + files.Length + " " + string.Join(" | ", files.Select(f => System.IO.Path.GetFileName(f) + ":" + new System.IO.FileInfo(f).Length)));
+        } catch (Exception e) {
+            Console.WriteLine("exported=? " + e.Message);
+        }
         Console.WriteLine("rendered");
         return 0;
     }
