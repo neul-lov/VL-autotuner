@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import audio, confidence, features, lyrics as lyr, notes as nt, pitch, voicebank
+from . import audio, confidence, features, lyrics as lyr, notes as nt, oupitch, pitch, voicebank
 from .pitch import HOP
 
 TICKS = 480
@@ -24,6 +24,7 @@ DYN_GAIN = 1 / 0.7  # 셈여림 0.7(앱 기본값)에서 원래 보컬 크기 �
 LEGATO_GAP = 0.3  # 초. 음표 사이 이보다 짧은 틈은 앞 음표를 늘여 메운다 (자음 · 성대 닫힘에서 소리가 뚝 끊기지 않게). 0 = 끔
 OCTAVE_FIX = True  # 음표에서도 앞뒤 음 높이에서도 한 옥타브쯤 떨어지게 읽은 조각을 접는다 (_fold_octaves)
 GAP_NOTE = 0.05  # 초. 음표 안 빈 곳이 이보다 길면 가운데는 음표 음으로 (_fill_gaps). 0 = 앞뒤를 바로 잇기만
+OU_EXACT = True  # PITD를 OpenUtau가 음표로 만드는 음 높이(oupitch.py) 그대로를 기준으로. False = 예전 (초 단위 계단: 경계마다 튐)
 
 
 @dataclass
@@ -126,6 +127,34 @@ def make_curves(t, vals, bpm, span):
         ys = np.clip(np.round(np.interp(sec, t, v)), lo, hi).astype(int)
         cx, cy = _simplify(list(xs), list(ys), tol)
         out.append({"xs": cx, "ys": cy, "abbr": abbr})
+    return out
+
+
+def pitd_curve(t, intended, qnotes, pdata, tps, span):
+    """원하는 음 높이(프레임, 센트) → ustx PITD 곡선. OpenUtau가 음표 · 피치 점으로 만드는 음 높이를 틱마다 똑같이
+    계산해서(oupitch) 그만큼 뺀다: OpenUtau가 어느 틱에서 재도 원하는 음 높이가 나온다."""
+    xs, at = oupitch.curve_xs(qnotes, (int(span[0] * tps), int(span[1] * tps)), tps=tps)
+    lo, hi, tol = CURVE_RANGE["pitd"]
+    ys = np.interp(at / tps, t, intended) - oupitch.base(qnotes, pdata, tps, at)
+    ys = np.clip(np.round(ys), lo, hi).astype(int)
+    cx, cy = _simplify(list(xs), list(ys), tol)
+    return {"xs": cx, "ys": cy, "abbr": "pitd"}
+
+
+def _quantize(all_notes, breath_ids, tps):
+    """음표 → ustx에 쓰는 음표 (틱): 겹치면 앞 음표를 줄이고, 15틱보다 짧은 음표는 뺀다.
+    PITD도 이 음표로 재야 쓴 음표와 어긋나지 않는다."""
+    out = []
+    for x in all_notes:
+        a, b = int(round(x.start * tps)), int(round(x.end * tps))
+        a2 = max(a, out[-1]["position"] + 15) if out and a < out[-1]["position"] + out[-1]["duration"] else a
+        if b - a2 < 15:
+            continue
+        if a2 != a:
+            out[-1]["duration"] = a2 - out[-1]["position"]
+        breath = id(x) in breath_ids
+        out.append({"position": a2, "duration": b - a2, "tone": int(x.tone), "lyric": x.lyric, "breath": breath,
+                    "vol": int(x.strength) if breath else None})
     return out
 
 
@@ -376,7 +405,12 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
     all_notes = sorted(notes + breath_notes, key=lambda x: x.start)
     target = (midi + shift) * 100.0
     sing_mask = voiced & _note_mask(notes, n, 0.05, 0.05)
-    base = _base_cents(all_notes, t)
+    tps = bpm / 60 * TICKS
+    qnotes = _quantize(all_notes, set(id(b) for b in breath_notes), tps)
+    if not qnotes:
+        raise ValueError("음표가 너무 짧아서 프로젝트를 만들지 못했어요 (빠르기를 확인해 주세요)")
+    pdata = oupitch.pitch_data(qnotes, tps) if OU_EXACT else None
+    base = oupitch.base(qnotes, pdata, tps, t * tps) if OU_EXACT else _base_cents(all_notes, t)
     if OCTAVE_FIX:
         target = _fold_octaves(target, sing_mask, notes)
     target = _fill_gaps(target, sing_mask, notes, base, GAP_NOTE)
@@ -416,9 +450,14 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
         vals["brec"] = brec
     if o.tension > 0:
         vals["tenc"] = tenc
-    curves = make_curves(t, vals, bpm, span)
+    if OU_EXACT:
+        curves = [pitd_curve(t, base + pitd, qnotes, pdata, tps, span)] + \
+            make_curves(t, {k: v for k, v in vals.items() if k != "pitd"}, bpm, span)
+    else:
+        curves = make_curves(t, vals, bpm, span)
     # 렌더해서 고치기(refine.py)가 쓰는 프레임 곡선: 원래 음높이(+조옮김) · 음표 계단 · 크기 목표
     np.savez_compressed(out / "curves.npz", hop=HOP, bpm=bpm, span=np.array(span), base=base, target=target,
+                        exact=int(OU_EXACT), pitd0=pitd, dyn0=dyn,
                         sing=sing_mask, voiced=voiced, rel=np.clip(rel * o.dynamics * DYN_GAIN, -12, 6), near=near,
                         **{k: v for k, v in vals.items()})
 
@@ -434,8 +473,8 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
         audio.write(out / "breaths.wav", _breath_track(y, sr, breaths, o.breath_volume), sr)
         waves.append(("숨소리 (원래 보컬)", "breaths.wav", len(y) / sr * 1000, False, -2))
     name = title or Path(vocal).stem
-    _write_ustx(out / "project.ustx", name, bpm, all_notes, set(id(b) for b in breath_notes), curves, waves,
-                singer_id, phonemizer, info.get("classic", True))
+    _write_ustx(out / "project.ustx", name, bpm, qnotes, pdata, curves, waves, singer_id, phonemizer,
+                info.get("classic", True))
 
     preview = {
         "hop": HOP, "bpm": bpm, "shift": shift,
@@ -477,26 +516,20 @@ def _breath_track(y, sr, breaths, gain):
     return out
 
 
-def _write_ustx(path, name, bpm, notes, breath_ids, curves, waves, singer, phonemizer, classic=True):
+def _write_ustx(path, name, bpm, qnotes, pdata, curves, waves, singer, phonemizer, classic=True):
+    """qnotes: _quantize 결과. pdata: 음표마다 피치 점 (oupitch.pitch_data, None이면 예전 방식)."""
     import yaml
 
-    tps = bpm / 60 * TICKS
     vnotes = []
-    for x in notes:
-        a = int(round(x.start * tps))
-        b = int(round(x.end * tps))
-        if vnotes and a < vnotes[-1]["position"] + vnotes[-1]["duration"]:  # 겹치면 앞 음표를 줄인다
-            a = max(a, vnotes[-1]["position"] + 15)
-            vnotes[-1]["duration"] = a - vnotes[-1]["position"]
-        if b - a < 15:
-            continue
+    for i, x in enumerate(qnotes):
         exps = []
-        if id(x) in breath_ids:
-            exps.append({"index": 0, "abbr": "vol", "value": int(x.strength)})
+        if x["breath"]:
+            exps.append({"index": 0, "abbr": "vol", "value": int(x["vol"])})
         vnotes.append({
-            "position": a, "duration": b - a, "tone": int(x.tone), "lyric": x.lyric,
-            # 평평한 피치 점 + 비브라토 0: 음높이는 PITD 곡선이 다 맡는다
-            "pitch": {"data": [{"x": 0, "y": 0, "shape": "l"}, {"x": 5, "y": 0, "shape": "l"}], "snap_first": True},
+            "position": x["position"], "duration": x["duration"], "tone": x["tone"], "lyric": x["lyric"],
+            # 음 높이는 PITD 곡선이 다 맡는다: 피치 점은 붙은 음표 사이를 부드럽게 넘기기만 (oupitch.py), 비브라토 0
+            "pitch": pdata[i] if pdata else {"data": [{"x": 0, "y": 0, "shape": "l"}, {"x": 5, "y": 0, "shape": "l"}],
+                                             "snap_first": True},
             "vibrato": {"length": 0, "period": 175, "depth": 25, "in": 10, "out": 10, "shift": 0, "drift": 0, "vol_link": 0},
             "phoneme_expressions": exps, "phoneme_overrides": [],
         })
