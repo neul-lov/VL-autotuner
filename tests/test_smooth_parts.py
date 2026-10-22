@@ -100,3 +100,33 @@ def test_refine_keeps_best_round(tmp_path):
     assert len(calls) == 3 and r["best"] == 0
     assert (tmp_path / "teto_preview.wav").exists() and (tmp_path / "refine.json").exists()
 
+
+
+def test_fold_octaves_needs_note_and_context():
+    n = int(4.0 / HOP)
+    mask = np.ones(n, bool)
+    xs = [nt.Note(0.0, 1.0, 60), nt.Note(1.0, 2.0, 62), nt.Note(2.0, 4.0, 64)]
+    t = np.arange(n) * HOP
+    sung = T._base_cents(xs, t)
+    bad = sung.copy()
+    bad[int(1.25 / HOP):int(1.5 / HOP)] -= 1200  # 0.25초를 한 옥타브 아래로 잘못 읽음
+    assert np.allclose(T._fold_octaves(bad, mask, xs), sung)
+    # 음표(GAME)가 한 옥타브 틀리고 읽은 음은 맞을 때는 그대로 (앞뒤 음 높이가 읽은 쪽 편)
+    wrong = [nt.Note(0.0, 1.0, 60), nt.Note(1.0, 2.0, 74), nt.Note(2.0, 4.0, 64)]
+    assert np.allclose(T._fold_octaves(sung, mask, wrong), sung)
+
+
+def test_long_hole_in_note_goes_to_note_not_bad_edge():
+    n = int(1.0 / HOP)
+    xs = [nt.Note(0.0, 1.0, 60)]
+    base = np.full(n, 6000.0)
+    tg = base.copy()
+    tg[int(0.3 / HOP):int(0.6 / HOP)] = np.nan  # 0.3초 빈 곳
+    tg[int(0.3 / HOP) - 1] = 6500.0  # 빈 곳 바로 앞을 잘못 읽음
+    ok = np.isfinite(tg)
+    mid = int(0.45 / HOP)
+    assert T._fill_gaps(tg, ok, xs, base, 0.0)[mid] > 6200  # 예전: 앞뒤 끝을 바로 이어서 높게 감
+    assert abs(T._fill_gaps(tg, ok, xs, base, 0.05)[mid] - 6000) < 1
+    short = base.copy()
+    short[100:104] = np.nan  # 20ms 틈은 예전처럼 바로 잇기
+    assert np.allclose(T._fill_gaps(short, np.isfinite(short), xs, base, 0.05), T._interp_gaps(short, np.isfinite(short)))
