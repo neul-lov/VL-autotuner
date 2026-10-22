@@ -56,9 +56,9 @@ def _envelope(db, mask, win):
     return uniform_filter1d(maximum_filter1d(filled, max(1, int(win / HOP))), max(1, int(win / HOP)))
 
 
-def measure(wav, n):
-    """렌더 wav → (음높이 센트 · 유성 · 크기 dB), 조교할 때와 같은 방법으로 (Harvest)."""
-    y, sr = audio.load(wav)
+def measure(wav, n, loaded=None):
+    """렌더 wav → (음높이 센트 · 유성 · 크기 dB), 조교할 때와 같은 방법으로 (Harvest). loaded: 이미 읽은 (y, sr)."""
+    y, sr = loaded or audio.load(wav)
     f0, _ = pitch.extract(y, sr, "harvest")
     f0 = np.pad(f0, (0, max(0, n - len(f0))))[:n]
     db = pitch.frame_db(y, sr, n)
@@ -131,7 +131,7 @@ def write_curves(ustx, z):
 
 
 def _render_checked(render, ustx, tries=2):
-    """render를 부르고 소리가 있는 wav면 그 경로, 두 번 다 비었으면 None."""
+    """render를 부르고 소리가 있는 wav면 (경로, 읽은 (y, sr)) (재는 데 다시 읽지 않게), 두 번 다 비었으면 (None, None)."""
     for _ in range(tries):
         try:
             wav = Path(render(ustx))
@@ -139,8 +139,8 @@ def _render_checked(render, ustx, tries=2):
         except Exception:
             continue
         if len(y) > sr * 0.5 and float(np.abs(y).max()) > 1e-3:
-            return wav
-    return None
+            return wav, (y, sr)
+    return None, None
 
 
 def refine(folder, render, rounds=None, progress=lambda p, s: None):
@@ -157,11 +157,11 @@ def refine(folder, render, rounds=None, progress=lambda p, s: None):
     try:
         for r in range(rounds + 1):
             progress(r / (rounds + 1), f"테토로 불러 보는 중 ({r + 1}/{rounds + 1})")
-            wav = _render_checked(render, ustx)
+            wav, loaded = _render_checked(render, ustx)
             if wav is None:  # 렌더가 비었으면 (OpenUtau가 가끔 소리 없는 파일을 낸다) 여기까지 고른 것으로
                 history.append({"round": r, "error": "렌더가 비었어요"})
                 break
-            cents, voiced, db = measure(wav, n)
+            cents, voiced, db = measure(wav, n, loaded)
             s, info = score(z, cents, voiced, db)
             history.append({"round": r, "score": round(s, 3), **info})
             if best is None or s < best[0]:

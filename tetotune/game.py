@@ -20,7 +20,13 @@ MAX_CHUNK = 20.0
 SEED = 20251021
 
 
-REGISTRY = "https://openutau.github.io/svs-index/registry/v1/softwares/all.json"
+# 받을 모델은 판을 고정하고 SHA-256으로 확인한다 (배포처가 바뀌거나 망가져도 다른 파일을 쓰지 않게).
+# OpenUtau 패키지 목록(svs-index)의 game 항목에 있는 판. 새 판으로 올릴 때는 URL과 SHA-256을 같이 바꾼다
+MODEL_URL = "https://github.com/openvpi/GAME/releases/download/oudep/GAME-1.0.3-medium.oudep"  # 1.0.3-medium
+MODEL_SHA256 = "d7bda232352ee5cf275e54e58950401357902a99a8fb54e4dbb9b26ee63752e3"
+MAX_DOWNLOAD = 512 << 20  # 받는 압축 파일 크기 상한
+MAX_UNPACKED = 1 << 30  # 푼 크기 상한
+ALLOWED = {".onnx", ".json", ".yaml", ".yml", ".txt", ".md"}  # 압축 안에 있어도 되는 파일
 
 
 def models_home():
@@ -53,7 +59,6 @@ def ensure_model(progress=lambda s: None):
     import importlib.util
     import shutil
     import tempfile
-    import urllib.request
     import zipfile
 
     if importlib.util.find_spec("onnxruntime") is None:
@@ -63,22 +68,13 @@ def ensure_model(progress=lambda s: None):
         return found
     dest = models_home() / "game"
     progress("음표 나누기 모델(GAME) 받는 중 (처음 한 번)")
-    req = urllib.request.Request(REGISTRY, headers={"User-Agent": "OpenUtau", "Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        items = json.load(r)["items"]
-    sw = next(s for s in items if s.get("id") == "game")
-    url = sw["versions"][-1]["mirrors"][0]["url"]
     dest.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=dest.parent) as tmp:
         zpath = Path(tmp) / "game.oudep"
-        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "OpenUtau"}), timeout=60) as r, \
-                open(zpath, "wb") as f:
-            shutil.copyfileobj(r, f)
+        _download(MODEL_URL, zpath, MODEL_SHA256)
         out = Path(tmp) / "game"
         with zipfile.ZipFile(zpath) as z:
-            for m in z.namelist():  # 압축 밖으로 나가는 경로는 풀지 않는다
-                if m.startswith("/") or ".." in Path(m).parts:
-                    raise ValueError("GAME 모델 압축 파일이 이상해요")
+            _check_zip(z)
             z.extractall(out)
         if not _complete(out):  # 폴더 하나 안에 들어 있는 압축
             inner = next((d for d in out.iterdir() if d.is_dir() and _complete(d)), None)
@@ -89,6 +85,48 @@ def ensure_model(progress=lambda s: None):
             shutil.rmtree(dest)
         shutil.move(str(out), str(dest))
     return dest
+
+
+def _download(url, path, sha256):
+    """url → path. 크기가 MAX_DOWNLOAD를 넘거나 SHA-256이 다르면 ValueError (받은 파일은 지운다)."""
+    import hashlib
+    import urllib.request
+
+    h, size = hashlib.sha256(), 0
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "OpenUtau"}), timeout=60) as r, \
+                open(path, "wb") as f:
+            if int(r.headers.get("Content-Length") or 0) > MAX_DOWNLOAD:
+                raise ValueError("GAME 모델 파일이 너무 커요")
+            while chunk := r.read(1 << 20):
+                size += len(chunk)
+                if size > MAX_DOWNLOAD:
+                    raise ValueError("GAME 모델 파일이 너무 커요")
+                h.update(chunk)
+                f.write(chunk)
+        if h.hexdigest() != sha256.lower():
+            raise ValueError(f"GAME 모델 파일이 예상과 달라요 (SHA-256 {h.hexdigest()})")
+    except BaseException:
+        Path(path).unlink(missing_ok=True)
+        raise
+
+
+def _check_zip(z):
+    """압축 밖으로 나가는 경로 · 링크 · 모르는 종류의 파일 · 너무 큰 내용은 풀지 않는다."""
+    total = 0
+    for m in z.infolist():
+        parts = Path(m.filename).parts
+        if m.filename.startswith(("/", "\\")) or ".." in parts or ":" in m.filename or "\\" in m.filename:
+            raise ValueError("GAME 모델 압축 파일이 이상해요")
+        if (m.external_attr >> 16) & 0o170000 == 0o120000:  # 심볼릭 링크
+            raise ValueError("GAME 모델 압축 파일이 이상해요")
+        if m.is_dir():
+            continue
+        if Path(m.filename).suffix.lower() not in ALLOWED or len(parts) > 3:
+            raise ValueError(f"GAME 모델 압축 안에 모르는 파일이 있어요: {m.filename}")
+        total += m.file_size
+        if total > MAX_UNPACKED:
+            raise ValueError("GAME 모델 압축을 풀면 너무 커요")
 
 
 class Game:
@@ -171,7 +209,7 @@ def transcribe(y, sr, voiced, hop, language=None):
     folder = model_dir()
     if folder is None:
         return None
-    g = Game(folder)
+    g = Game(folder)  # 곡마다 새로 연다: 나누기 모델의 난수가 같은 시드에서 시작해야 같은 노래에 같은 음표가 나온다
     ys = audio.resample(y, sr, g.sr)
     out = []
     for a, b in chunks(voiced, hop):

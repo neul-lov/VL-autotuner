@@ -101,6 +101,19 @@ static class RenderHost {
             serilog.GetType("Serilog.Log").GetProperty("Logger").SetValue(null, logger);
         } catch (Exception) { }
 
+        // 렌더 캐시는 AutoTuner 전용 폴더로 (TETOTUNE_OU_CACHE): 소리 없는 렌더 때 캐시를 비워도 사용자 OpenUtau 캐시는 그대로
+        var cache = Environment.GetEnvironmentVariable("TETOTUNE_OU_CACHE");
+        if (!string.IsNullOrEmpty(cache)) {
+            try {
+                System.IO.Directory.CreateDirectory(cache);
+                var pm = Inst("OpenUtau.Core.PathManager");
+                var prop = pm.GetType().GetProperty("CachePath", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                prop.GetSetMethod(true).Invoke(pm, new object[] { cache });
+                Console.Error.WriteLine("render_cache: " + Get(pm, "CachePath"));
+            } catch (Exception e) {
+                Console.Error.WriteLine("render_cache_default: " + e.Message);
+            }
+        }
         Call(Inst("OpenUtau.Core.ToolsManager"), "Initialize");
         var singers = Inst("OpenUtau.Core.SingerManager");
         Call(singers, "Initialize");

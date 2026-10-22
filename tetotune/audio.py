@@ -9,6 +9,15 @@ import numpy as np
 import soundfile as sf
 
 SR = 44100
+MAX_SECONDS = 30 * 60  # 읽는 오디오 길이 · 채널 수 상한 (아주 긴 파일로 메모리가 모자라지 않게)
+MAX_CHANNELS = 16
+
+
+def _check(seconds, channels, name):
+    if seconds > MAX_SECONDS:
+        raise ValueError(f"{name}: 너무 길어요 ({MAX_SECONDS // 60}분까지 돼요)")
+    if channels > MAX_CHANNELS:
+        raise ValueError(f"{name}: 채널이 너무 많아요")
 
 
 def _ffmpeg():
@@ -40,12 +49,20 @@ def load(path, sr=SR):
     """아무 오디오 파일 → (모노 float32, sr). wav · flac · aiff는 바로, mp3 · m4a 등은 ffmpeg으로."""
     path = Path(path)
     try:
+        info = sf.info(str(path))
+    except Exception:
+        info = None
+    if info is not None:
+        _check(info.frames / max(1, info.samplerate), info.channels, path.name)
+    try:
         y, file_sr = sf.read(path, dtype="float32", always_2d=True)
     except Exception as e:
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "in.wav"
-            _decode(path, out, ["-ac", "1", "-ar", str(sr)], e)
+            # 상한보다 조금 더만 풀어서 길이를 본다 (끝없이 긴 파일도 디스크 · 메모리를 다 쓰지 않게)
+            _decode(path, out, ["-ac", "1", "-ar", str(sr), "-t", str(MAX_SECONDS + 1)], e)
             y, file_sr = sf.read(out, dtype="float32", always_2d=True)
+        _check(len(y) / file_sr, 1, path.name)
     y = y.mean(axis=1)
     if file_sr != sr:
         y = resample(y, file_sr, sr)

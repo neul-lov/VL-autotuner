@@ -28,7 +28,10 @@ LIMITS = {
 }
 CHOICES = {"breaths": ("auto", "voicebank", "original", "off"), "pitch_method": ("auto", "harvest", "rmvpe"),
            "refine": ("auto", "off")}
-MAX_JOBS = 50
+MAX_JOBS = 50  # 끝난 작업 기록은 이만큼만 (그리고 JOB_TTL초가 지나면 지운다)
+JOB_TTL = 3600
+MAX_ACTIVE = 4  # 돌고 있거나 차례를 기다리는 작업 (조교 · 구간 다시 조교 · 렌더) 수의 상한: 넘으면 새 요청을 거절한다
+MAX_INPUT_BYTES = {"보컬 파일": 2 << 30, "반주 파일": 2 << 30, "음표 파일": 20 << 20}
 INCOMPLETE = ".incomplete"  # 조교 중인 폴더 표시 (엔진 pid). 끝나면 지우고, 엔진이 중간에 꺼졌으면 다음 실행 때 폴더를 치운다
 
 PORT = int(os.environ.get("TETOTUNE_PORT", 8766))
@@ -38,7 +41,8 @@ OLD_OUTPUT = Path.home() / "Music" / "TetoTune"  # 앱 이름을 바꾸기 전 �
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
 
 app = FastAPI()
-jobs = {}  # job_id -> {"status", "step", "progress", "result", "error"}
+jobs = {}  # job_id -> {"status", "step", "progress", "result", "error"} (+ 끝난 시각 "_ended", 앱에는 보내지 않는다)
+jobs_lock = threading.Lock()  # jobs를 고치는 곳 (요청마다 다른 스레드)
 work_lock = threading.Lock()  # 한 번에 한 곡씩
 
 
@@ -120,7 +124,27 @@ def _options(raw):
 def _input_file(path, what):
     if path and not Path(path).is_file():
         raise HTTPException(400, f"{what}을 찾지 못했어요")
+    if path and Path(path).stat().st_size > MAX_INPUT_BYTES.get(what, 2 << 30):
+        raise HTTPException(400, f"{what}이 너무 커요")
     return path or None
+
+
+def _new_job(step="대기 중", progress=0.0):
+    """새 작업 기록 → job_id. 오래된 끝난 기록을 치우고, 쌓인 작업이 MAX_ACTIVE개면 거절한다 (429)."""
+    now = time.time()
+    with jobs_lock:
+        done = [k for k, j in jobs.items() if j["status"] != "running"]
+        for k in done[:-MAX_JOBS] + [k for k in done[-MAX_JOBS:] if now - jobs[k].get("_ended", now) > JOB_TTL]:
+            jobs.pop(k, None)
+        if sum(j["status"] == "running" for j in jobs.values()) >= MAX_ACTIVE:
+            raise HTTPException(429, "작업이 너무 많이 쌓였어요. 지금 하는 작업이 끝나면 다시 해 주세요")
+        job_id = uuid.uuid4().hex[:12]
+        jobs[job_id] = {"status": "running", "step": step, "progress": progress}
+    return job_id
+
+
+def _finish(job, **kw):
+    job.update(_ended=time.time(), **kw)
 
 
 @app.post("/api/tune")
@@ -139,10 +163,7 @@ def start(vocal: str = Form(None), song: str = Form(None), lyrics: str = Form(""
         raise
     except Exception:
         raise HTTPException(400, "설정을 읽지 못했어요")
-    for old in [k for k, j in jobs.items() if j["status"] != "running"][:-MAX_JOBS]:
-        jobs.pop(old, None)
-    job_id = uuid.uuid4().hex[:12]
-    jobs[job_id] = {"status": "running", "step": "대기 중", "progress": 0.0}
+    job_id = _new_job()
     threading.Thread(target=_run, args=(job_id, vocal, song, lyrics, notes, backing, opts), daemon=True).start()
     return {"job_id": job_id}
 
@@ -176,23 +197,30 @@ def _run(job_id, vocal, song, lyrics, notes, backing, opts):
                 if w:
                     res.warnings.append(w)
             (out / INCOMPLETE).unlink(missing_ok=True)
-            job.update(status="done", progress=1.0, step="끝", result=asdict(res))
+            _finish(job, status="done", progress=1.0, step="끝", result=asdict(res))
     except Exception as e:
         traceback.print_exc()
-        if out is not None and out.exists() and not (out / "project.ustx").exists():
+        # 결과가 다 만들어지기 전(report.json이 없으면 결과 목록에 안 보인다)에 멈췄으면 새 폴더를 치운다.
+        # 다 만든 뒤(다듬기 중 오류 등)면 결과는 남긴다
+        if out is not None and out.exists() and not _complete_result(out):
             shutil.rmtree(out, ignore_errors=True)
         elif out is not None:
             (out / INCOMPLETE).unlink(missing_ok=True)
-        job.update(status="error", error=str(e) if isinstance(e, ValueError) else f"조교하지 못했어요: {e}")
+        _finish(job, status="error", error=str(e) if isinstance(e, ValueError) else f"조교하지 못했어요: {e}")
     finally:
         shutil.rmtree(OUTPUT / ".work" / job_id, ignore_errors=True)
 
 
+def _complete_result(folder):
+    return all((folder / f).is_file() for f in ("project.ustx", "preview.json", "report.json"))
+
+
 @app.get("/api/jobs/{job_id}")
 def job_status(job_id: str):
-    if job_id not in jobs:
+    job = jobs.get(job_id)
+    if job is None:
         raise HTTPException(404)
-    return jobs[job_id]
+    return {k: v for k, v in job.items() if not k.startswith("_")}
 
 
 def _result_folder(name):
@@ -275,8 +303,7 @@ def retune_result(name: str, start: float = Form(...), end: float = Form(...), o
         raise HTTPException(400, "설정을 읽지 못했어요")
     if not end > start:
         raise HTTPException(400, "구간을 다시 골라 주세요")
-    job_id = uuid.uuid4().hex[:12]
-    jobs[job_id] = {"status": "running", "step": "대기 중", "progress": 0.0}
+    job_id = _new_job()
 
     def run():
         job = jobs[job_id]
@@ -285,10 +312,10 @@ def retune_result(name: str, start: float = Form(...), end: float = Form(...), o
                 prev = retune.retune(folder, start, end, opts, lyrics, renote,
                                      progress=lambda p, s: job.update(step=s, progress=round(p, 3)))
             prev["history"] = edit.history_count(folder)
-            job.update(status="done", progress=1.0, step="끝", result=prev)
+            _finish(job, status="done", progress=1.0, step="끝", result=prev)
         except Exception as e:
             traceback.print_exc()
-            job.update(status="error", error=str(e) if isinstance(e, ValueError) else f"다시 조교하지 못했어요: {e}")
+            _finish(job, status="error", error=str(e) if isinstance(e, ValueError) else f"다시 조교하지 못했어요: {e}")
     threading.Thread(target=run, daemon=True).start()
     return {"job_id": job_id}
 
@@ -299,8 +326,7 @@ def render_result(name: str):
     folder = _result_folder(name)
     if not openutau.available():
         raise HTTPException(400, "OpenUtau를 찾지 못했어요")
-    job_id = uuid.uuid4().hex[:12]
-    jobs[job_id] = {"status": "running", "step": "테토로 불러 보는 중", "progress": 0.1}
+    job_id = _new_job("테토로 불러 보는 중", 0.1)
 
     def run():
         job = jobs[job_id]
@@ -308,16 +334,16 @@ def render_result(name: str):
         try:
             with work_lock:
                 wav = openutau.render(folder / "project.ustx", work)
-                shutil.move(str(wav), folder / "teto_preview.wav")
                 prev_path = folder / "preview.json"
                 prev = json.loads(prev_path.read_text(encoding="utf-8"))
                 prev.pop("teto_stale", None)
-                prev_path.write_text(json.dumps(prev, ensure_ascii=False), encoding="utf-8")
+                os.replace(wav, folder / "teto_preview.wav")  # 같은 폴더 안이라 한 번에 바뀐다
+                edit.write_text_atomic(prev_path, json.dumps(prev, ensure_ascii=False))
                 prev["history"] = edit.history_count(folder)
-            job.update(status="done", progress=1.0, step="끝", result=prev)
+            _finish(job, status="done", progress=1.0, step="끝", result=prev)
         except Exception as e:
             traceback.print_exc()
-            job.update(status="error", error=str(e))
+            _finish(job, status="error", error=str(e))
         finally:
             shutil.rmtree(work, ignore_errors=True)
     threading.Thread(target=run, daemon=True).start()
@@ -375,4 +401,9 @@ if __name__ == "__main__":
     parent = os.environ.get("TETOTUNE_PARENT_PID")
     if parent and parent.isdigit():
         threading.Thread(target=_exit_with_parent, args=(int(parent),), daemon=True).start()
+    if not TOKEN:  # 앱 밖에서 직접 켰을 때도 같은 Mac의 다른 프로그램이 부르지 못하게: 비밀값을 만들어 알려 준다
+        import secrets
+
+        TOKEN = secrets.token_urlsafe(32)
+        print(f"TETOTUNE_TOKEN이 없어서 새로 만들었어요. 요청마다 머리글 X-TetoTune-Token: {TOKEN}", flush=True)
     uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="warning")
