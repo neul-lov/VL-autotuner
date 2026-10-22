@@ -136,6 +136,11 @@ static class RenderHost {
         var track = tracks[0];
         var singer = Get(track, "Singer");
         Console.WriteLine("singer=" + (singer == null ? "null" : Get(singer, "Id")) + " found=" + (singer == null ? "False" : Get(singer, "Found")));
+        try {  // 소리가 안 날 때 까닭을 찾으려고: 음소 변환기 · 렌더러
+            var ph = Get(track, "Phonemizer");
+            var rs = Get(track, "RendererSettings");
+            Console.WriteLine("phonemizer=" + (ph == null ? "null" : ph.GetType().Name) + " renderer=" + Get(rs, "renderer"));
+        } catch (Exception) { }
         var voicePart = T("OpenUtau.Core.Ustx.UVoicePart");
         var part = ((IEnumerable)Get(project, "parts")).Cast<object>().First(p => voicePart.IsInstanceOfType(p));
         Pump(() => ((ICollection)Get(part, "phonemes")).Count > 0 && (bool)Get(part, "PhonemesUpToDate"), 30);

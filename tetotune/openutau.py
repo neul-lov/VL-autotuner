@@ -123,6 +123,23 @@ def cache_dir():
     return support_dir() / "cache"
 
 
+def _why_silent(log):
+    """RenderHost 기록(singer= found= / phonemes= phoneme_errors= / phonemizer= renderer=)으로 소리가 없는 까닭을 짐작한다."""
+    import re
+
+    info = dict(re.findall(r"(\w+)=(\S+)", log))
+    m = re.search(r"singer=(.*?) found=", log)  # 가수 id에는 띄어쓰기가 있을 수 있다
+    singer = m.group(1) if m else info.get("singer", "?")
+    if info.get("found") == "False" or singer == "null":
+        return f"OpenUtau가 가수를 찾지 못했어요 ({singer}). OpenUtau를 한 번 열어 가수 목록에 테토가 있는지 확인해 주세요"
+    total, errors = int(info.get("phonemes", "0") or 0), int(info.get("phoneme_errors", "0") or 0)
+    if total == 0 or errors >= max(1, total // 2):
+        return (f"가사를 테토 소리로 바꾸지 못했어요 (음소 {total}개 중 {errors}개 오류, 음소 변환기 {info.get('phonemizer', '?')}). "
+                "고른 가수 · 가사 언어가 맞는지 확인해 주세요")
+    return (f"OpenUtau가 소리 없는 파일을 냈어요 (가수 {singer}, 음소 {total}개 · 오류 {errors}개, "
+            f"렌더러 {info.get('renderer', '?')}). OpenUtau에서 이 가수로 소리가 나는지 확인해 주세요")
+
+
 def _env(own_cache=True):
     env = dict(os.environ)
     if own_cache:
@@ -165,5 +182,5 @@ def render(ustx, out_dir, name=TRACK, tries=3):
             shutil.rmtree(cache_dir(), ignore_errors=True)
     _last_error = log.strip().splitlines()[-3:] if log else ["렌더 기록 없음"]
     if silent:
-        _last_error = ["OpenUtau가 소리 없는 파일을 냈어요 (OpenUtau에서 이 가수로 소리가 나는지 확인해 주세요)"] + _last_error[-1:]
+        _last_error = [_why_silent(log)]
     raise RuntimeError("OpenUtau로 불러 보지 못했어요: " + " / ".join(_last_error))
