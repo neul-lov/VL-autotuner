@@ -4,12 +4,16 @@
   가사 넣고 조교 → 정답 음표와 하나씩 짝지어(50ms 안) 음 시작 F1 · 가사 · 음 높이 · 시작 오차 (울리는 자음 · 그 밖 따로)
 - vocadito 사람 노래 (사람이 표시한 음 높이 · 음표가 있다): 가사 없이 조교 → 음 높이 정확도(RPA, 50센트)와
   음표 정확도(mir_eval COnP · COnPOff · COn F1)
+- CSD 한국 동요 (사람이 부른 노래, 음절마다 시작 · 끝 · 음 높이 정답, CC BY-NC-SA 4.0): 가사를 숨 쉬는 곳마다 한 줄로
+  넣고 조교 → 음절이 맞는 때에 들어갔는지(50 · 100ms 안, 치우침), 그 음절의 음 높이, 음표 정확도(COnP).
+  지금까지는 사람 노래에서 가사 위치를 잰 적이 없었다 (테토 정답 노래는 음절마다 음표 하나라 쉽다)
 - --render: 몇 가지 방식만 vocadito 몇 곡을 실제 테토로 렌더해서 원래 보컬과 비교 (compare_render.py)
 
 사용: python accuracy.py --refs out/ref* --vocadito vocadito폴더 [--render OpenUtau폴더 작업폴더 --render-songs 10,14]
 """
 import argparse
 import csv
+import difflib
 import hashlib
 import json
 import shutil
@@ -210,6 +214,115 @@ def eval_vocadito(songs, patches, keep=None):
     return {f"v_{m}": float(np.mean([r[m] for r in res])) for m in res[0]} if res else {}
 
 
+# ---------------------------------------------------------------- CSD (사람이 부른 한국 동요)
+HANGUL_SYL = ("가", "힣")
+
+
+def _hangul(s):
+    return len(s) == 1 and HANGUL_SYL[0] <= s <= HANGUL_SYL[1]
+
+
+def csd_songs(root, count=0):
+    """→ [(이름, 오디오, [(시작, 끝, midi, 음절 또는 "+")])] (korean, 같은 노래를 두 조로 부른 것 중 a만).
+    한 음절을 여러 음으로 부른 곳은 음표가 나뉘어 있는데, 가사 파일(lyric)과 맞춰 보고 남는 음표는 "+"로 둔다."""
+    root = Path(root)
+    out = []
+    for wav in sorted(root.rglob("korean/wav/*a.wav")):
+        csvp = wav.parent.parent / "csv" / (wav.stem + ".csv")
+        if not csvp.exists():
+            continue
+        rows = []
+        for row in csv.reader(open(csvp, encoding="utf-8-sig")):
+            try:
+                rows.append([float(row[0]), float(row[1]), int(round(float(row[2]))), row[3].strip()])
+            except (ValueError, IndexError):
+                continue  # 머리글
+        if not rows:
+            continue
+        lyr = wav.parent.parent / "lyric" / (wav.stem + ".txt")
+        text = [c for c in lyr.read_text(encoding="utf-8-sig") if _hangul(c)] if lyr.exists() else []
+        syl = [r[3] for r in rows]
+        if text and len(text) < len(syl):
+            keep = set()
+            for a, b, k in difflib.SequenceMatcher(None, syl, text, autojunk=False).get_matching_blocks():
+                keep.update(range(a, a + k))
+            for i, r in enumerate(rows):
+                if i not in keep:
+                    r[3] = "+"
+        for r in rows:
+            if not _hangul(r[3]):
+                r[3] = "+"
+        out.append((wav.stem, wav, [tuple(r) for r in rows]))
+    if count and len(out) > count:  # 고르게 (앞 · 뒤 노래 고루)
+        out = [out[round(i * (len(out) - 1) / (count - 1))] for i in range(count)] if count > 1 else out[:1]
+    return out
+
+
+def csd_lyrics(rows, gap=0.25):
+    """정답 음절 → 가사 글 (노래하는 사람이 쓰듯 숨 쉬는 틈마다 한 줄)."""
+    lines, cur, end = [], "", None
+    for s, e, _, syl in rows:
+        if end is not None and s - end > gap and cur:
+            lines.append(cur)
+            cur = ""
+        if syl != "+":
+            cur += syl
+        end = e
+    if cur:
+        lines.append(cur)
+    return "\n".join(lines)
+
+
+def score_csd(prev, rows):
+    import mir_eval
+
+    truth = [r for r in rows if r[3] != "+"]
+    est = [x for x in prev["notes"] if x[3] != "+"]
+    sm = difflib.SequenceMatcher(None, [r[3] for r in truth], [x[3] for x in est], autojunk=False)
+    pairs = [(i + k, j + k) for i, j, n in sm.get_matching_blocks() for k in range(n)]
+    err = {"v": [], "o": []}
+    tone = 0
+    for i, j in pairs:
+        e = (est[j][0] - truth[i][0]) * 1000
+        err["v" if notes._voiced_onset(truth[i][3]) else "o"].append(e)
+        tone += est[j][2] - prev["shift"] == truth[i][2]
+    ref_iv = np.array([[r[0], r[1]] for r in rows]).reshape(-1, 2)
+    ref_hz = pitch.midi_to_hz(np.array([r[2] for r in rows], dtype=float))
+    merged = []
+    for x in prev["notes"]:
+        if x[1] <= x[0]:
+            continue
+        if merged and x[3] == "+" and abs(merged[-1][1] - x[0]) < 1e-3 and merged[-1][2] == x[2]:
+            merged[-1][1] = x[1]
+        else:
+            merged.append(list(x))
+    est_iv = np.array([[x[0], x[1]] for x in merged]).reshape(-1, 2)
+    est_hz = pitch.midi_to_hz(np.array([x[2] - prev["shift"] for x in merged], dtype=float))
+    conp = mir_eval.transcription.precision_recall_f1_overlap(ref_iv, ref_hz, est_iv, est_hz, offset_ratio=None)[2]
+    return {"n": len(truth), "placed": len(pairs), "tone": tone, "err_v": err["v"], "err_o": err["o"], "conp": conp}
+
+
+def eval_csd(songs, patches, keep=None):
+    res = []
+    for name, wav, rows in songs:
+        with patched(patches), tempfile.TemporaryDirectory() as tmp:
+            out = Path(keep) / name if keep else Path(tmp) / "o"
+            prev = run_tune(wav, csd_lyrics(rows), out)
+        res.append(score_csd(prev, rows))
+    if not res:
+        return {}
+    n = sum(r["n"] for r in res)
+    errs = [e for r in res for e in r["err_v"] + r["err_o"]]
+    ev = [e for r in res for e in r["err_v"]]
+    eo = [e for r in res for e in r["err_o"]]
+    a = np.abs(np.array(errs)) if errs else np.array([np.nan])
+    return {"c_n": n, "c_placed": sum(r["placed"] for r in res) / max(1, n),
+            "c_hit50": float(np.sum(a <= 50) / max(1, n)), "c_hit100": float(np.sum(a <= 100) / max(1, n)),
+            "c_bias_v": float(np.median(ev)) if ev else float("nan"), "c_bias_o": float(np.median(eo)) if eo else float("nan"),
+            "c_abs90": float(np.percentile(a, 90)), "c_tone": sum(r["tone"] for r in res) / max(1, n),
+            "c_conp": float(np.mean([r["conp"] for r in res]))}
+
+
 # ---------------------------------------------------------------- 렌더
 def render_compare(ou, work, folder, truth=None):
     render = folder / "render.wav"
@@ -290,6 +403,10 @@ def main():
     ap.add_argument("--render-songs", default="10,14")
     ap.add_argument("--render-sep-songs", help="분리한 보컬은 이 곡들을 렌더 (없으면 --render-songs)")
     ap.add_argument("--render-refs", type=int, default=0, help="테토 정답 노래 몇 곡을 조교해서 다시 렌더해 비교할지 (한글도 같은 수)")
+    ap.add_argument("--csd", help="CSD 폴더 (korean/wav · csv · lyric)")
+    ap.add_argument("--csd-n", type=int, default=12, help="CSD 노래 몇 곡 (고르게 고른다)")
+    ap.add_argument("--csd-sep", help="make_separated.py --csd 결과 폴더 (sep_<이름>.wav): 분리한 보컬로도 CSD를 잰다")
+    ap.add_argument("--render-csd", type=int, default=0, help="CSD 몇 곡을 가사 넣고 조교해서 테토로 렌더해 비교할지")
     ap.add_argument("--only", help="쉼표로 나눈 방식 이름만")
     ap.add_argument("--json", help="결과를 이 파일에 (여러 잡 결과를 합칠 때)")
     args = ap.parse_args()
@@ -303,10 +420,19 @@ def main():
             k = int(f.stem.split("_")[1])
             if k in by_k:
                 sep.append((k, f, by_k[k][0], by_k[k][1], by_k[k][2]))
+    csd = csd_songs(args.csd, args.csd_n) if args.csd else []
+    csd_sep = []
+    if args.csd_sep and csd:
+        csd_sep = [(name, Path(args.csd_sep) / f"sep_{name}.wav", rows, wav) for name, wav, rows in csd
+                   if (Path(args.csd_sep) / f"sep_{name}.wav").exists()]
+    for name, wav, rows in csd[:2]:
+        print(f"CSD {name}: 음표 {len(rows)}개, 음절 {sum(r[3] != '+' for r in rows)}개, 가사 줄 {len(csd_lyrics(rows).splitlines())}줄, "
+              f"처음: {rows[:4]}", flush=True)
     vs = variants()
     if args.only:
         vs = {k: v for k, v in vs.items() if k in args.only.split(",")}
-    print(f"테토 정답 노래 {len(refs)}곡 · 한글 {len(krefs)}곡 · vocadito {len(songs)}곡 · 분리한 보컬 {len(sep)}곡", flush=True)
+    print(f"테토 정답 노래 {len(refs)}곡 · 한글 {len(krefs)}곡 · vocadito {len(songs)}곡 · 분리한 보컬 {len(sep)}곡 · "
+          f"CSD {len(csd)}곡 (분리 {len(csd_sep)}곡)", flush=True)
     if songs and game.model_dir():  # GAME이 같은 노래에 늘 같은 음표를 내는지 (잡마다 비교가 흔들리지 않게)
         from tetotune import audio
         y, sr = audio.load(songs[0][1])
@@ -326,6 +452,10 @@ def main():
                 row.update(eval_vocadito(songs, patches))
             if sep:
                 row.update({"s" + k: v for k, v in eval_vocadito([(k, w, f0, nts) for k, w, f0, nts, _ in sep], patches).items()})
+            if csd:
+                row.update(eval_csd(csd, patches))
+            if csd_sep:
+                row.update({"s" + k: v for k, v in eval_csd([(n, w, r) for n, w, r, _ in csd_sep], patches).items()})
         except RuntimeError as e:
             print(name, "건너뜀:", e, flush=True)
             continue
@@ -340,6 +470,8 @@ def main():
                 "vocadito": [(str(k), wav, "", None) for k, wav, _, _ in songs if k in want],
                 "sep": [(str(k), f, "", clean) for k, f, _, _, clean in sep
                         if k in ({int(x) for x in args.render_sep_songs.split(",")} if args.render_sep_songs else want)],
+                "csd": [(name, wav, csd_lyrics(rows), None) for name, wav, rows in csd[:args.render_csd]],
+                "csdsep": [(name, w, csd_lyrics(rows), clean) for name, w, rows, clean in csd_sep[:args.render_csd]],
             }
             for key, items in sets.items():
                 if items:
@@ -369,7 +501,20 @@ def print_tables(results):
     print("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for name, r in rows.items():
         print(f"| {name} | {ref_cell(r)} | {ref_cell(r, 'k')} | {hum_cell(r)} | {hum_cell(r, 's')} |")
-    labels = {"ref": "테토 정답", "kref": "한글 정답", "vocadito": "사람 노래", "sep": "분리한 보컬"}
+    def csd_cell(r, p=""):
+        if p + "c_hit50" not in r:
+            return " | | | | "
+        return (f"{r[p + 'c_hit50']:.3f} / {r[p + 'c_hit100']:.3f} | {r[p + 'c_bias_v']:+.0f} / {r[p + 'c_bias_o']:+.0f} | "
+                f"{r[p + 'c_abs90']:.0f} | {r[p + 'c_tone']:.3f} | {r[p + 'c_conp']:.3f}")
+    if any("c_hit50" in r for r in rows.values()):
+        print()
+        print("| 방식 | CSD 음절 시작 50/100ms 안 | 치우침 ms (울리는 자음 / 그 밖) | 시작 오차 90% ms | 음절 음 높이 | COnP | "
+              "분리 CSD 50/100ms 안 | 치우침 | 90% | 음 높이 | COnP |")
+        print("|---|---|---|---|---|---|---|---|---|---|---|")
+        for name, r in rows.items():
+            print(f"| {name} | {csd_cell(r)} | {csd_cell(r, 's')} |")
+    labels = {"ref": "테토 정답", "kref": "한글 정답", "vocadito": "사람 노래", "sep": "분리한 보컬", "csd": "CSD (가사)",
+              "csdsep": "분리 CSD (가사)"}
     for key, label in labels.items():
         have = [(name, v["render"][key]) for name, v in results.items() if v["render"].get(key)]
         if not have:

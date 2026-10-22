@@ -43,3 +43,59 @@ def test_game_chunks_cut_in_rests():
     assert all(b - a <= game.MAX_CHUNK * 1.5 for a, b in ch)
     for a, b in ch[1:]:
         assert not voiced[int(a / HOP)]  # 노래 중간에서 자르지 않는다
+
+
+def _sung(spans, n, gaps=()):
+    """노래 프레임: spans 안은 소리 (−15dB), gaps(자음 틈)는 무성 · 작게."""
+    voiced = np.zeros(n, dtype=bool)
+    db = np.full(n, -60.0)
+    for a, b in spans:
+        voiced[int(a / HOP):int(b / HOP)] = True
+        db[int(a / HOP):int(b / HOP)] = -15.0
+    for a, b in gaps:
+        voiced[int(a / HOP):int(b / HOP)] = False
+        db[int(a / HOP):int(b / HOP)] = -35.0
+    return voiced, db
+
+
+def test_game_melisma_keeps_syllables_on_consonants():
+    """あ い(+ +) し て(+) る: GAME이 8음표로 나눠도 음절은 자음 틈이 있는 곳에서 시작한다 (예전: 시간 순서대로 앞에 몰림)."""
+    n = int(4.0 / HOP)
+    bounds = [0.0, 0.4, 0.8, 1.0, 1.2, 1.6, 2.0, 2.4, 2.8]
+    tones = [60, 62, 64, 62, 60, 62, 64, 60]
+    # し · て · る 앞에 자음 틈 (ㅅ · ㅌ · ㄹ은 짧게 소리가 꺼진다)
+    voiced, db = _sung([(0.0, 2.8)], n, gaps=[(1.17, 1.2), (1.57, 1.6), (2.37, 2.4)])
+    midi = np.where(voiced, 60.0, np.nan)
+    gn = [(a, b, float(t)) for a, b, t in zip(bounds, bounds[1:], tones)]
+    out, _ = nt.from_game(gn, midi, voiced, db, None)
+    out = nt.align(out, [["あ", "い", "し", "て", "る"]])
+    lyr = [x.lyric for x in out]
+    start = {x.lyric: round(x.start, 2) for x in out if x.lyric != "+"}
+    assert start["し"] == 1.2 and start["て"] == 1.6 and start["る"] == 2.4, lyr
+    assert start["い"] == 0.4, lyr
+
+
+def test_small_tsu_is_a_closure_not_a_syllable_start():
+    """きっと를 두 음(き · と)으로 부르면 と는 둘째 음 시작에, っ는 き 끝의 짧은 음표로."""
+    n = int(2.0 / HOP)
+    voiced, db = _sung([(0.0, 0.4), (0.45, 1.2)], n)
+    midi = np.where(voiced, 60.0, np.nan)
+    out, _ = nt.from_game([(0.0, 0.4, 60.0), (0.45, 1.2, 62.0)], midi, voiced, db, None)
+    out = nt.align(out, [["き", "っ", "と"]])
+    got = [(x.lyric, round(x.start, 2), round(x.end, 2)) for x in out]
+    assert got == [("き", 0.0, 0.31), ("っ", 0.31, 0.4), ("と", 0.45, 1.2)], got
+
+
+def test_plus_after_gap_is_not_silent():
+    a = nt.Note(0.0, 0.5, 60, "か")
+    b = nt.Note(0.6, 0.9, 62, "+")  # 짧은 틈: 앞 음표를 늘인다
+    c = nt.Note(2.0, 2.5, 62, "+")  # 긴 쉼 뒤: 앞 모음으로
+    d = nt.Note(2.5, 2.8, 64, "+")  # 붙어 있으면 그대로
+    e = nt.Note(3.0, 3.3, 64, "+")  # 숨 뒤: 앞 모음으로
+    assert nt.fix_plus([a, b, c, d, e], breaths=[(2.85, 2.95)]) == 3
+    assert a.end == 0.6 and b.lyric == "+"
+    assert c.lyric == "あ" and d.lyric == "+" and e.lyric == "あ"
+    k = nt.Note(0.0, 0.5, 60, "강")
+    m = nt.Note(1.5, 2.0, 60, "+")
+    nt.fix_plus([k, m])
+    assert m.lyric == "아"

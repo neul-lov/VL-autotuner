@@ -5,13 +5,16 @@ OpenUtau 계산과 조금이라도 다르면 음표가 바뀌는 곳마다 그�
 5ms 직선)이 PITD 격자(5틱)와 어긋나서 음표가 바뀔 때마다 수백 센트가 짧게 튀었다.
 
 그래서 붙어 있는 두 음표의 높이가 다르면 경계 앞뒤 PORTA_MS/2씩 부드러운 곡선(io)으로 넘어가게 피치 점을 쓰고
-(어디서 재도 OpenUtau와 같은 값), 음표 끝에 틈이 있으면 PITD에 끝 바로 앞 · 끝 점을 넣어 계단과 같은 곳에서 바뀌게 한다.
+(어디서 재도 OpenUtau와 같은 값), 음표 사이에 짧은 틈이 있으면 뒤 음표의 첫 피치 점을 틈 시작(앞 음표 끝)에 앞 음표 높이로 둔다:
+틈이 선행발성보다 짧으면 OpenUtau는 선행발성을 틈 길이로 줄여서 뒤 프레이즈가 앞 음표 끝 틱부터 재는데, 그 틱의 계단이
+앞 프레이즈(앞 음표 높이)와 뒤 프레이즈(뒤 음표 높이)에서 달라 PITD 하나로는 둘 다 맞출 수 없었다 (자음 첫머리가 튐).
 """
 import math
 
 import numpy as np
 
 PORTA_MS = 30.0  # 붙어 있는 두 음표 높이가 다를 때 넘어가는 길이 (ms, 짧은 음표는 그 1/4까지). 0 = 예전 방식
+GAP_RAMP_MS = 400.0  # 이보다 짧은 틈 뒤 음표는 틈 시작부터 앞 음표 높이에서 넘어온다 (선행발성이 이보다 긴 음원은 거의 없다)
 
 
 def pitch_data(notes, tps):
@@ -23,7 +26,12 @@ def pitch_data(notes, tps):
             out.append({"data": [{"x": 0, "y": 0, "shape": "l"}, {"x": 5, "y": 0, "shape": "l"}], "snap_first": True})
             continue
         touch = prev is not None and prev["position"] + prev["duration"] == n["position"]
-        if touch and prev["tone"] != n["tone"]:
+        gap_ms = (n["position"] - prev["position"] - prev["duration"]) / tps * 1000 if prev is not None else 0
+        if not touch and prev is not None and prev["tone"] != n["tone"] and 0 < gap_ms <= GAP_RAMP_MS:
+            d = (prev["tone"] - n["tone"]) * 10
+            out.append({"data": [{"x": round(-gap_ms, 3), "y": d, "shape": "io"}, {"x": 0, "y": 0, "shape": "io"}],
+                        "snap_first": False})
+        elif touch and prev["tone"] != n["tone"]:
             w = min(PORTA_MS, 0.5 * min(prev["duration"], n["duration"]) / tps * 1000)
             d = (prev["tone"] - n["tone"]) * 10
             # 첫 점 앞 5ms는 평평하게: OpenUtau는 첫 점보다 한 칸(5틱) 앞에서부터 계산해서, 곡선이 바로 시작하면 그 칸이 조금 튄다
@@ -101,22 +109,24 @@ def base(notes, data, tps, xs):
     return out
 
 
-def curve_xs(notes, span_ticks, interval=5, tps=None):
-    """PITD 점을 둘 틱과 그 점에서 쓸 계단 쪽 → (xs, at). 틈 앞에서 끝나는 음표의 끝(End)과 End+1에도 점을 둔다:
-    OpenUtau 계단은 End에서 다음 음표 높이로 바뀌는데 그 음표의 프레이즈는 End까지 앞 음표 높이라서,
-    End 점은 앞 음표 쪽(at = End − 0.5)으로 재고 End+1부터 다음 음표 쪽으로 잰다."""
+def _ramped(n, m, tps):
+    """n 뒤 틈 다음의 m이 틈 시작부터 넘어오는 피치 점을 받는지 (pitch_data와 같은 조건)."""
+    gap_ms = (m["position"] - n["position"] - n["duration"]) / tps * 1000 if tps else 0
+    return PORTA_MS > 0 and n["tone"] != m["tone"] and 0 < gap_ms <= GAP_RAMP_MS
+
+
+def curve_xs(notes, span_ticks, tps=None):
+    """PITD 점을 둘 틱과 그 점에서 쓸 계단 쪽 → (xs, at). 틱마다 두고 선 위의 점은 나중에 지운다: OpenUtau는 프레이즈마다
+    다른 곳에서 5틱 간격으로 재서, 5틱마다만 두면 빠르게 넘어가는 곳(큰 도약 · 넘어가는 곡선)에서 그 사이 직선만큼 어긋난다.
+    긴 틈 앞에서 끝나는 음표의 끝(End)은 앞 음표 쪽(at = End − 0.5)으로 잰다: OpenUtau 계단은 End에서 다음 음표 높이로
+    바뀌는데 앞 음표의 프레이즈는 End까지 앞 음표 높이다 (짧은 틈은 피치 점으로 양쪽을 맞춰서 필요 없다)."""
     a, b = span_ticks
-    xs = {x: float(x) for x in range(a // interval * interval, b + interval, interval)}
-    for n, m in zip(notes, notes[1:] + [None]):
+    xs = {x: float(x) for x in range(a - 1, b + 2)}
+    for n, m in zip(notes, notes[1:]):
         end = n["position"] + n["duration"]
-        if m is not None and m["position"] > end:
+        if m["position"] > end and not _ramped(n, m, tps) and end in xs:
             xs[end] = end - 0.5
-            xs[end + 1] = float(end + 1)
-        elif m is not None and m["tone"] != n["tone"] and tps and PORTA_MS > 0:
-            # 넘어가는 곡선(io) 안은 틱마다: 5틱 사이를 직선으로 이으면 큰 도약에서 몇십 센트 어긋난다 (선 위의 점은 나중에 지운다)
-            w = int(math.ceil(PORTA_MS / 2000 * tps)) + 6
-            xs.update({x: float(x) for x in range(end - w, end + w + 1)})
-    keys = sorted(x for x in xs if a - interval <= x <= b + interval)
+    keys = sorted(xs)
     return np.array(keys), np.array([xs[x] for x in keys])
 
 
