@@ -4,6 +4,7 @@ AutoTuner third-party notices
 AutoTuner's own code is under the MIT License (see LICENSE).
 The built app (AutoTuner.app) also ships pyworld wheels, which contain the WORLD vocoder.
 tetotune/align_fa.py contains a modified copy of HubertFA's alignment decoder (Apache-2.0).
+tetotune/clean.py follows the chunked overlap-add of Music-Source-Separation-Training's demix() (MIT).
 Their notices follow.
 
 ----------------------------------------------------------------------
@@ -81,6 +82,35 @@ Vocadito: R. M. Bittner, K. Pasalo, J. J. Bosch, G. Meseguer-Brocal, D. Rubinste
 https://doi.org/10.5281/zenodo.5578807
 Creative Commons Attribution 4.0 International, https://creativecommons.org/licenses/by/4.0/
 Converted to FLAC; otherwise unchanged.
+
+----------------------------------------------------------------------
+Music-Source-Separation-Training (https://github.com/ZFTurbo/Music-Source-Separation-Training)
+----------------------------------------------------------------------
+tetotune/clean.py: the chunk / fade / reflect-padding scheme of utils/model_utils.py demix().
+The separation and dereverberation models are not part of the app; the app downloads them on first use
+(Mel-Band RoFormer vocals by Kimberley Jensen, MIT; dereverb_room by anvuew, GPL-3.0; ONNX exports by audiojs).
+
+MIT License
+
+Copyright (c) 2024 Roman Solovyev (ZFTurbo)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 ----------------------------------------------------------------------
 HubertFA (https://github.com/wolfgitpr/HubertFA), tools/decoder.py at b3f0869

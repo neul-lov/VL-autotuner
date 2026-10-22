@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import align_fa, audio, confidence, features, lyrics as lyr, notes as nt, oupitch, pitch, voicebank
+from . import align_fa, audio, clean, confidence, features, lyrics as lyr, notes as nt, oupitch, pitch, voicebank
 from .pitch import HOP
 
 TICKS = 480
@@ -292,11 +292,12 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
     y, sr = audio.load(vocal)
     if len(y) < sr * 0.5:
         raise ValueError("보컬이 너무 짧아요 (0.5초 이상)")
+    y_ana = _for_analysis(y, sr, backing, warnings, progress)  # 음 높이 · 음표 · 가사 자리는 깨끗하게 한 소리로
     progress(0.08, "음높이 읽는 중")
-    f0, used = pitch.extract(y, sr, o.pitch_method)
+    f0, used = pitch.extract(y_ana, sr, o.pitch_method)
     n = len(f0)
     db = pitch.frame_db(y, sr, n)
-    midi, voiced = pitch.clean(f0, db)
+    midi, voiced = pitch.clean(f0, db if y_ana is y else pitch.frame_db(y_ana, sr, n))
     if voiced.sum() * HOP < 0.3:
         raise ValueError("노래하는 소리를 찾지 못했어요 (보컬만 분리한 파일인지 확인해 주세요)")
     progress(0.35, "목소리 특징 읽는 중 (크기 · 숨 · 힘)")
@@ -333,7 +334,7 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
         if nt.USE_GAME:
             from . import game
             try:
-                gnotes = game.transcribe(y, sr, voiced, HOP, lyr.language(lyrics_text) if lines else None)
+                gnotes = game.transcribe(y_ana, sr, voiced, HOP, lyr.language(lyrics_text) if lines else None)
             except Exception as e:  # 모델이 깨졌거나 onnxruntime이 맞지 않으면 원래 방법으로
                 warnings.append(f"GAME으로 음표를 나누지 못해서 원래 방법으로 했어요 ({e})")
         if gnotes:
@@ -355,7 +356,7 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
         if align_fa.USE_FA and not notes_file:  # 가사 맞추기 모델: 음절마다 모음 시작을 소리에서 찾아 옮긴다
             progress(0.55, "가사 자리 맞추는 중 (가사 맞추기 모델)")
             try:
-                notes, fixed = align_fa.refine(notes, y, sr)
+                notes, fixed = align_fa.refine(notes, y_ana, sr)
             except Exception as e:  # 모델이 깨졌거나 onnxruntime이 맞지 않으면 원래 자리 그대로
                 fixed = 0
                 warnings.append(f"가사 맞추기 모델을 쓰지 못해서 원래 방법으로 가사를 넣었어요 ({e})")
@@ -524,6 +525,30 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
                                      encoding="utf-8")
     progress(1.0, "끝")
     return res
+
+
+def _for_analysis(y, sr, backing, warnings, progress):
+    """clean.SEPARATE · DEREVERB가 켜져 있고 모델이 있으면 반주를 다시 걸러 내고 잔향을 걷은 소리, 아니면 y 그대로.
+    반주 파일이 보컬과 길이가 같으면 (StemMixer처럼 같은 곡에서 나눈 것) 둘을 더한 원래 곡에서 다시 뽑는다."""
+    out = y
+    try:
+        if clean.SEPARATE != "off" and clean.model_path("vocals"):
+            bk = None
+            if backing:
+                b, bsr = audio.load(backing)
+                b = audio.resample(b, bsr, sr) if bsr != sr else b
+                if abs(len(b) - len(y)) <= 0.01 * len(y) + sr * 0.05:
+                    bk = b
+            out = clean.vocals(out, sr, backing=bk,
+                               progress=lambda f: progress(0.02 + 0.03 * f, "반주가 샌 곳 다시 걸러 내는 중 (보컬 분리 모델)"))
+        if clean.DEREVERB != "off" and clean.model_path("dereverb"):
+            out = clean.dereverb(out, sr, progress=lambda f: progress(0.05 + 0.03 * f, "잔향 걷어 내는 중 (잔향 제거 모델)"))
+    except Exception as e:  # 모델이 깨졌거나 메모리가 모자라면 원래 소리로
+        warnings.append(f"보컬을 깨끗하게 하지 못해서 원래 소리로 읽었어요 ({e})")
+        return y
+    if out is y:
+        return y
+    return np.pad(out, (0, max(0, len(y) - len(out))))[:len(y)]
 
 
 def _breath_track(y, sr, breaths, gain):
