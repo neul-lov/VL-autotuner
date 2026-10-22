@@ -26,7 +26,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from tetotune import features, game, notes, pitch  # noqa: E402
+from tetotune import align_fa, features, game, notes, oupitch, pitch  # noqa: E402
 from tetotune import refine as refine_mod  # noqa: E402
 from tetotune import tune as tune_mod  # noqa: E402
 from tetotune.tune import Options, tune  # noqa: E402
@@ -36,14 +36,28 @@ class Cfg:
     refine = refine_mod.ROUNDS  # 렌더해서 고치기 횟수 (앱 기본처럼). 0 = 안 함
 
 
+# 이번에 고친 것마다 예전 값. 하나씩 끈 판과 비교하면 무엇이 얼마나 도왔는지 (또는 해쳤는지) 보인다
+OFF = {
+    "OpenUtau 그대로 PITD": [(tune_mod, "OU_EXACT", False), (oupitch, "PORTA_MS", 0.0), (oupitch, "GAP_RAMP_MS", 0.0)],
+    "가사 맞추기 모델": [(align_fa, "USE_FA", False)],
+    "GAME 경계 증거": [(notes, "GAME_EVIDENCE", False), (notes, "GAME_MERGE", 0.0)],
+    "GAME 모음 시작 그대로": [(notes, "VOWEL_ONSET_GAME", True)],
+    "っ · + 고침": [(notes, "CLOSURE", False), (notes, "PLUS_FIX", False)],
+    "GAME 음 높이 고침": [(notes, "TONE_FROM_F0", False)],
+    "잔떨림 · 바로잡기 문턱": [(tune_mod, "JITTER_HZ", 0.0), (tune_mod, "CORRECT_GATE", 0.0)],
+    "다듬기 한도": [(refine_mod, "PITCH_FIX", "old"), (refine_mod, "DYN_TOTAL", 0.0), (refine_mod, "DYN_VOICED", False)],
+    "숨 자리": [(tune_mod, "BREATH_ROOM", False)],
+}
+FUSION = [(None, "pitch_method", "fusion")]
+
+
 def variants():
     """이름 → [(모듈, 이름, 값)]. 첫 번째가 지금 기본값. (None, 옵션 이름, 값)은 조교 설정을 바꾼다."""
-    pr4 = [(tune_mod, "OCTAVE_FIX", False), (tune_mod, "GAP_NOTE", 0.0)]  # main (PR #4)
-    return {
-        "새 기본": [],
-        "PR4 기본": pr4,
-        "다듬기 없음": [(Cfg, "refine", 0)],
-    }
+    out = {"새 기본": FUSION, "PR6 기본": [p for v in OFF.values() for p in v], "− 음 높이 합치기 (Harvest)": []}
+    for k, v in OFF.items():
+        out[f"− {k}"] = FUSION + v
+    out["다듬기 없음"] = FUSION + [(Cfg, "refine", 0)]
+    return out
 
 
 OPTS = {"transpose": "0", "pitch_method": "harvest"}  # 방식마다 (None, 옵션 이름, 값)으로 바꾼다
@@ -98,13 +112,35 @@ def patched(patches):
     return Ctx()
 
 
+FA_LOG = []  # 가사 맞추기 모델이 프레이즈마다 남긴 기록 (확신 · 맞춤 여부 · 옮긴 거리), 세트마다 요약해서 찍는다
+USED = set()
+
+
 def run_tune(wav, lyrics_text, out):
     res = tune(wav, out, lyrics_text, options=Options(**OPTS), title="t")
+    FA_LOG.extend(align_fa.LAST)
+    if res.pitch_method not in USED:
+        USED.add(res.pitch_method)
+        print(f"  쓴 방법: {res.pitch_method}", flush=True)
     if not res.pitch_method.startswith(OPTS["pitch_method"]) or (notes.USE_GAME and "+game" not in res.pitch_method):
         raise RuntimeError(f"고른 방법을 쓰지 못했어요 ({res.pitch_method}, {res.warnings})")
     if not notes.USE_GAME and "+game" in res.pitch_method:
         raise RuntimeError("GAME을 껐는데 썼어요")
     return json.loads((Path(out) / "preview.json").read_text())
+
+
+def fa_summary(label):
+    """가사 맞추기 모델 기록 요약을 찍고 비운다 (확신 문턱 MIN_CONF을 정할 때 본다)."""
+    rows = [r for r in FA_LOG if "conf" in r]
+    errs = [r["error"] for r in FA_LOG if "error" in r]
+    FA_LOG.clear()
+    if not rows and not errs:
+        return
+    conf = np.array([r["conf"] for r in rows]) if rows else np.array([np.nan])
+    moved = [r["moved_ms"] for r in rows if r.get("moved_ms") is not None]
+    print(f"  가사 맞추기 {label}: 프레이즈 {len(rows)}개 중 {sum(r['placed'] for r in rows)}개 맞춤, "
+          f"확신 10/50/90% {np.nanpercentile(conf, 10):.3f}/{np.nanpercentile(conf, 50):.3f}/{np.nanpercentile(conf, 90):.3f}, "
+          f"옮긴 거리 중앙 {np.median(moved) if moved else float('nan'):.0f}ms, 오류 {len(errs)} {errs[:2]}", flush=True)
 
 
 # ---------------------------------------------------------------- 테토 정답 노래
@@ -280,11 +316,13 @@ def score_csd(prev, rows):
     est = [x for x in prev["notes"] if x[3] != "+"]
     sm = difflib.SequenceMatcher(None, [r[3] for r in truth], [x[3] for x in est], autojunk=False)
     pairs = [(i + k, j + k) for i, j, n in sm.get_matching_blocks() for k in range(n)]
-    err = {"v": [], "o": []}
+    err = {"v": [], "o": [], "a": []}
     tone = 0
     for i, j in pairs:
         e = (est[j][0] - truth[i][0]) * 1000
         err["v" if notes._voiced_onset(truth[i][3]) else "o"].append(e)
+        if (ord(truth[i][3]) - 0xAC00) // 588 == 11:  # 첫소리 ㅇ: 정답 시작이 곧 모음 시작
+            err["a"].append(e)
         tone += est[j][2] - prev["shift"] == truth[i][2]
     ref_iv = np.array([[r[0], r[1]] for r in rows]).reshape(-1, 2)
     ref_hz = pitch.midi_to_hz(np.array([r[2] for r in rows], dtype=float))
@@ -299,7 +337,9 @@ def score_csd(prev, rows):
     est_iv = np.array([[x[0], x[1]] for x in merged]).reshape(-1, 2)
     est_hz = pitch.midi_to_hz(np.array([x[2] - prev["shift"] for x in merged], dtype=float))
     conp = mir_eval.transcription.precision_recall_f1_overlap(ref_iv, ref_hz, est_iv, est_hz, offset_ratio=None)[2]
-    return {"n": len(truth), "placed": len(pairs), "tone": tone, "err_v": err["v"], "err_o": err["o"], "conp": conp}
+    n_a = sum((ord(r[3]) - 0xAC00) // 588 == 11 for r in truth)
+    return {"n": len(truth), "placed": len(pairs), "tone": tone, "err_v": err["v"], "err_o": err["o"], "err_a": err["a"],
+            "n_a": n_a, "conp": conp}
 
 
 def eval_csd(songs, patches, keep=None):
@@ -316,11 +356,51 @@ def eval_csd(songs, patches, keep=None):
     ev = [e for r in res for e in r["err_v"]]
     eo = [e for r in res for e in r["err_o"]]
     a = np.abs(np.array(errs)) if errs else np.array([np.nan])
+    ea = np.array([e for r in res for e in r["err_a"]])
     return {"c_n": n, "c_placed": sum(r["placed"] for r in res) / max(1, n),
             "c_hit50": float(np.sum(a <= 50) / max(1, n)), "c_hit100": float(np.sum(a <= 100) / max(1, n)),
             "c_bias_v": float(np.median(ev)) if ev else float("nan"), "c_bias_o": float(np.median(eo)) if eo else float("nan"),
             "c_abs90": float(np.percentile(a, 90)), "c_tone": sum(r["tone"] for r in res) / max(1, n),
-            "c_conp": float(np.mean([r["conp"] for r in res]))}
+            "c_conp": float(np.mean([r["conp"] for r in res])),
+            "c_vow50": float(np.sum(np.abs(ea) <= 50) / max(1, sum(r["n_a"] for r in res))),
+            "c_vow_med": float(np.median(np.abs(ea))) if len(ea) else float("nan")}
+
+
+def fa_check(csd, lines=3):
+    """가사 맞추기 모델만 CSD 첫 노래 몇 줄에 돌려서 음절마다 정답 시작 · 모델 음절 시작 · 모음 시작을 찍는다 (ms)."""
+    from tetotune import audio
+
+    folder = align_fa.model_dir()
+    if not csd or folder is None:
+        print("가사 맞추기 모델 없음", flush=True)
+        return
+    al = align_fa.Aligner(folder)
+    print(f"가사 맞추기 모델: {folder}, 음소 {len(al.ids)}개, 사전 {len(al.dict)}개, 앞붙임 {al.prefix!r}, "
+          f"{al.sr}Hz / {al.hop}", flush=True)
+    name, wav, rows = csd[0]
+    y, sr = audio.load(wav)
+    groups, cur = [], []
+    for r in rows:
+        if cur and r[0] - cur[-1][1] > 0.25:
+            groups.append(cur)
+            cur = []
+        cur.append(r)
+    groups.append(cur)
+    errs = []
+    for g in groups[:lines]:
+        syl = [r for r in g if r[3] != "+"]
+        a, b = max(0.0, g[0][0] - 0.4), g[-1][1] + 0.3
+        times, conf = al.align(y[int(a * sr):int(b * sr)], sr, [r[3] for r in syl])
+        if times is None:
+            print(f"  {name} {''.join(r[3] for r in syl)}: 맞추지 못함 (확신 {conf:.3f})", flush=True)
+            continue
+        cells = []
+        for r, (ts, tv, _) in zip(syl, times):
+            cells.append(f"{r[3]} {r[0] * 1000:.0f}/{(a + ts) * 1000:.0f}/{(a + tv) * 1000:.0f}")
+            errs.append((a + ts - r[0]) * 1000)
+        print(f"  {name} 확신 {conf:.3f}: " + ", ".join(cells), flush=True)
+    if errs:
+        print(f"  음절 시작 오차 (모델 − 정답) 중앙 {np.median(errs):+.0f}ms, 절댓값 중앙 {np.median(np.abs(errs)):.0f}ms", flush=True)
 
 
 # ---------------------------------------------------------------- 렌더
@@ -428,6 +508,7 @@ def main():
     for name, wav, rows in csd[:2]:
         print(f"CSD {name}: 음표 {len(rows)}개, 음절 {sum(r[3] != '+' for r in rows)}개, 가사 줄 {len(csd_lyrics(rows).splitlines())}줄, "
               f"처음: {rows[:4]}", flush=True)
+    fa_check(csd)
     vs = variants()
     if args.only:
         vs = {k: v for k, v in vs.items() if k in args.only.split(",")}
@@ -444,18 +525,23 @@ def main():
     for name, patches in vs.items():
         row = {}
         try:
+            FA_LOG.clear()
             if refs:
                 row.update(eval_refs(refs, patches))
+                fa_summary(f"{name} 테토 정답")
             if krefs:
                 row.update({"k" + k: v for k, v in eval_refs(krefs, patches).items()})
+                fa_summary(f"{name} 한글 정답")
             if songs:
                 row.update(eval_vocadito(songs, patches))
             if sep:
                 row.update({"s" + k: v for k, v in eval_vocadito([(k, w, f0, nts) for k, w, f0, nts, _ in sep], patches).items()})
             if csd:
                 row.update(eval_csd(csd, patches))
+                fa_summary(f"{name} CSD")
             if csd_sep:
                 row.update({"s" + k: v for k, v in eval_csd([(n, w, r) for n, w, r, _ in csd_sep], patches).items()})
+                fa_summary(f"{name} 분리 CSD")
         except RuntimeError as e:
             print(name, "건너뜀:", e, flush=True)
             continue
@@ -503,14 +589,17 @@ def print_tables(results):
         print(f"| {name} | {ref_cell(r)} | {ref_cell(r, 'k')} | {hum_cell(r)} | {hum_cell(r, 's')} |")
     def csd_cell(r, p=""):
         if p + "c_hit50" not in r:
-            return " | | | | "
-        return (f"{r[p + 'c_hit50']:.3f} / {r[p + 'c_hit100']:.3f} | {r[p + 'c_bias_v']:+.0f} / {r[p + 'c_bias_o']:+.0f} | "
+            return " | | | | | | "
+        return (f"{r[p + 'c_placed']:.3f} | {r[p + 'c_hit50']:.3f} / {r[p + 'c_hit100']:.3f} | "
+                f"{r.get(p + 'c_vow50', float('nan')):.3f} / {r.get(p + 'c_vow_med', float('nan')):.0f} | "
+                f"{r[p + 'c_bias_v']:+.0f} / {r[p + 'c_bias_o']:+.0f} | "
                 f"{r[p + 'c_abs90']:.0f} | {r[p + 'c_tone']:.3f} | {r[p + 'c_conp']:.3f}")
     if any("c_hit50" in r for r in rows.values()):
         print()
-        print("| 방식 | CSD 음절 시작 50/100ms 안 | 치우침 ms (울리는 자음 / 그 밖) | 시작 오차 90% ms | 음절 음 높이 | COnP | "
-              "분리 CSD 50/100ms 안 | 치우침 | 90% | 음 높이 | COnP |")
-        print("|---|---|---|---|---|---|---|---|---|---|---|")
+        print("| 방식 | CSD 음절 들어감 | 음절 시작 50/100ms 안 | 모음 첫 음절 50ms 안 / 오차 중앙 ms | "
+              "치우침 ms (울리는 자음 / 그 밖) | 시작 오차 90% ms | 음절 음 높이 | COnP | "
+              "분리 CSD 들어감 | 50/100ms 안 | 모음 첫 음절 | 치우침 | 90% | 음 높이 | COnP |")
+        print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for name, r in rows.items():
             print(f"| {name} | {csd_cell(r)} | {csd_cell(r, 's')} |")
     labels = {"ref": "테토 정답", "kref": "한글 정답", "vocadito": "사람 노래", "sep": "분리한 보컬", "csd": "CSD (가사)",

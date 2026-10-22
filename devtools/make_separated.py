@@ -4,7 +4,9 @@ StemMixer로 분리한 보컬처럼 반주가 조금 새고, 반주가 큰 곳�
 
 사용: python make_separated.py <vocadito 폴더> <결과 폴더> 3,10,14,22
       python make_separated.py --csd <CSD 폴더> <결과 폴더> 12   (CSD 한국 동요 12곡, accuracy.py와 같은 곡)
-결과 폴더/sep_<번호 또는 이름>.wav (Demucs 보컬, 44.1kHz 모노)
+결과 폴더/sep_<번호 또는 이름>.wav (Demucs 보컬, 44.1kHz 모노). 다시 분리 · 잔향 제거 시험용으로 같은 크기로 맞춘
+mix_<…>.wav (섞은 곡), wet_<…>.wav (잔향 입힌 보컬 = 분리 정답), dry_<…>.wav (원래 보컬 = 잔향 제거 정답),
+bk_<…>.wav (Demucs 반주 = 섞은 곡 − Demucs 보컬, StemMixer가 주는 반주처럼)도 쓴다.
 """
 import sys
 from pathlib import Path
@@ -137,12 +139,16 @@ def main():
         acc = np.pad(acc, (0, max(0, len(v) - len(acc))))[:len(v)]  # 초 → 샘플 반올림으로 한 샘플 모자랄 때가 있다
         acc *= np.sqrt(np.mean(v ** 2)) / max(1e-9, np.sqrt(np.mean(acc ** 2)))  # 보컬 : 반주 = 0dB
         mix = v + acc
-        mix /= max(1.0, np.abs(mix).max() / 0.95)
+        g = 1 / max(1.0, np.abs(mix).max() / 0.95)
+        mix *= g
         x = torch.tensor(np.stack([mix, mix]), dtype=torch.float32)[None]
         with torch.no_grad():
             s = apply_model(model, x, device="cpu", split=True, overlap=0.25, progress=False)[0]
         voc = s[model.sources.index("vocals")].mean(0).numpy().astype(np.float64)
         audio.write(out / f"sep_{k}.wav", voc, SR)
+        n = min(len(voc), len(mix))
+        for name, x in (("mix", mix), ("wet", v * g), ("dry", y[:len(v)] * g), ("bk", mix[:n] - voc[:n])):
+            audio.write(out / f"{name}_{k}.wav", x, SR)
         leak = 10 * np.log10(np.mean((voc[: len(v)] - v[: len(voc)]) ** 2) / np.mean(v ** 2))
         print(f"{k}: {len(v) / SR:.1f}s, 분리 보컬 오차 {leak:.1f}dB (원래 보컬 대비)", flush=True)
 
