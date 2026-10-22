@@ -133,6 +133,9 @@ def _why_silent(log):
     if info.get("found") == "False" or singer == "null":
         return f"OpenUtau가 가수를 찾지 못했어요 ({singer}). OpenUtau를 한 번 열어 가수 목록에 테토가 있는지 확인해 주세요"
     total, errors = int(info.get("phonemes", "0") or 0), int(info.get("phoneme_errors", "0") or 0)
+    if info.get("exported") == "0":
+        return (f"OpenUtau가 렌더는 끝냈다는데 내보낸 파일이 없어요 (OpenUtau {info.get('openutau_core', '?')}, "
+                f"렌더러 {info.get('renderer', '?')}). OpenUtau에서 project.ustx를 열어 재생 · 내보내기가 되는지 확인해 주세요")
     if total == 0 or errors >= max(1, total // 2):
         return (f"가사를 테토 소리로 바꾸지 못했어요 (음소 {total}개 중 {errors}개 오류, 음소 변환기 {info.get('phonemizer', '?')}). "
                 "고른 가수 · 가사 언어가 맞는지 확인해 주세요")
@@ -176,8 +179,9 @@ def render(ustx, out_dir, name=TRACK, tries=3):
             _last_error = None
             return files[0]
         silent = r.returncode == 0
-        print(f"OpenUtau 렌더 {attempt + 1}/{tries}: " + ("소리 없는 파일" if silent else f"실패 (코드 {r.returncode})") +
-              " / " + " / ".join(log.strip().splitlines()[-5:]), flush=True)
+        what = ("내보낸 파일 없음" if not files else "소리 없는 파일") if silent else f"실패 (코드 {r.returncode})"
+        lines = [ln for ln in log.strip().splitlines() if "not on main thread" not in ln]
+        print(f"OpenUtau 렌더 {attempt + 1}/{tries}: {what} / " + " / ".join(lines[-12:]), flush=True)
         if attempt == 0 and r.returncode == 0:  # 소리 없는 렌더: (AutoTuner 전용) 캐시를 비우고 다시
             shutil.rmtree(cache_dir(), ignore_errors=True)
     _last_error = log.strip().splitlines()[-3:] if log else ["렌더 기록 없음"]

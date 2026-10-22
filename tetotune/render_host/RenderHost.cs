@@ -86,6 +86,7 @@ static class RenderHost {
     static int Run(string ustx, string outWav) {
         System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
         core = Assembly.Load("OpenUtau.Core");
+        Console.WriteLine("openutau_core=" + core.GetName().Version);
         try {  // OpenUtau 기록은 경고만 (없으면 그냥 둔다)
             var serilog = Assembly.Load("Serilog");
             var config = Activator.CreateInstance(serilog.GetType("Serilog.LoggerConfiguration"));
@@ -153,6 +154,19 @@ static class RenderHost {
         while (queue.TryTake(out var rest)) rest();
         if (!task.IsCompleted) throw new Exception("렌더가 끝나지 않았어요");
         if (task.IsFaulted) throw task.Exception.GetBaseException();
+        try {  // 무엇을 내보냈는지 (트랙이 음소거됐거나 렌더러가 없으면 파일이 안 생긴다)
+            int i = 0;
+            foreach (var t in tracks) {
+                object rs = null;
+                try { rs = Get(Get(t, "RendererSettings"), "renderer"); } catch (Exception) { }
+                Console.WriteLine("track" + i++ + " muted=" + Get(t, "Muted") + " renderer=" + (rs ?? "null"));
+            }
+            var dir = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(outWav));
+            var files = System.IO.Directory.GetFiles(dir, "*.wav");
+            Console.WriteLine("exported=" + files.Length + " " + string.Join(" | ", files.Select(f => System.IO.Path.GetFileName(f) + ":" + new System.IO.FileInfo(f).Length)));
+        } catch (Exception e) {
+            Console.WriteLine("exported=? " + e.Message);
+        }
         Console.WriteLine("rendered");
         return 0;
     }
