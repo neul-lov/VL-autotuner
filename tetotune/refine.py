@@ -131,16 +131,25 @@ def write_curves(ustx, z):
 
 
 def _render_checked(render, ustx, tries=2):
-    """render를 부르고 소리가 있는 wav면 (경로, 읽은 (y, sr)) (재는 데 다시 읽지 않게), 두 번 다 비었으면 (None, None)."""
+    """render를 부르고 소리가 있는 wav면 (경로, 읽은 (y, sr)) (재는 데 다시 읽지 않게), 두 번 다 비었으면 (None, None).
+    못 한 까닭(렌더 오류)은 last_render_error에 남긴다 (앱 경고에 보여 주려고)."""
+    global last_render_error
+    last_render_error = None
     for _ in range(tries):
         try:
             wav = Path(render(ustx))
             y, sr = audio.load(wav)
-        except Exception:
+        except Exception as e:
+            last_render_error = str(e)
+            print(f"테토로 불러 보기 실패: {e}", flush=True)
             continue
         if len(y) > sr * 0.5 and float(np.abs(y).max()) > 1e-3:
             return wav, (y, sr)
+        last_render_error = "렌더가 비었어요"
     return None, None
+
+
+last_render_error = None
 
 
 def refine(folder, render, rounds=None, progress=lambda p, s: None):
@@ -159,7 +168,7 @@ def refine(folder, render, rounds=None, progress=lambda p, s: None):
             progress(r / (rounds + 1), f"테토로 불러 보는 중 ({r + 1}/{rounds + 1})")
             wav, loaded = _render_checked(render, ustx)
             if wav is None:  # 렌더가 비었으면 (OpenUtau가 가끔 소리 없는 파일을 낸다) 여기까지 고른 것으로
-                history.append({"round": r, "error": "렌더가 비었어요"})
+                history.append({"round": r, "error": last_render_error or "렌더가 비었어요"})
                 break
             cents, voiced, db = measure(wav, n, loaded)
             s, info = score(z, cents, voiced, db)
@@ -175,7 +184,7 @@ def refine(folder, render, rounds=None, progress=lambda p, s: None):
             z = step(z, cents, voiced, db)
             write_curves(ustx, z)
         if best is None:
-            raise RuntimeError("테토로 불러 보지 못했어요 (렌더가 비었어요)")
+            raise RuntimeError(f"테토로 불러 보지 못했어요 ({last_render_error or '렌더가 비었어요'})")
         shutil.copy(work / "best.ustx", ustx)
         b = np.load(work / "best.npz")
         np.savez_compressed(folder / "curves.npz", **{**z, "pitd": b["pitd"], "dyn": b["dyn"]})

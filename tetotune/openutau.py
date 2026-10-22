@@ -123,21 +123,31 @@ def cache_dir():
     return support_dir() / "cache"
 
 
+def _env(own_cache=True):
+    env = dict(os.environ)
+    if own_cache:
+        env["TETOTUNE_OU_CACHE"] = str(cache_dir())
+    else:
+        env.pop("TETOTUNE_OU_CACHE", None)
+    return env
+
+
 def render(ustx, out_dir, name=TRACK, tries=3):
     """ustx → 그 트랙(이름, 기본은 조교한 테토 트랙)의 wav 경로.
-    OpenUtau가 가끔 소리 없는 파일을 내서, 그러면 캐시를 비우고 두 번까지 다시 한다."""
+    OpenUtau가 가끔 소리 없는 파일을 내서, 그러면 (AutoTuner 전용) 캐시를 비우고 다시 하고,
+    마지막 번에는 전용 캐시 없이 OpenUtau가 원래 쓰는 캐시로 한다 (그 캐시는 지우지 않는다)."""
     global _last_error
     host = prepare()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    log = ""
+    log, silent = "", False
     for attempt in range(tries):
         for f in out_dir.glob("render_*.wav"):
             f.unlink()
         try:
             r = subprocess.run(["./OpenUtau", "RenderHost.dll", str(Path(ustx).resolve()), str((out_dir / "render.wav").resolve())],
                                cwd=host, capture_output=True, text=True, timeout=TIMEOUT,
-                               env={**os.environ, "TETOTUNE_OU_CACHE": str(cache_dir())})
+                               env=_env(own_cache=attempt < tries - 1 or tries == 1))
             log = (r.stdout or "") + (r.stderr or "")
         except subprocess.TimeoutExpired:
             log = "렌더가 너무 오래 걸려요"
@@ -148,7 +158,12 @@ def render(ustx, out_dir, name=TRACK, tries=3):
         if r.returncode == 0 and files and _has_sound(files[0]):
             _last_error = None
             return files[0]
+        silent = r.returncode == 0
+        print(f"OpenUtau 렌더 {attempt + 1}/{tries}: " + ("소리 없는 파일" if silent else f"실패 (코드 {r.returncode})") +
+              " / " + " / ".join(log.strip().splitlines()[-5:]), flush=True)
         if attempt == 0 and r.returncode == 0:  # 소리 없는 렌더: (AutoTuner 전용) 캐시를 비우고 다시
             shutil.rmtree(cache_dir(), ignore_errors=True)
     _last_error = log.strip().splitlines()[-3:] if log else ["렌더 기록 없음"]
+    if silent:
+        _last_error = ["OpenUtau가 소리 없는 파일을 냈어요 (OpenUtau에서 이 가수로 소리가 나는지 확인해 주세요)"] + _last_error[-1:]
     raise RuntimeError("OpenUtau로 불러 보지 못했어요: " + " / ".join(_last_error))

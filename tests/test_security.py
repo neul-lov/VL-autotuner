@@ -215,3 +215,12 @@ def test_atomic_write_keeps_old_file_on_error(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         edit.write_text_atomic(p, "new")
     assert p.read_text() == "old" and [f.name for f in tmp_path.iterdir()] == ["preview.json"]
+
+
+def test_render_error_is_reported(tmp_path):
+    from tetotune import refine
+
+    def broken(ustx):
+        raise RuntimeError("OpenUtau로 불러 보지 못했어요: 가수를 찾지 못함")
+    assert refine._render_checked(broken, tmp_path / "p.ustx") == (None, None)
+    assert "가수를 찾지 못함" in refine.last_render_error
