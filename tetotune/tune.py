@@ -21,9 +21,12 @@ TICKS = 480
 INTERVAL = 5  # OpenUtau 곡선 간격 (틱)
 DYN_WIN = 0.02  # 초. 크기 윤곽을 잡는 최댓값 · 다듬기 창 (길면 크기가 음 시작보다 먼저 커진다)
 DYN_GAIN = 1 / 0.7  # 셈여림 0.7(앱 기본값)에서 원래 보컬 크기 차이를 그대로: 실제 테토 렌더 비교에서 이쪽이 더 닮았다
+BREATH_ROOM = True  # 숨 음표는 다음 음표의 자음(선행발성)이 들어갈 자리를 비우고 끝낸다 (전에는 자음이 잘렸다)
 LEGATO_GAP = 0.3  # 초. 음표 사이 이보다 짧은 틈은 앞 음표를 늘여 메운다 (자음 · 성대 닫힘에서 소리가 뚝 끊기지 않게). 0 = 끔
 OCTAVE_FIX = True  # 음표에서도 앞뒤 음 높이에서도 한 옥타브쯤 떨어지게 읽은 조각을 접는다 (_fold_octaves)
 GAP_NOTE = 0.05  # 초. 음표 안 빈 곳이 이보다 길면 가운데는 음표 음으로 (_fill_gaps). 0 = 앞뒤를 바로 잇기만
+JITTER_HZ = 12.0  # 음 가운데 PITD에서 이보다 빠른 떨림을 뺀다 (Harvest 프레임 잡음이 거친 소리로 났다). 0 = 끔
+CORRECT_GATE = 40.0  # 센트. 음표와 이만큼 넘게 다르면 바로잡는 힘을 줄여 2배에서 0 (틀린 음표로 끌고 가지 않게). 0 = 늘 같게
 OU_EXACT = True  # PITD를 OpenUtau가 음표로 만드는 음 높이(oupitch.py) 그대로를 기준으로. False = 예전 (초 단위 계단: 경계마다 튐)
 
 
@@ -39,7 +42,7 @@ class Options:
     tension: float = 0.4         # 힘 준 소리 따라가기
     breaths: str = "auto"        # auto (음원 숨소리, 없으면 원래 숨) · voicebank · original · off
     breath_volume: float = 1.0
-    pitch_method: str = "auto"   # auto (RMVPE 있으면) · harvest · rmvpe
+    pitch_method: str = "auto"   # auto (로컬 AI 둘 + Harvest 합치기, 모델이 없으면 Harvest) · fusion · harvest · rmvpe
     refine: str = "auto"         # auto (OpenUtau가 있으면 테토로 불러 보고 곡선을 다듬는다) · off
     singer: str = ""             # 음원 폴더 경로 (비우면 테토를 찾는다)
     default_lyric: str = "ら"
@@ -187,7 +190,8 @@ def _note_mask(notes, n, lead=0.0, tail=0.0):
 
 def _pitd(target, base, notes, o):
     """PITD (센트) = 원래 음 높이 − 음표 계단. 음 가운데(앞뒤 80ms 또는 25% 뺀 곳)에서만 음정 틀림을 바로잡는다
-    → 미끄러짐 · 꺾기는 그대로."""
+    → 미끄러짐 · 꺾기는 그대로. 음 가운데의 JITTER_HZ보다 빠른 떨림은 음 높이 읽기 잡음이라 뺀다 (비브라토는 5~7Hz).
+    CORRECT_GATE면 음표와 많이 다른 곳(GAME 음표가 틀렸을 수 있다)은 바로잡지 않는다: 예전에는 틀린 음표 쪽으로 30% 끌려갔다."""
     n = len(target)
     dev = target - base
     lp = _lowpass(dev, 3.0)
@@ -197,7 +201,12 @@ def _pitd(target, base, notes, o):
         edge = min(0.08, 0.25 * (x.end - x.start))
         steady[int((x.start + edge) / HOP):int((x.end - edge) / HOP)] = 1.0
     steady = _smooth(steady, 0.06)
-    return o.pitch_follow * (lp * (1 - o.correct * steady) + o.vibrato * fine)
+    if JITTER_HZ > 0:
+        fine = steady * _lowpass(fine, JITTER_HZ) + (1 - steady) * fine
+    pull = o.correct * steady
+    if CORRECT_GATE > 0:
+        pull = pull * np.clip(1 - (np.abs(lp) - CORRECT_GATE) / CORRECT_GATE, 0, 1)
+    return o.pitch_follow * (lp * (1 - pull) + o.vibrato * fine)
 
 
 def _fold_octaves(target, mask, notes, ctx=1.0):
@@ -381,11 +390,13 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
     breath_notes = []
     if mode == "voicebank":
         sing_db = float(np.median(db[voiced]))
+        # 틈이 다음 음표의 선행발성보다 짧으면 OpenUtau가 선행발성을 틈 길이로 줄여서 자음(ㅅ · ㅋ · つ)이 잘린다
+        room = ((info.get("preutter_ms") or 120.0) + 10) / 1000 if BREATH_ROOM else 0.0
         for a, b, bdb, inhale in breaths:
             nxt = next((x for x in notes if x.start >= b - 0.01), None)
             prv = next((x for x in reversed(notes) if x.end <= a + 0.01), None)
             a2 = max(a, prv.end if prv else 0.0)
-            b2 = min(b, nxt.start if nxt else b)
+            b2 = min(b, nxt.start - room if nxt else b)
             if b2 - a2 < 0.08:
                 continue
             tone = (nxt or prv or notes[0]).tone

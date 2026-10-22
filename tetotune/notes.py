@@ -22,6 +22,7 @@ VOWEL_ONSET_GAME = False  # GAME 음표에도 (GAME은 이미 모음 시작에 �
 GAME_EVIDENCE = True  # GAME이 나눈 곳마다 자음 틈 · 크기 꺼짐 · 소리 빛깔 바뀜으로 새 음절일 가능성을 따로 매긴다
 GAME_MERGE = 0.09  # 초. GAME 음표가 이보다 짧으면 이웃에 합친다 (미끄러짐 · 비브라토 조각). 0 = 안 함
 CLOSURE = True  # っ는 음절 시작 자리를 차지하지 않고 앞 음절 끝의 짧은 음표로 (다음 자음 앞 막힘)
+TONE_FROM_F0 = True  # GAME 음표 높이가 그 음표 가운데에서 읽은 음 높이와 1~2반음 다르면 읽은 쪽으로 (읽은 음이 고를 때만)
 PLUS_FIX = True  # 앞 음표에 붙지 않은 "+"(소리 없이 남는다)는 앞 음표를 늘이거나 앞 모음으로 부른다
 
 
@@ -197,11 +198,34 @@ def from_game(game_notes, midi, voiced, db=None, novelty=None):
         if out and gap < 0:
             out[-1].end = s
         out.append(Note(s, e, int(np.round(p - offset)), strength=10.0 if gap > REST_GAP else 5.0))
+    if TONE_FROM_F0:
+        _tone_from_f0(out, midi, voiced, offset)
     if GAME_EVIDENCE and db is not None and out:
         _game_evidence(out, voiced, db, novelty)
         if GAME_MERGE > 0:
             out = _merge_game(out, GAME_MERGE)
     return out, offset
+
+
+def _tone_from_f0(out, midi, voiced, offset, lo=0.6, hi=2.5):
+    """음표 가운데 60%에서 읽은 음 높이가 고르고(70% 넘게 소리 남, 사분위 폭 70센트 안) GAME 높이와 lo~hi반음 다르면
+    읽은 음 높이로. 한 옥타브쯤 다른 것은 음 높이 읽기가 틀렸을 때가 많아서 두지 않는다."""
+    n = len(midi)
+    for x in out:
+        a, b = int(x.start / HOP), int(x.end / HOP)
+        k = (b - a) // 5
+        a, b = max(0, a + k), min(n, b - k)
+        if b - a < 10:
+            continue
+        v = voiced[a:b] & np.isfinite(midi[a:b])
+        if v.mean() < 0.7:
+            continue
+        m = midi[a:b][v] - offset
+        q1, med, q3 = np.percentile(m, [25, 50, 75])
+        if q3 - q1 > 0.7:
+            continue
+        if lo < abs(med - x.tone) < hi:
+            x.tone = int(np.round(med))
 
 
 def _nov_z(novelty, voiced):

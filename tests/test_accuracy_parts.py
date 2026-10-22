@@ -28,6 +28,8 @@ def test_shift_to_vowels_moves_start_past_quiet_nasal():
 def test_from_game_phrases_and_overlap():
     voiced = np.ones(400, dtype=bool)
     midi = np.full(400, 60.2)
+    midi[int(0.5 / HOP):] = 62.2
+    midi[int(1.5 / HOP):] = 64.2
     out, off = nt.from_game([(0.0, 0.5, 60.1), (0.48, 1.0, 62.0), (1.5, 2.0, 64.0)], midi, voiced)
     assert [x.tone for x in out] == [60, 62, 64]
     assert out[0].end == out[1].start == 0.48  # 겹치면 앞 음표를 자른다
@@ -65,7 +67,10 @@ def test_game_melisma_keeps_syllables_on_consonants():
     tones = [60, 62, 64, 62, 60, 62, 64, 60]
     # し · て · る 앞에 자음 틈 (ㅅ · ㅌ · ㄹ은 짧게 소리가 꺼진다)
     voiced, db = _sung([(0.0, 2.8)], n, gaps=[(1.17, 1.2), (1.57, 1.6), (2.37, 2.4)])
-    midi = np.where(voiced, 60.0, np.nan)
+    midi = np.full(n, np.nan)
+    for a, b, t in zip(bounds, bounds[1:], tones):
+        midi[int(a / HOP):int(b / HOP)] = t
+    midi = np.where(voiced, midi, np.nan)
     gn = [(a, b, float(t)) for a, b, t in zip(bounds, bounds[1:], tones)]
     out, _ = nt.from_game(gn, midi, voiced, db, None)
     out = nt.align(out, [["あ", "い", "し", "て", "る"]])
@@ -99,3 +104,14 @@ def test_plus_after_gap_is_not_silent():
     m = nt.Note(1.5, 2.0, 60, "+")
     nt.fix_plus([k, m])
     assert m.lyric == "아"
+
+
+def test_game_tone_follows_steady_sung_pitch():
+    """GAME이 한 반음 틀리게 읽은 음표는 가운데에서 고르게 읽힌 음 높이로. 옥타브 차이 · 흔들리는 곳은 그대로."""
+    n = int(3.0 / HOP)
+    voiced = np.ones(n, dtype=bool)
+    midi = np.full(n, 62.0)
+    midi[int(1.0 / HOP):int(2.0 / HOP)] = 72.0  # 둘째 음: 옥타브 차이 (음 높이 읽기가 틀렸을 수 있다)
+    midi[int(2.0 / HOP):] = 60 + 3 * np.sin(np.arange(n - int(2.0 / HOP)) * HOP * 2 * np.pi * 2)  # 크게 흔들림
+    out, _ = nt.from_game([(0.0, 1.0, 61.0), (1.0, 2.0, 60.0), (2.0, 3.0, 61.0)], midi, voiced)
+    assert [x.tone for x in out] == [62, 60, 61]
