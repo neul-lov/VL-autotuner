@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import audio, confidence, features, lyrics as lyr, notes as nt, oupitch, pitch, voicebank
+from . import align_fa, audio, confidence, features, lyrics as lyr, notes as nt, oupitch, pitch, voicebank
 from .pitch import HOP
 
 TICKS = 480
@@ -352,6 +352,15 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
         notes = nt.align(notes, lines)
         if nt.VOWEL_ONSET and not notes_file and (nt.VOWEL_ONSET_GAME or "+game" not in used):
             notes = nt.shift_to_vowels(notes, db)
+        if align_fa.USE_FA and not notes_file:  # 가사 맞추기 모델: 음절마다 모음 시작을 소리에서 찾아 옮긴다
+            progress(0.55, "가사 자리 맞추는 중 (가사 맞추기 모델)")
+            try:
+                notes, fixed = align_fa.refine(notes, y, sr)
+            except Exception as e:  # 모델이 깨졌거나 onnxruntime이 맞지 않으면 원래 자리 그대로
+                fixed = 0
+                warnings.append(f"가사 맞추기 모델을 쓰지 못해서 원래 방법으로 가사를 넣었어요 ({e})")
+            if fixed:
+                used += "+fa"
         n_syl = sum(1 for line in lines for s in line if s != "+")  # ー · + (늘이기)는 음절이 아니다
         got = sum(1 for x in notes if x.lyric != "+")
         if got != n_syl:

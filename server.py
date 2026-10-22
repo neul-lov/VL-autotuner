@@ -18,7 +18,7 @@ from pathlib import Path
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import JSONResponse
 
-from tetotune import __version__, edit, f0models, game, openutau, pitch, refine, retune, stemmixer, voicebank
+from tetotune import __version__, align_fa, edit, f0models, game, openutau, pitch, refine, retune, stemmixer, voicebank
 from tetotune.tune import Options, tune
 
 # 설정 값마다 허용 범위 (숫자) 또는 고를 수 있는 값 (글자)
@@ -188,6 +188,11 @@ def _run(job_id, vocal, song, lyrics, notes, backing, opts):
                     game.ensure_model(lambda s: job.update(step=s, progress=0.01))
                 except Exception as e:
                     print(f"GAME 모델을 받지 못했어요: {e}", flush=True)
+                if (lyrics or "").strip():  # 가사 맞추기 모델 (HubertFA): 가사가 있을 때만, 처음 한 번 받는다
+                    try:
+                        align_fa.ensure_model(lambda s: job.update(step=s, progress=0.01))
+                    except Exception as e:
+                        print(f"가사 맞추기 모델을 받지 못했어요: {e}", flush=True)
             if opts.pitch_method in ("auto", "fusion"):  # 음 높이 읽기 모델 (RMVPE): 없으면 처음 한 번 받는다
                 try:
                     f0models.ensure_rmvpe(lambda s: job.update(step=s, progress=0.01))
