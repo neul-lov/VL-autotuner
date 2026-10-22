@@ -29,19 +29,32 @@ def library():
     return next((c for c in cands if c.is_dir()), None)
 
 
+def _inside(path, folder):
+    """path가 (링크를 따라가도) folder 안에 있는지."""
+    try:
+        return Path(path).resolve().is_relative_to(Path(folder).resolve())
+    except (OSError, ValueError):
+        return False
+
+
 def _track(folder, base):
+    """곡 폴더의 트랙 파일. base는 파일 이름만 ("../" · 절대 경로 · 숨김 이름은 받지 않는다: meta.json이 이상해도
+    곡 폴더 밖의 파일을 읽지 않게)."""
+    if not isinstance(base, str) or not base or base != Path(base).name or base.startswith(".") or "\\" in base:
+        return None
     for ext in (".flac", ".wav"):
         p = folder / f"{base}{ext}"
-        if p.exists():
+        if p.is_file() and _inside(p, folder):
             return p
     return None
 
 
 def _vocal(folder, meta):
-    user = (meta.get("replaced") or {}).get("vocals")
-    if user and user.get("use"):
+    replaced = meta.get("replaced")
+    user = replaced.get("vocals") if isinstance(replaced, dict) else None
+    if isinstance(user, dict) and user.get("use"):
         p = _track(folder / "user", "vocals")
-        if p:
+        if p and _inside(p, folder):
             return p
     return _track(folder, "vocals")
 
@@ -55,6 +68,8 @@ def songs():
         try:
             meta = json.loads(p.read_text())
         except (OSError, ValueError):
+            continue
+        if not isinstance(meta, dict):
             continue
         folder = p.parent
         vocal = _vocal(folder, meta)
@@ -97,10 +112,13 @@ def prepare(song_id, work):
     if folder is None:
         raise ValueError("StemMixer 곡을 찾지 못했어요")
     meta = json.loads((folder / "meta.json").read_text())
+    if not isinstance(meta, dict):
+        raise ValueError("StemMixer 곡 정보(meta.json)를 읽지 못했어요")
     vocal = _vocal(folder, meta)
     notes = folder / "midi" / "vocals.json"
     backing = None
-    others = [s for s in meta.get("stems") or [] if s != "vocals"]
+    stems = meta.get("stems")
+    others = [s for s in stems if s != "vocals"] if isinstance(stems, list) else []
     if others:
         mix = None
         for s in others:

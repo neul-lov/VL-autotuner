@@ -7,6 +7,7 @@
 바꾸기 전 상태는 되돌리기 기록(.history)에 남는다. OpenUtau가 있으면 그 구간을 테토로 불러 보고 다듬는다.
 """
 import json
+import os
 import shutil
 import tempfile
 from dataclasses import asdict, fields
@@ -95,8 +96,9 @@ def _splice_array(old, new, a, b, step, offset):
     return out
 
 
-def _splice_wav(path, new_path, a, b, offset):
-    """테토 미리 듣기 wav의 a~b초를 새 렌더로 (끝은 20ms 겹쳐 잇기)."""
+def _splice_wav(path, new_path, a, b, offset, out=None):
+    """테토 미리 듣기 wav의 a~b초를 새 렌더(새 렌더의 0초 = 곡의 offset초)로 (끝은 20ms 겹쳐 잇기) → out (없으면 path)에 쓴다.
+    a가 0보다 앞이거나 b가 wav 끝보다 뒤여도 (곡 첫 · 끝 음절) wav 안쪽만 바꾼다."""
     import soundfile as sf
 
     y, sr = sf.read(str(path), dtype="float32", always_2d=False)
@@ -107,9 +109,15 @@ def _splice_wav(path, new_path, a, b, offset):
         z = z.mean(axis=1)
     if sr2 != sr:
         z = audio.resample(z, sr2, sr)
-    i, j = int(a * sr), min(len(y), int(b * sr))
-    k0 = int((a - offset) * sr)
-    seg = z[max(0, k0):max(0, k0) + (j - i)]
+    i, j = max(0, int(a * sr)), min(len(y), int(b * sr))
+    if j <= i:
+        sf.write(str(out or path), y, sr, subtype="PCM_16")
+        return
+    k0 = i - int(round(offset * sr))  # 새 렌더에서 i에 해당하는 곳
+    seg = z[max(0, k0):max(0, k0 + (j - i))]
+    if k0 < 0:  # 새 렌더가 i보다 늦게 시작하면 앞을 조용히
+        seg = np.concatenate([np.zeros(min(-k0, j - i), np.float32), seg])
+    seg = seg[:j - i]
     if len(seg) < j - i:
         seg = np.pad(seg, (0, j - i - len(seg)))
     fade = min(int(0.02 * sr), (j - i) // 4)
@@ -118,7 +126,7 @@ def _splice_wav(path, new_path, a, b, offset):
         w[:fade] = np.linspace(0, 1, fade)
         w[-fade:] = np.linspace(1, 0, fade)
     y[i:j] = y[i:j] * (1 - w) + seg * w
-    sf.write(str(path), y, sr, subtype="PCM_16")
+    sf.write(str(out or path), y, sr, subtype="PCM_16")
 
 
 def retune(folder, start, end, options=None, lyrics_text=None, renote=False, progress=lambda p, s: None):
@@ -183,20 +191,38 @@ def retune(folder, start, end, options=None, lyrics_text=None, renote=False, pro
                 cur[c["abbr"]] = {"abbr": c["abbr"], "xs": [], "ys": []}
                 part.setdefault("curves", []).append(cur[c["abbr"]])
             _splice_curve(cur[c["abbr"]], c, lo, hi)
+        # 바꿀 것을 모두 결과 폴더 안의 임시 파일로 먼저 만들고, 되돌리기 기록(소리 포함)을 남긴 뒤 한 번에 바꿔 넣는다.
+        # 중간에 실패하면 기록으로 되돌려서 소리 · 음표 · 미리 보기가 서로 어긋나지 않게
+        prev_path = folder / "preview.json"
+        prev = json.loads(prev_path.read_text(encoding="utf-8"))
+        step_p, step_d = prev["hop"] * 2, prev["hop"] * 4
+        prev["pitch"] = _splice_array(prev["pitch"], new_prev["pitch"], a - EDGE, b + EDGE, step_p, off)
+        prev["dyn"] = _splice_array(prev["dyn"], new_prev["dyn"], a - EDGE, b + EDGE, step_d, off)
+        moved = [[round(f[0] + off, 3), round(f[1] + off, 3)] + f[2:] for f in new_prev.get("flags", [])]
+        prev["flags"] = sorted([f for f in prev.get("flags", []) if not (f[0] < b and f[1] > a)] +
+                               [f for f in moved if f[0] < b + EDGE and f[1] > a - EDGE], key=lambda f: f[0])
         spliced = (out / "teto_preview.wav").exists() and (folder / "teto_preview.wav").exists()
-        if spliced:
-            _splice_wav(folder / "teto_preview.wav", out / "teto_preview.wav", a - EDGE, b + EDGE, off)
-        edit.snapshot(folder)
-        p.save()
-    prev_path = folder / "preview.json"
-    prev = json.loads(prev_path.read_text(encoding="utf-8"))
-    step_p, step_d = prev["hop"] * 2, prev["hop"] * 4
-    prev["pitch"] = _splice_array(prev["pitch"], new_prev["pitch"], a - EDGE, b + EDGE, step_p, off)
-    prev["dyn"] = _splice_array(prev["dyn"], new_prev["dyn"], a - EDGE, b + EDGE, step_d, off)
-    moved = [[round(f[0] + off, 3), round(f[1] + off, 3)] + f[2:] for f in new_prev.get("flags", [])]
-    prev["flags"] = sorted([f for f in prev.get("flags", []) if not (f[0] < b and f[1] > a)] +
-                           [f for f in moved if f[0] < b + EDGE and f[1] > a - EDGE], key=lambda f: f[0])
-    prev_path.write_text(json.dumps(prev, ensure_ascii=False), encoding="utf-8")
+        staged = {}
+        try:
+            if spliced:
+                staged["teto_preview.wav"] = folder / ".retune_teto_preview.wav"
+                _splice_wav(folder / "teto_preview.wav", out / "teto_preview.wav", a - EDGE, b + EDGE, off,
+                            out=staged["teto_preview.wav"])
+            staged["project.ustx"] = folder / ".retune_project.ustx"
+            staged["project.ustx"].write_text(p.dump(), encoding="utf-8")
+            staged["preview.json"] = folder / ".retune_preview.json"
+            staged["preview.json"].write_text(json.dumps(prev, ensure_ascii=False), encoding="utf-8")
+            edit.snapshot(folder, wav=spliced)
+            try:
+                for name in ("teto_preview.wav", "preview.json", "project.ustx"):
+                    if name in staged:
+                        os.replace(staged[name], folder / name)
+            except BaseException:
+                edit.undo(folder)
+                raise
+        finally:
+            for f in staged.values():
+                f.unlink(missing_ok=True)
     prev = edit.refresh_preview(folder, stale=not spliced)
     prev["range"] = [round(a, 3), round(b, 3)]
     if warning:

@@ -7,7 +7,9 @@ PITD 곡선을 그만큼 옮겨서 테토가 실제로 부르는 음 높이는 �
 음표 번호 = 미리 보기(preview.json "notes")의 번호 = 숨 음표를 뺀 부르는 음표 순서.
 """
 import json
+import os
 import shutil
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +21,20 @@ TICKS = 480
 INTERVAL = 5
 MIN_TICKS = 30  # 나눈 음표 하나의 가장 짧은 길이
 KEEP = 30  # 되돌리기 기록 수
+KEEP_WAV = 3  # 그중 테토 미리 듣기 wav까지 남기는 기록 수 (구간 다시 조교 전 소리, 크니까 최근 것만)
+
+
+def write_text_atomic(path, text):
+    """같은 폴더에 임시 파일로 다 쓴 뒤 바꿔 넣는다: 쓰다가 멈춰도 원래 파일은 그대로."""
+    path = Path(path)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 class EditError(ValueError):
@@ -62,7 +78,10 @@ class Project:
         return y["position"] - (x["position"] + x["duration"])
 
     def save(self):
-        self.path.write_text(yaml.safe_dump(self.data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        write_text_atomic(self.path, self.dump())
+
+    def dump(self):
+        return yaml.safe_dump(self.data, allow_unicode=True, sort_keys=False)
 
     # ---------------------------------------------------------------- PITD
     def _curve(self, abbr):
@@ -212,16 +231,22 @@ def _history(folder):
     return Path(folder) / ".history"
 
 
-def snapshot(folder):
+def snapshot(folder, wav=False):
+    """지금 project.ustx · preview.json (wav면 teto_preview.wav도)을 기록에 남긴다 → 기록 번호."""
     h = _history(folder)
     h.mkdir(exist_ok=True)
     n = max([int(f.stem) for f in h.glob("*.ustx") if f.stem.isdigit()] or [0]) + 1
-    shutil.copy(Path(folder) / "project.ustx", h / f"{n:04d}.ustx")
     if (Path(folder) / "preview.json").exists():
         shutil.copy(Path(folder) / "preview.json", h / f"{n:04d}.json")
+    if wav and (Path(folder) / "teto_preview.wav").exists():
+        shutil.copy(Path(folder) / "teto_preview.wav", h / f"{n:04d}.wav")
+    shutil.copy(Path(folder) / "project.ustx", h / f"{n:04d}.ustx")  # 마지막에: .ustx가 있으면 기록이 다 있다
     for f in sorted(h.glob("*.ustx"))[:-KEEP]:
         f.unlink()
         (h / f"{f.stem}.json").unlink(missing_ok=True)
+        (h / f"{f.stem}.wav").unlink(missing_ok=True)
+    for f in sorted(h.glob("*.wav"))[:-KEEP_WAV]:
+        f.unlink()
     return n
 
 
@@ -236,10 +261,14 @@ def undo(folder):
     if not files:
         raise EditError("되돌릴 것이 없어요")
     last = files[-1]
-    shutil.move(str(last), Path(folder) / "project.ustx")
+    wav = h / f"{last.stem}.wav"
+    restored = wav.exists()
+    if restored:  # 구간 다시 조교 전 소리도 되돌린다 (그러면 미리 듣기가 그 음표와 맞는다)
+        os.replace(wav, Path(folder) / "teto_preview.wav")
     if (h / f"{last.stem}.json").exists():
-        shutil.move(str(h / f"{last.stem}.json"), Path(folder) / "preview.json")
-    return refresh_preview(folder)
+        os.replace(h / f"{last.stem}.json", Path(folder) / "preview.json")
+    os.replace(last, Path(folder) / "project.ustx")
+    return refresh_preview(folder, stale=not restored)
 
 
 def refresh_preview(folder, p=None, touched=None, stale=True):
@@ -256,7 +285,7 @@ def refresh_preview(folder, p=None, touched=None, stale=True):
         prev["flags"] = [f for f in prev.get("flags", []) if not (f[3] == "lyric" and f[0] < b and f[1] > a)]
     if stale and (folder / "teto_preview.wav").exists():
         prev["teto_stale"] = True
-    prev_path.write_text(json.dumps(prev, ensure_ascii=False), encoding="utf-8")
+    write_text_atomic(prev_path, json.dumps(prev, ensure_ascii=False))
     prev["history"] = history_count(folder)
     return prev
 
