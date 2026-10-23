@@ -22,6 +22,8 @@ INTERVAL = 5  # OpenUtau 곡선 간격 (틱)
 DYN_WIN = 0.02  # 초. 크기 윤곽을 잡는 최댓값 · 다듬기 창 (길면 크기가 음 시작보다 먼저 커진다)
 DYN_GAIN = 1 / 0.7  # 셈여림 0.7(앱 기본값)에서 원래 보컬 크기 차이를 그대로: 실제 테토 렌더 비교에서 이쪽이 더 닮았다
 LEGATO_GAP = 0.3  # 초. 음표 사이 이보다 짧은 틈은 앞 음표를 늘여 메운다 (자음 · 성대 닫힘에서 소리가 뚝 끊기지 않게). 0 = 끔
+OCTAVE_FIX = True  # 음표에서도 앞뒤 음 높이에서도 한 옥타브쯤 떨어지게 읽은 조각을 접는다 (_fold_octaves)
+GAP_NOTE = 0.05  # 초. 음표 안 빈 곳이 이보다 길면 가운데는 음표 음으로 (_fill_gaps). 0 = 앞뒤를 바로 잇기만
 
 
 @dataclass
@@ -149,6 +151,90 @@ def _note_mask(notes, n, lead=0.0, tail=0.0):
     for x in notes:
         m[max(0, int((x.start - lead) / HOP)):min(n, int((x.end + tail) / HOP) + 1)] = True
     return m
+
+
+def _pitd(target, base, notes, o):
+    """PITD (센트) = 원래 음 높이 − 음표 계단. 음 가운데(앞뒤 80ms 또는 25% 뺀 곳)에서만 음정 틀림을 바로잡는다
+    → 미끄러짐 · 꺾기는 그대로."""
+    n = len(target)
+    dev = target - base
+    lp = _lowpass(dev, 3.0)
+    fine = dev - lp
+    steady = np.zeros(n)
+    for x in notes:
+        edge = min(0.08, 0.25 * (x.end - x.start))
+        steady[int((x.start + edge) / HOP):int((x.end - edge) / HOP)] = 1.0
+    steady = _smooth(steady, 0.06)
+    return o.pitch_follow * (lp * (1 - o.correct * steady) + o.vibrato * fine)
+
+
+def _fold_octaves(target, mask, notes, ctx=1.0):
+    """한 옥타브쯤 잘못 읽은 조각을 접는다. 분리한 보컬은 반주 · 잔향 때문에 Harvest가 0.1~0.8초씩 한 옥타브 아래 · 위를
+    읽을 때가 있다 (pitch.clean의 150ms 중앙값보다 길어서 거기서는 못 접는다).
+    두 쪽이 다 그렇다고 할 때만 접는다: (1) 그 음표(GAME)에서 한 옥타브(±2반음) 떨어져 있고 앞뒤 음표와도 멀다,
+    (2) 앞뒤 ctx초에 읽은 음 높이(그 조각 빼고)의 중앙값에 접은 쪽이 6반음 넘게 더 가깝다.
+    음표가 틀린 곳(GAME이 옥타브를 틀림)에서 맞게 읽은 음을 접어 버리지 않게 (2)가 막는다.
+    깨끗한 보컬도 Harvest가 가끔 한 옥타브 아래를 읽는데(사람이 표시한 음 높이와 비교해서 확인) 그것도 같이 고쳐진다."""
+    out = target.copy()
+    n = len(out)
+    ok = mask & np.isfinite(out)
+    cand = np.zeros(n, dtype=bool)
+    kk = np.zeros(n)
+    for i, x in enumerate(notes):
+        a, b = max(0, int(x.start / HOP)), min(n, int(x.end / HOP))
+        if b <= a:
+            continue
+        tones = [x.tone] + [notes[j].tone for j in (i - 1, i + 1) if 0 <= j < len(notes)
+                            and abs((notes[j].start if j > i else notes[j].end) - (x.end if j > i else x.start)) < 0.3]
+        seg = np.nan_to_num(out[a:b])
+        d = seg - x.tone * 100
+        k = np.round(d / 1200)
+        near = np.min([np.abs(seg - t * 100) for t in tones], axis=0)
+        c = ok[a:b] & (k != 0) & (near > 900) & (np.abs(d - 1200 * k) < 200)
+        cand[a:b] |= c
+        kk[a:b] = np.where(c, k, kk[a:b])
+    w = int(ctx / HOP)
+    for a, b in pitch._runs(cand):
+        if b - a < 6:
+            continue
+        lo, hi = max(0, a - w), min(n, b + w)
+        around = ok[lo:hi] & ~cand[lo:hi]
+        if around.sum() < 20:
+            continue
+        ref = float(np.median(out[lo:hi][around]))
+        seg = out[a:b]
+        k = float(np.median(kk[a:b]))
+        if abs(float(np.median(seg)) - 1200 * k - ref) < abs(float(np.median(seg)) - ref) - 600:
+            out[a:b] = seg - 1200 * k
+    return out
+
+
+def _fill_gaps(target, mask, notes, base, min_gap, blend=0.04):
+    """음표 안 빈 곳(소리 없음으로 뺀 곳) 메우기. 짧은 틈은 앞뒤를 바로 잇고(전과 같음), min_gap초보다 긴 틈은
+    앞뒤 끝 blend초만 이어 긋고 가운데는 그 음표의 음 높이(+ 그 음표에서 읽은 만큼 높낮이)로 부른다:
+    긴 틈을 앞뒤 끝 값만으로 이으면 끝 값이 잘못 읽힌 것일 때 수백 ms 동안 엉뚱한 음으로 간다."""
+    lin = _interp_gaps(target, mask)
+    if min_gap <= 0:
+        return lin
+    out = lin.copy()
+    n = len(out)
+    ok = mask & np.isfinite(target)
+    anchor = np.full(n, np.nan)
+    for x in notes:
+        a, b = max(0, int(x.start / HOP)), min(n, int(x.end / HOP) + 1)
+        v = ok[a:b]
+        dev = float(np.median(target[a:b][v] - x.tone * 100)) if v.sum() >= 4 else 0.0
+        anchor[a:b] = x.tone * 100 + np.clip(dev, -100, 100)
+    k = max(1, int(blend / HOP))
+    for a, b in pitch._runs(~ok):
+        if (b - a) * HOP <= min_gap:
+            continue
+        idx = np.arange(a, b)
+        dist = np.minimum(idx - a + 1 if a > 0 else 10 ** 6, b - idx if b < n else 10 ** 6)
+        w = np.clip(1 - dist / k, 0, 1)  # 끝에서 1 → blend초 안쪽부터 0
+        has = np.isfinite(anchor[a:b])
+        out[a:b] = np.where(has, w * lin[a:b] + (1 - w) * np.nan_to_num(anchor[a:b]), lin[a:b])
+    return out
 
 
 # ---------------------------------------------------------------- 본체
@@ -290,18 +376,11 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
     all_notes = sorted(notes + breath_notes, key=lambda x: x.start)
     target = (midi + shift) * 100.0
     sing_mask = voiced & _note_mask(notes, n, 0.05, 0.05)
-    target = _interp_gaps(target, sing_mask)
     base = _base_cents(all_notes, t)
-    dev = target - base
-    lp = _lowpass(dev, 3.0)
-    fine = dev - lp
-    # 음 가운데(앞뒤 80ms 또는 25% 뺀 곳)에서만 음정 틀림을 바로잡는다 → 미끄러짐 · 꺾기는 그대로
-    steady = np.zeros(n)
-    for x in notes:
-        edge = min(0.08, 0.25 * (x.end - x.start))
-        steady[int((x.start + edge) / HOP):int((x.end - edge) / HOP)] = 1.0
-    steady = _smooth(steady, 0.06)
-    pitd = o.pitch_follow * (lp * (1 - o.correct * steady) + o.vibrato * fine)
+    if OCTAVE_FIX:
+        target = _fold_octaves(target, sing_mask, notes)
+    target = _fill_gaps(target, sing_mask, notes, base, GAP_NOTE)
+    pitd = _pitd(target, base, notes, o)
 
     near = _smooth(_note_mask(notes, n, 0.1, 0.06).astype(float), 0.04)
     ctx = dict(context or {})

@@ -46,6 +46,9 @@ def smoothness(prev, ms, vs, dbs, mr, vr, dbr, notes):
     high = _runs(diff > 150, 6)
     intended = np.array([np.nan if v is None else v for v in prev["pitch"]], dtype=float)
     nl = prev["notes"]
+    step = np.full(n, np.nan)
+    for s, e, tone, _ in nl:
+        step[int(s / HOP):int(e / HOP)] = tone
 
     def why(a, b, kind):
         t = (a + b) / 2 * HOP
@@ -64,8 +67,13 @@ def smoothness(prev, ms, vs, dbs, mr, vr, dbr, notes):
         src = ms[int(t / HOP)]
         curve = abs(intended[i] - src) * 100 > 100 if np.isfinite(src) and np.isfinite(intended[i]) else False
         cons = not vs[max(0, a - 6):b + 6].all()
+        # 음표가 원래 보컬과 맞는 곳(150센트 안)에서 벗어남 = 맞는 음에서 확 떨어지거나 튀는 것. 음표도 다르면 대부분
+        # 사람이 음절 사이 · 음 끝에서 잠깐 꺾은 것을 테토가 음표 음 그대로 부른 곳
+        ne = (step[a:b] - ms[a:b]) * 100
+        note_ok = bool(np.isfinite(ne).any() and abs(np.nanmedian(ne)) < 150)
         return {"t": round(t, 2), "ms": int((b - a) * HOP * 1000), "kind": kind, "where": where,
                 "lyric": nl[k][3] if k is not None else "", "curve": bool(curve), "near_unvoiced": bool(cons),
+                "note_ok": note_ok,
                 "cents": int(np.nanmedian(diff[a:b])) if kind != "끊김" else None,
                 "db": round(float(np.median(dbr[a:b]) - sing_r), 1)}
     events = [why(a, b, "끊김") for a, b in drop] + [why(a, b, "떨어짐") for a, b in low] + \
@@ -78,6 +86,7 @@ def smoothness(prev, ms, vs, dbs, mr, vr, dbr, notes):
     wr, ws = _wobble(mr, both), _wobble(ms, both)
     return {"dropouts_per_min": round(len(drop) / minutes, 2), "pitch_drops_per_min": round(len(low) / minutes, 2),
             "pitch_jumps_per_min": round(len(high) / minutes, 2),
+            "off_note_ok_per_min": round(sum(e["note_ok"] for e in events if e["kind"] != "끊김") / minutes, 2),
             "wobble_ratio": round(wr / ws, 3) if ws > 0 else None, "wobble_cents": round(wr, 1),
             "event_kinds": dict(sorted(kinds.items(), key=lambda kv: -kv[1])), "events": events[:60]}
 
