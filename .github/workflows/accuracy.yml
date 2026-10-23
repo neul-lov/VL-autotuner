@@ -23,7 +23,7 @@ on:
         type: string
         default: ""
       quick:
-        description: "음표 · 가사만 빨리 견줄 방식 이름 JSON 목록 (CSD 사람 노래 + 테토 정답, from_run 준비물로)"
+        description: "음표 · 가사만 빨리 견줄 방식 이름 JSON 목록 (CSD 사람 노래 + 테토 정답, from_run 준비물로). \"이름 & align_fa.JOINT=15\"처럼 스위치를 더 바꿀 수 있어요"
         type: string
         default: ""
 

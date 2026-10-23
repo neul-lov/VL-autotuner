@@ -86,6 +86,28 @@ def variants():
     return out
 
 
+MODS = {"align_fa": align_fa, "clean": clean, "notes": notes, "oupitch": oupitch, "refine": refine_mod, "tune": tune_mod}
+
+
+def with_flags(vs, name):
+    """"방식 이름 & align_fa.FIRST_MAX=0.4 & ..." 꼴이면 그 방식에 스위치를 더 바꾼 판 (손으로 돌리는 빠른 비교에서 이어 붙여 보기)."""
+    import ast
+
+    base, *extra = name.split(" & ")
+    out = list(vs[base])
+    for e in extra:
+        key, val = e.split("=", 1)
+        mod, flag = key.strip().split(".")
+        if not hasattr(MODS[mod], flag):
+            raise SystemExit(f"없는 스위치: {key}")
+        try:
+            v = ast.literal_eval(val.strip())
+        except (ValueError, SyntaxError):
+            v = val.strip()
+        out.append((MODS[mod], flag, v))
+    return out
+
+
 OPTS = {"transpose": "0", "pitch_method": "harvest"}  # 방식마다 (None, 옵션 이름, 값)으로 바꾼다
 
 
@@ -685,7 +707,7 @@ def main():
     fa_check(csd)
     vs = variants()
     if args.only:
-        vs = {k: v for k, v in vs.items() if k in args.only.split(",")}
+        vs = {k: with_flags(vs, k) for k in args.only.split(",")}
     print(f"테토 정답 노래 {len(refs)}곡 · 한글 {len(krefs)}곡 · vocadito {len(songs)}곡 · 분리한 보컬 {len(sep)}곡 · "
           f"CSD {len(csd)}곡 (분리 {len(csd_sep)}곡)", flush=True)
     if songs and game.model_dir():  # GAME이 같은 노래에 늘 같은 음표를 내는지 (잡마다 비교가 흔들리지 않게)
