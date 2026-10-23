@@ -19,6 +19,7 @@ HFA_MAX = 400 << 20
 USE_FA = True  # 모델이 있으면 가사를 넣은 뒤 프레이즈마다 맞춘다 (CI 시험에서 끄고 켜서 비교)
 MIN_CONF = 0.0  # 프레이즈 맞추기 확신이 이보다 낮으면 그 프레이즈는 원래대로 (CI에서 값을 보고 정한다)
 NEAR = 0.08  # 초. 음절 시작 가까이(이 안) 음표 경계가 있으면 그 경계를 옮기고, 없으면 음표를 나눈다
+MAX_MOVE = 0.0  # 초. 음절 하나라도 이보다 멀리 옮기면 그 프레이즈는 원래대로 (0 = 제한 없음, CI에서 정한다)
 MAX_PHRASE = 40.0  # 초. 모델이 배운 길이(45초)보다 긴 프레이즈는 맞추지 않는다
 VOWELS = {"a", "i", "u", "e", "o", "N"}
 LAST = []  # 마지막 조교의 프레이즈마다 {확신, 맞춤 여부, 옮긴 거리} (시험 기록용)
@@ -397,6 +398,8 @@ def refine(notes, y, sr):
             new = nt._insert_closures(new, closures)
         old = [x.start for x in g if x.lyric != "+"]
         moved = [abs(x.start - o) for x, o in zip([x for x in new if x.lyric != "+"], old)] if new else []
+        if MAX_MOVE > 0 and moved and max(moved) > MAX_MOVE:  # 음절이 통째로 다른 자리로 가는 것은 모델이 틀릴 때가 많다
+            new = None
         LAST.append({"phrase": gi, "conf": round(float(conf), 3), "n": len(syls), "placed": new is not None,
                      "moved_ms": round(1000 * float(np.median(moved)), 1) if moved else None,
                      "moved_max_ms": round(1000 * float(np.max(moved)), 1) if moved else None,

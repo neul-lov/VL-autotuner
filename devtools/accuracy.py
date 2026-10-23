@@ -40,7 +40,6 @@ class Cfg:
 OFF = {
     "OpenUtau 그대로 PITD": [(tune_mod, "OU_EXACT", False), (oupitch, "PORTA_MS", 0.0), (oupitch, "GAP_RAMP_MS", 0.0)],
     "가사 맞추기 모델": [(align_fa, "USE_FA", False)],
-    "GAME 경계 증거": [(notes, "GAME_EVIDENCE", False), (notes, "GAME_MERGE", 0.0)],
     "GAME 모음 시작 그대로": [(notes, "VOWEL_ONSET_GAME", True)],
     "っ · + 고침": [(notes, "CLOSURE", False), (notes, "PLUS_FIX", False)],
     "GAME 음 높이 고침": [(notes, "TONE_FROM_F0", False)],
@@ -51,6 +50,13 @@ OFF = {
     "보컬 다시 분리": [(clean, "SEPARATE", "off")],
 }
 FUSION = [(None, "pitch_method", "fusion")]
+# 기본값을 바꾸면 어떨지 (새 기본에 더해서)
+ALT = {
+    "+ GAME 경계 증거": [(notes, "GAME_EVIDENCE", True)],
+    "가사 맞추기 확신 0.6 넘을 때만": [(align_fa, "MIN_CONF", 0.6)],
+    "가사 맞추기 확신 0.65 넘을 때만": [(align_fa, "MIN_CONF", 0.65)],
+    "가사 맞추기 250ms 안만": [(align_fa, "MAX_MOVE", 0.25)],
+}
 
 
 def variants():
@@ -58,6 +64,8 @@ def variants():
     out = {"새 기본": FUSION, "PR6 기본": [p for v in OFF.values() for p in v], "− 음 높이 합치기 (Harvest)": []}
     for k, v in OFF.items():
         out[f"− {k}"] = FUSION + v
+    for k, v in ALT.items():
+        out[k] = FUSION + v
     out["다듬기 없음"] = FUSION + [(Cfg, "refine", 0)]
     return out
 
