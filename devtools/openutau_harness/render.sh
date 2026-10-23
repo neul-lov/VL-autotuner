@@ -25,7 +25,7 @@ cd "$work"
 for attempt in 1 2 3; do
   ./OpenUtau Harness.dll "$ustx" "$out" 40
   if python3 "$here/check_render.py" "$out"; then exit 0; fi
-  echo "render.sh: 소리 없는 렌더 ($attempt번째), 캐시를 비우고 다시 해요: $ustx" >&2
+  echo "render.sh: 소리 없는 렌더 (${attempt}번째), 캐시를 비우고 다시 해요: $ustx" >&2
   rm -rf "$HOME/Library/Caches/OpenUtau" "${XDG_CACHE_HOME:-$HOME/.cache}/OpenUtau"
 done
 echo "render.sh: 세 번 렌더해도 소리가 없어요: $ustx" >&2

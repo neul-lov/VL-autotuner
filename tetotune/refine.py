@@ -22,6 +22,13 @@ DYN_GAIN = 0.7
 PITCH_STEP = 200.0  # 센트. 한 번에 고치는 최대
 PITCH_MIN = 30.0    # 센트. 이보다 작은 음 높이 차이는 고치지 않는다 (렌더 음높이 읽기 잡음)
 DYN_STEP = 9.0      # dB
+# 음 높이 목표: "fixed" = 처음 조교한 음 높이 (렌더를 잘못 읽은 만큼이 회차마다 쌓이지 않게),
+# "off" = 음 높이는 고치지 않음 (WORLDLINE-R은 준 음 높이를 그대로 부른다), "old" = 예전 (지난 회차 곡선이 목표)
+PITCH_FIX = "fixed"
+PITCH_TOTAL = 100.0  # 센트. "fixed"일 때 처음 곡선에서 고치는 최대
+# 크기 한도: 켜 보니 테토 렌더 끊김이 늘어서 (한글 정답 1.98 → 2.70 /분, CSD 1.28 → 2.08, 분리 CSD 2.20 → 3.87) 꺼 둔다
+DYN_TOTAL = 0.0      # dB. 처음 크기 곡선에서 고치는 최대 (0 = 제한 없음)
+DYN_VOICED = False   # True: 크기는 원래 보컬 · 렌더가 둘 다 소리 나는 곳에서만
 
 
 def _runs(mask):
@@ -66,9 +73,16 @@ def measure(wav, n, loaded=None):
     return np.where(v, m * 100, np.nan), v, db
 
 
+def _goal(z):
+    """음 높이 목표 (센트): 처음 조교한 곡선 (PITCH_FIX가 "old"면 지금 곡선)."""
+    if PITCH_FIX != "old" and "pitd0" in z:
+        return z["base"] + z["pitd0"]
+    return z["base"] + z["pitd"]
+
+
 def score(z, cents, voiced, db):
     """닮은 정도 (작을수록): 음 높이 오차 90% (센트) / 40 + 크기 오차 평균 (dB) / 3."""
-    want = z["base"] + z["pitd"]
+    want = _goal(z)
     both = z["sing"] & z["voiced"] & voiced
     if both.sum() < 20:
         return 99.0, {}
@@ -90,7 +104,7 @@ def _rel(z, db):
 def step(z, cents, voiced, db):
     """한 번 고치기: z의 pitd · dyn을 바꾼다."""
     n = len(cents)
-    want = z["base"] + z["pitd"]
+    want = _goal(z)
     # 음 높이: 원래 보컬도 렌더도 소리 나는 곳, 소리 시작 · 끝 30ms는 빼고 (자음 · 숨에서 음높이 읽기가 튄다)
     ok = z["sing"] & z["voiced"] & voiced
     edge = int(0.03 / HOP)
@@ -107,24 +121,37 @@ def step(z, cents, voiced, db):
         if b - a >= int(0.04 / HOP):
             keep[max(0, a - 4):b + 4] = True
     res = np.clip(_lowpass(np.where(keep, res, 0.0), 6.0), -PITCH_STEP, PITCH_STEP)
-    z["pitd"] = z["pitd"] + PITCH_GAIN * res
+    if PITCH_FIX != "off":
+        z["pitd"] = z["pitd"] + PITCH_GAIN * res
+        if PITCH_FIX == "fixed" and "pitd0" in z:
+            z["pitd"] = z["pitd0"] + np.clip(z["pitd"] - z["pitd0"], -PITCH_TOTAL, PITCH_TOTAL)
     # 크기: 원래 보컬이 노래하는 곳에서 렌더 크기 윤곽이 목표(조교할 때 원래 보컬 크기)와 같아지게
-    m = z["sing"]
+    m = z["sing"] & z["voiced"] & voiced if DYN_VOICED else z["sing"]
     d = np.where(m, z["rel"] - _rel(z, db), 0.0)
     d = np.clip(_fill_short(d, m, int(0.1 / HOP)), -DYN_STEP, DYN_STEP)
     from scipy.ndimage import uniform_filter1d
     d = uniform_filter1d(d, int(0.04 / HOP))
-    z["dyn"] = np.clip(z["dyn"] + DYN_GAIN * 10 * d * z["near"], -240, 120)
+    dyn = z["dyn"] + DYN_GAIN * 10 * d * z["near"]
+    if DYN_TOTAL > 0 and "dyn0" in z:
+        dyn = z["dyn0"] + np.clip(dyn - z["dyn0"], -10 * DYN_TOTAL, 10 * DYN_TOTAL)
+    z["dyn"] = np.clip(dyn, -200, 120)  # −240은 OpenUtau에서 소리 끔
     return z
 
 
 def write_curves(ustx, z):
-    from .tune import make_curves
+    from .tune import TICKS, make_curves, pitd_curve
 
     proj = yaml.safe_load(Path(ustx).read_text(encoding="utf-8"))
     part = proj["voice_parts"][0]
     t = np.arange(len(z["pitd"])) * HOP
-    new = {c["abbr"]: c for c in make_curves(t, {"pitd": z["pitd"], "dyn": z["dyn"]}, float(z["bpm"]), z["span"])}
+    if int(z.get("exact", 0)):  # PITD는 OpenUtau가 음표로 만드는 음 높이 기준으로 틱마다 (tune.pitd_curve)
+        tps = float(z["bpm"]) / 60 * TICKS
+        notes = sorted(part["notes"], key=lambda x: x["position"])
+        curves = [pitd_curve(t, z["base"] + z["pitd"], notes, [x["pitch"] for x in notes], tps, z["span"])] + \
+            make_curves(t, {"dyn": z["dyn"]}, float(z["bpm"]), z["span"])
+    else:
+        curves = make_curves(t, {"pitd": z["pitd"], "dyn": z["dyn"]}, float(z["bpm"]), z["span"])
+    new = {c["abbr"]: c for c in curves}
     part["curves"] = [new.get(c["abbr"], c) for c in part["curves"]] + \
         [c for k, c in new.items() if k not in {c["abbr"] for c in part["curves"]}]
     Path(ustx).write_text(yaml.safe_dump(proj, allow_unicode=True, sort_keys=False), encoding="utf-8")

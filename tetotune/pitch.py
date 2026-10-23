@@ -113,18 +113,37 @@ def _harvest(y16, workers=None):
     return out
 
 
+AUTO_FUSION = True  # "auto"면 RMVPE(새 판) · SwiftF0 · Harvest를 합쳐 읽는다 (f0models.py, 모델이 있을 때)
+
+
 def extract(y, sr, method="auto"):
-    """→ (f0 Hz 배열, 0 = 소리 없음, 사용한 방법 이름). 프레임 i = i*HOP초."""
+    """→ (f0 Hz 배열, 0 = 소리 없음, 사용한 방법 이름). 프레임 i = i*HOP초.
+    fusion: 로컬 AI 둘(RMVPE · SwiftF0)과 Harvest 중 둘 이상이 같은 음이라고 하는 곳만 (f0models.py)."""
     y16 = audio.resample(y, sr, 16000)
     n = int(len(y16) / 16000 / HOP) + 1
     f0, used = None, "harvest"
-    if method in ("auto", "rmvpe"):
+    if method == "fusion" or (method == "auto" and AUTO_FUSION):
+        from . import f0models
+        try:
+            h = _harvest(y16)
+            fz, names = f0models.extract(y16, n, h)
+            if fz is not None:
+                return np.pad(fz, (0, max(0, n - len(fz))))[:n], "fusion(" + "+".join(names) + ")"
+            f0 = h  # 모델이 없으면 Harvest만
+        except Exception:
+            f0 = None
+    if f0 is None and method in ("auto", "rmvpe"):
         try:
             f0 = _rmvpe(y16, n)
             if f0 is not None:
                 used = "rmvpe"
         except Exception:
             f0 = None
+    if f0 is None and method in ("rmvpe2", "swift"):  # 시험용: 모델 하나만
+        from . import f0models
+        fz, names = f0models.extract(y16, n, None, use=("rmvpe",) if method == "rmvpe2" else ("swift",))
+        if fz is not None:
+            return np.pad(fz, (0, max(0, n - len(fz))))[:n], method
     if f0 is None:
         f0 = _harvest(y16)
     f0 = np.pad(f0, (0, max(0, n - len(f0))))[:n]

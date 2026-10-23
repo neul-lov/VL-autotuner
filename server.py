@@ -18,7 +18,7 @@ from pathlib import Path
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import JSONResponse
 
-from tetotune import __version__, edit, game, openutau, pitch, refine, retune, stemmixer, voicebank
+from tetotune import __version__, align_fa, clean, edit, f0models, game, openutau, pitch, refine, retune, stemmixer, voicebank
 from tetotune.tune import Options, tune
 
 # 설정 값마다 허용 범위 (숫자) 또는 고를 수 있는 값 (글자)
@@ -26,7 +26,7 @@ LIMITS = {
     "bpm": (0.0, 400.0), "pitch_follow": (0.0, 1.0), "vibrato": (0.0, 2.0), "correct": (0.0, 1.0),
     "dynamics": (0.0, 2.0), "breathiness": (0.0, 2.0), "tension": (0.0, 2.0), "breath_volume": (0.0, 3.0),
 }
-CHOICES = {"breaths": ("auto", "voicebank", "original", "off"), "pitch_method": ("auto", "harvest", "rmvpe"),
+CHOICES = {"breaths": ("auto", "voicebank", "original", "off"), "pitch_method": ("auto", "harvest", "rmvpe", "fusion"),
            "refine": ("auto", "off")}
 MAX_JOBS = 50  # 끝난 작업 기록은 이만큼만 (그리고 JOB_TTL초가 지나면 지운다)
 JOB_TTL = 3600
@@ -188,6 +188,22 @@ def _run(job_id, vocal, song, lyrics, notes, backing, opts):
                     game.ensure_model(lambda s: job.update(step=s, progress=0.01))
                 except Exception as e:
                     print(f"GAME 모델을 받지 못했어요: {e}", flush=True)
+                if (lyrics or "").strip():  # 가사 맞추기 모델 (HubertFA): 가사가 있을 때만, 처음 한 번 받는다
+                    try:
+                        align_fa.ensure_model(lambda s: job.update(step=s, progress=0.01))
+                    except Exception as e:
+                        print(f"가사 맞추기 모델을 받지 못했어요: {e}", flush=True)
+            for name in ("vocals", "dereverb"):  # 분석용 보컬 깨끗하게 하는 모델 (보컬 다시 분리는 반주가 있을 때만)
+                if clean.wanted(name, backing):
+                    try:
+                        clean.ensure(name, lambda s: job.update(step=s, progress=0.01))
+                    except Exception as e:
+                        print(f"{name} 모델을 받지 못했어요: {e}", flush=True)
+            if opts.pitch_method in ("auto", "fusion"):  # 음 높이 읽기 모델 (RMVPE): 없으면 처음 한 번 받는다
+                try:
+                    f0models.ensure_rmvpe(lambda s: job.update(step=s, progress=0.01))
+                except Exception as e:
+                    print(f"RMVPE 모델을 받지 못했어요: {e}", flush=True)
             polish = opts.refine != "off" and openutau.available()
             scale = 0.6 if polish else 1.0  # 다듬기가 남은 시간의 대부분
             res = tune(vocal, out, lyrics or "", notes or None, backing or None, opts,

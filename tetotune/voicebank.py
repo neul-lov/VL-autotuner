@@ -128,6 +128,23 @@ def _otos(folder, enc=None):
     return out
 
 
+def _preutters(folder, enc=None):
+    """가나 CV 별칭(か · - か · a か)의 선행발성 (ms) 목록: 숨 음표 · 틈이 다음 자음을 자르지 않게 얼마나 비워 둘지."""
+    out = []
+    for oto in Path(folder).rglob("oto.ini"):
+        for line in _read_text(oto, enc).splitlines():
+            if "=" not in line:
+                continue
+            parts = line.split("=", 1)[1].split(",")
+            if len(parts) < 5 or not re.search(r"[぀-ゟ]", parts[0]):
+                continue
+            try:
+                out.append(float(parts[4]))
+            except ValueError:
+                continue
+    return out
+
+
 def _sample(root, base, name):
     """oto.ini의 wav 이름 → 음원 폴더(root) 안의 경로, 밖이면 None."""
     if not name or Path(name).is_absolute():
@@ -203,6 +220,8 @@ def inspect(folder):
         lb, lv = _level(entry(breath)), _level(otos[vowel])
         if lb is not None and lv is not None:
             info["breath_gap_db"] = round(lb - lv, 1)
+    pre = [v for v in _preutters(folder, enc) if 0 <= v < 1000]
+    info["preutter_ms"] = round(float(sorted(pre)[int(0.9 * (len(pre) - 1))]), 1) if pre else None
     info["phonemizer"] = phonemizer or (PRESAMP if any(re.search(r"[぀-ゟ]", a) for a in aliases) else DEFAULT)
     info["japanese"] = any(re.search(r"[぀-ゟ]", a) for a in aliases)
     info["korean"] = any(re.search(r"[가-힣]", a) for a in aliases)
