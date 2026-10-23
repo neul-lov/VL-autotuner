@@ -193,8 +193,8 @@ def _run(job_id, vocal, song, lyrics, notes, backing, opts):
                         align_fa.ensure_model(lambda s: job.update(step=s, progress=0.01))
                     except Exception as e:
                         print(f"가사 맞추기 모델을 받지 못했어요: {e}", flush=True)
-            for name, on in (("vocals", clean.SEPARATE), ("dereverb", clean.DEREVERB)):  # 분석용 보컬 깨끗하게 하는 모델
-                if on != "off":
+            for name in ("vocals", "dereverb"):  # 분석용 보컬 깨끗하게 하는 모델 (보컬 다시 분리는 반주가 있을 때만)
+                if clean.wanted(name, backing):
                     try:
                         clean.ensure(name, lambda s: job.update(step=s, progress=0.01))
                     except Exception as e:

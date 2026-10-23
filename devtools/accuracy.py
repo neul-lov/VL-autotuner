@@ -26,7 +26,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from tetotune import align_fa, features, game, notes, oupitch, pitch  # noqa: E402
+from tetotune import align_fa, clean, features, game, notes, oupitch, pitch  # noqa: E402
 from tetotune import refine as refine_mod  # noqa: E402
 from tetotune import tune as tune_mod  # noqa: E402
 from tetotune.tune import Options, tune  # noqa: E402
@@ -47,6 +47,7 @@ OFF = {
     "잔떨림 · 바로잡기 문턱": [(tune_mod, "JITTER_HZ", 0.0), (tune_mod, "CORRECT_GATE", 0.0)],
     "다듬기 한도": [(refine_mod, "PITCH_FIX", "old"), (refine_mod, "DYN_TOTAL", 0.0), (refine_mod, "DYN_VOICED", False)],
     "숨 자리": [(tune_mod, "BREATH_ROOM", False)],
+    "보컬 다시 분리": [(clean, "SEPARATE", "off")],
 }
 FUSION = [(None, "pitch_method", "fusion")]
 
@@ -117,7 +118,10 @@ USED = set()
 
 
 def run_tune(wav, lyrics_text, out):
-    res = tune(wav, out, lyrics_text, options=Options(**OPTS), title="t")
+    wav = Path(wav)  # 분리한 보컬(sep_…)은 옆의 반주(bk_…)를 같이 준다 (StemMixer처럼)
+    bk = wav.with_name("bk_" + wav.name[4:]) if wav.name.startswith("sep_") else None
+    res = tune(wav, out, lyrics_text, backing=str(bk) if bk and bk.exists() else None, options=Options(**OPTS),
+               title="t")
     FA_LOG.extend(align_fa.LAST)
     if res.pitch_method not in USED:
         USED.add(res.pitch_method)
