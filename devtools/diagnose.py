@@ -117,6 +117,10 @@ def song(name, wav, rows):
             if f["v"] is not None:
                 d["v"] = (f["v"] - t[0]) * 1000
                 d["s"] = (f["s"] - t[0]) * 1000
+                gs = [x[0] for x in CAP.get("game", [])]
+                if gs:
+                    k = int(np.argmin([abs(s - f["v"]) for s in gs]))
+                    d["g"] = (gs[k] - t[0]) * 1000  # 모델 모음 시작에 가장 가까운 GAME 음표 시작
         a, b = t[0] + 0.25 * (t[1] - t[0]), t[1] - 0.25 * (t[1] - t[0])  # 음절 가운데 절반에서 가수가 부른 음
         seg = src[int(a / (2 * hop)):max(int(a / (2 * hop)) + 1, int(b / (2 * hop)))]
         seg = seg[np.isfinite(seg)]
@@ -161,6 +165,26 @@ def report(label, songs, syl):
     for off in range(-40, 50, 10):
         cells.append(f"{off:+d}ms {_rate([d['f'] + off for d in syl if 'f' in d], n, 50):.3f}")
     print("마지막 음표 시작에 더하면: " + ", ".join(cells), flush=True)
+    # 모델 모음 시작 가까이 GAME 음표 시작(음이 바뀌는 곳)이 있으면 그쪽으로: 거리 W 안이면 a만큼 당긴다
+    for off in (-15,):
+        cells = []
+        for w in (0, 30, 50, 80, 120):
+            for a in (0.5, 1.0):
+                if w == 0 and a < 1:
+                    continue
+                est = []
+                for d in cov:
+                    v = d["v"] + off
+                    if w and "g" in d and abs(d["g"] - v) <= w:
+                        v = v + a * (d["g"] - v)
+                    est.append(v)
+                cells.append(f"{w}ms·{a:.1f} {_rate(est, n, 50):.3f}")
+        print(f"모델 모음 시작({off:+d}ms) 가까이 GAME 음표 시작이 있으면 그쪽으로 (거리·당기는 정도): " + ", ".join(cells), flush=True)
+    for k in ("모음→모음", "모음 시작", "그 밖 자음"):
+        g = [d for d in cov if d["kind"] == k and "g" in d]
+        if g:
+            print(f"  {k}: 모델 −15ms {_rate([d['v'] - 15 for d in g], len(g), 50):.3f}, GAME 음표 시작 {_rate([d['g'] for d in g], len(g), 50):.3f}, "
+                  f"80ms 안이면 GAME {_rate([d['g'] if abs(d['g'] - d['v'] + 15) <= 80 else d['v'] - 15 for d in g], len(g), 50):.3f}", flush=True)
 
     # 마지막에 50ms 넘게 틀린 음절은 어느 단계 탓인지
     bad = [d for d in syl if "f" in d and abs(d["f"]) > 50]
