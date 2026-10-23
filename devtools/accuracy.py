@@ -115,12 +115,14 @@ def patched(patches):
 
 
 FA_LOG = []  # 가사 맞추기 모델이 프레이즈마다 남긴 기록 (확신 · 맞춤 여부 · 옮긴 거리), 세트마다 요약해서 찍는다
+FA_GAIN = []  # 맞춘 프레이즈마다 (확신, 가장 멀리 옮긴 ms, 맞추기 전 · 뒤 정답 시작 50ms 안 음절 수)
 USED = set()
 
 
 def run_tune(wav, lyrics_text, out):
     wav = Path(wav)  # 분리한 보컬(sep_…)은 옆의 반주(bk_…)를 같이 준다 (StemMixer처럼)
     bk = wav.with_name("bk_" + wav.name[4:]) if wav.name.startswith("sep_") else None
+    align_fa.LAST.clear()  # 가사 맞추기를 끈 방식에서 앞 곡 기록이 남지 않게
     res = tune(wav, out, lyrics_text, backing=str(bk) if bk and bk.exists() else None, options=Options(**OPTS),
                title="t")
     FA_LOG.extend(align_fa.LAST)
@@ -137,12 +139,36 @@ def run_tune(wav, lyrics_text, out):
     return json.loads((Path(out) / "preview.json").read_text())
 
 
+def fa_gain(truth_on, log=None):
+    """마지막 조교의 가사 맞추기 기록 → 맞춘 프레이즈마다 정답 음절 시작(50ms 안)이 맞추기 전보다 몇 개 늘었는지를 FA_GAIN에."""
+    for r in log if log is not None else align_fa.LAST:
+        if not r.get("before") or r.get("after") is None:
+            continue
+        a, b = min(r["before"] + r["after"]) - 0.15, max(r["before"] + r["after"]) + 0.15
+        t = [x for x in truth_on if a <= x <= b]
+        FA_GAIN.append((r["conf"], r.get("moved_max_ms") or 0.0, len(match_onsets(t, r["before"])),
+                        len(match_onsets(t, r["after"]))))
+
+
 def fa_summary(label):
     """가사 맞추기 모델 기록 요약을 찍고 비운다 (확신 문턱 MIN_CONF을 정할 때 본다)."""
     rows = [r for r in FA_LOG if "conf" in r]
     errs = [r["error"] for r in FA_LOG if "error" in r]
     unknown = [r["unknown"] for r in FA_LOG if "unknown" in r]
     FA_LOG.clear()
+    if FA_GAIN:  # 확신 · 옮긴 거리마다 맞추기가 정답 음절 시작을 얼마나 늘리고 줄였는지
+        g = np.array(FA_GAIN, dtype=float)
+        FA_GAIN.clear()
+        cells = []
+        for lo, hi in ((0, .55), (.55, .6), (.6, .65), (.65, .7), (.7, 1.01)):
+            m = (g[:, 0] >= lo) & (g[:, 0] < hi)
+            cells.append(f"{lo:.2f}~ {int(m.sum())}개 {int(g[m, 3].sum() - g[m, 2].sum()):+d}")
+        moves = []
+        for lo, hi in ((0, 60), (60, 150), (150, 300), (300, 1e9)):
+            m = (g[:, 1] >= lo) & (g[:, 1] < hi)
+            moves.append(f"{lo:.0f}ms~ {int(m.sum())}개 {int(g[m, 3].sum() - g[m, 2].sum()):+d}")
+        print(f"  가사 맞추기 {label} 맞추기 전 → 뒤 정답 시작 50ms 안 음절: {int(g[:, 2].sum())} → {int(g[:, 3].sum())}; "
+              f"확신별 {', '.join(cells)}; 가장 멀리 옮긴 거리별 {', '.join(moves)}", flush=True)
     if not rows and not errs and not unknown:
         return
     conf = np.array([r["conf"] for r in rows]) if rows else np.array([np.nan])
@@ -193,7 +219,9 @@ def eval_refs(refs, patches, label=""):
     for d in refs:
         with patched(patches), tempfile.TemporaryDirectory() as tmp:
             prev = run_tune(d / "ref_ref.wav", (d / "lyrics.txt").read_text(encoding="utf-8"), Path(tmp) / "o")
-        res.append(score_ref(json.load(open(d / "truth.json")), prev))
+        truth = json.load(open(d / "truth.json"))
+        fa_gain([t[0] for t in truth["notes"]])
+        res.append(score_ref(truth, prev))
         r = res[-1]
         if r["miss"] or r["extra"]:  # 어느 음절을 놓치는지 (방식끼리 비교해서 무엇이 가사 · 음표를 떨어뜨리는지 찾게)
             print(f"  {label} {d.name}: 놓침 {len(r['miss'])} · 남는 음절 {r['extra']}",
@@ -458,6 +486,7 @@ def eval_csd(songs, patches, keep=None):
         with patched(patches), tempfile.TemporaryDirectory() as tmp:
             out = Path(keep) / name if keep else Path(tmp) / "o"
             prev = run_tune(wav, csd_lyrics(rows), out)
+        fa_gain([r[0] for r in rows if r[3] != "+"])
         res.append(score_csd(prev, rows))
     if not res:
         return {}
