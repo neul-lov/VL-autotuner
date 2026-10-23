@@ -228,3 +228,20 @@ def test_joint_alignment_moves_syllable_across_phrases(monkeypatch):
     assert fixed == 2
     assert [(round(x.start, 2), x.lyric) for x in out if x.lyric != "+"] == [(0.0, "か"), (0.4, "き"), (0.75, "く"), (1.5, "け")]
     assert fake.calls[-1] == ["か", "き", "く", "け"]
+
+
+def test_tta_takes_median_per_syllable(monkeypatch):
+    """구간 시작을 밀어 여러 번 돌리면 음절마다 가운데 값: 한 번 크게 틀려도 나머지 둘이 맞으면 맞는 값."""
+    answers = iter([[(0.10, 0.15, 0.4), (0.40, 0.45, 0.8)],
+                    [(0.10, 0.15, 0.4), (0.70, 0.75, 0.8)],  # 둘째 음절을 300ms 틀림
+                    [(0.10, 0.15, 0.4), (0.40, 0.45, 0.8)]])
+
+    class Al:
+        sr, hop = 44100, 441
+
+        def align(self, y, sr, syls):
+            return next(answers), 0.6
+    monkeypatch.setattr(fa, "TTA", 3)
+    times, conf = fa._align_tta(Al(), np.zeros(44100), 44100, 0.0, 1.0, ["か", "き"])
+    assert conf == pytest.approx(0.6)
+    assert times[1][1] == pytest.approx(0.45 + 2 * 0.01 / 3, abs=1e-3)  # 가운데 값 (밀어 돌린 만큼 더한 뒤)
