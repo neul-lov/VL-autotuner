@@ -53,8 +53,8 @@ OpenUtau에서 사람이 "조교"할 때 만지는 것과, 이 앱이 각각을 
 
 | 사람이 하는 조교 | OpenUtau에서 | 이 앱 |
 |---|---|---|
-| 음표 · 가사 찍기 | 음표(tone, 길이), 가사, 음소 변환기 | 노래 → 음표 모델 GAME(OpenVPI)으로 음표를 나누고 (모델이 없으면 음 높이를 Viterbi로), 크기가 꺼지는 곳 · 소리 빛깔(켑스트럼)이 바뀌는 곳에서 음절을 나눠 가사를 맞춰요. ま · な · ら처럼 울리는 자음으로 시작하는 음절은 음표 시작을 모음 시작으로 옮겨요 (자음은 OpenUtau가 선행발성만큼 앞에 불러요) |
-| 음 높이 선(꺾기 · 오르내림) | 음표의 피치 점 + PITD 곡선 (센트) | 피치 점은 평평하게 두고, PITD에 "원래 음 높이 − 음표 음"을 5틱마다 그대로 넣어요 (OpenUtau 렌더 공식: 음표 음 + 비브라토 + 피치 점 + PITD) |
+| 음표 · 가사 찍기 | 음표(tone, 길이), 가사, 음소 변환기 | 노래 → 음표 모델 GAME(OpenVPI)으로 음표를 나누고 (모델이 없으면 음 높이를 Viterbi로), 크기가 꺼지는 곳 · 소리 빛깔(켑스트럼)이 바뀌는 곳에서 음절을 나눠 가사를 넣어요. 그다음 노래 가사 맞추기 모델 HubertFA로 프레이즈마다 음절의 모음이 시작하는 곳을 소리에서 찾아 음표 경계를 옮기거나 나눠요 (한글은 일본어 음소로 바꿔서). 음표 시작 = 모음 시작이고, 자음은 OpenUtau가 선행발성만큼 앞에 불러요 |
+| 음 높이 선(꺾기 · 오르내림) | 음표의 피치 점 + PITD 곡선 (센트) | 음 높이는 AI 둘(RMVPE · SwiftF0)과 WORLD Harvest가 같이 읽고 둘 이상 맞는 값만 써요. 피치 점은 평평하게 두고, OpenUtau가 렌더할 때 음표 사이를 잇는 방식(RenderPhrase)을 그대로 따라 계산해서, 그걸 더해도 원래 음 높이가 되도록 PITD를 5틱마다 넣어요 |
 | 비브라토 | 음표 비브라토 | 음표 비브라토는 끄고, 원래 보컬의 실제 떨림을 PITD에 넣어요 (세기 조절) |
 | 음정 보정 | 수동으로 선 고치기 | 길게 끄는 음 가운데에서만 3Hz 아래 느린 어긋남을 음표 음 쪽으로 당겨요. 시작 · 끝(꺾기)은 그대로 |
 | 셈여림 | DYN 곡선 | 원래 보컬 크기 윤곽(20ms 창, 자음에서 꺼지지 않게 다듬음)을 0.1dB 단위로. 셈여림 0.7(기본)에서 원래 크기 차이 그대로 |
@@ -64,7 +64,11 @@ OpenUtau에서 사람이 "조교"할 때 만지는 것과, 이 앱이 각각을 
 렌더러는 WORLDLINE-R로 정해 둬요(PITD · DYN · BREC · TENC를 모두 읽어요). 다른 렌더러를 골라도 PITD · DYN은 그대로 써요.
 
 ### 참고한 것
-- OpenUtau의 "오디오에서 음 높이 가져오기"(RMVPE): 중앙값 필터 · 튀는 값 다듬기 · 빈 곳 메우기 · 끝 자르기. RMVPE 모델(`~/Library/OpenUtau/Dependencies/rmvpe`)이 있으면 그걸 쓰고, 없으면 WORLD Harvest를 써요.
+- OpenUtau의 "오디오에서 음 높이 가져오기"(RMVPE): 중앙값 필터 · 튀는 값 다듬기 · 빈 곳 메우기 · 끝 자르기.
+- 음 높이 읽기: RVC의 RMVPE(`rmvpe.onnx`, 판 고정) · SwiftF0 · WORLD Harvest를 프레임마다 투표로 합쳐요 (둘 이상이 80센트 안이면 그 값).
+  RMVPE 모델은 처음 조교할 때 한 번 받아 `~/Library/Application Support/TetoTune/models/rmvpe`에 둬요. 받지 못하면 Harvest만 써요.
+- OpenUtau RenderPhrase: 음표 사이 이음(portamento) · 쉼 앞뒤 처리를 그대로 옮겨서 (tests/test_oupitch.py), PITD를 넣었을 때 OpenUtau가 실제로 부르는 음 높이를 미리 계산해요.
+- 가사 맞추기: wolfgitpr/HubertFA v0.0.7 일본어 노래 모델 (처음 조교할 때 받아요, 판 고정 + SHA-256). 디코더는 HubertFA의 것을 옮겼어요.
 - GAME: OpenUtau의 GAME(음표 가져오기)과 같은 모델 · 같은 순서(encoder → segmenter 8번 → bd2dur → estimator)로 돌려요.
   OpenUtau에 GAME을 설치해 두었으면 그것을, 없으면 처음 조교할 때 OpenUtau 패키지 목록에 있는 판(고정, SHA-256 확인)을 한 번 받아
   `~/Library/Application Support/TetoTune/models/game`에 둬요. 받지 못하면 예전 방법(Viterbi)으로 나눠요.
@@ -167,11 +171,9 @@ GAME은 돌릴 때마다 조금씩 다르게 나눠서(무작위 단계가 있�
 
 ## 아직 확인 못 한 것 · 한계
 - 실제 사용하는 Mac에 깔아 보지는 못했고, 같은 OpenUtau · 테토 음원으로 CI의 Mac에서 시험했어요.
-- RMVPE는 CI에서 OpenUtau의 모델로 비교했어요. 깨끗한 보컬에서는 Harvest가 더 나았지만, 반주가 남은 분리 보컬에서는 아직 재 보지 못했어요
-  (OpenUtau에 RMVPE를 설치해 두면 지금처럼 RMVPE를 써요).
+- AI 모델(GAME · RMVPE · HubertFA, 합쳐서 1GB쯤)은 처음 조교할 때 받아요. 인터넷이 없으면 받지 못한 모델 없이 예전 방법으로 조교해요.
 - 가사는 정답 노래 336음절 중 300개 남짓 맞아요. 틀린 곳은 OpenUtau에서 고치거나 음표 파일을 주세요.
 - 가사를 한 줄로 몰아 쓰면 음절 맞추기가 약해요. 숨 쉬는 곳마다 줄을 바꿔 주세요.
-- GAME 모델을 처음 받을 때 인터넷이 필요해요. 받지 못하면 예전 방법으로 나눠서 빠른 멜리스마가 합쳐질 수 있어요 (음 높이 선은 그대로 따라가요).
 - 사람 노래의 가사 맞추기는 아직 재지 못했어요 (vocadito는 여러 나라 말이라). 음표 · 음 높이만 사람 표시와 비교했어요.
 
 ## 크레딧 · 라이선스
@@ -181,6 +183,9 @@ GAME은 돌릴 때마다 조금씩 다르게 나눠서(무작위 단계가 있�
   - CI 시험에 쓰는 OpenUtau용 통합 음원(TETO-OUset240323)은 まいこ 님이 정리해 공식 사이트에서 배포하는 것이에요.
     CI는 시험할 때만 받아 쓰고, 음원도 테토로 렌더한 소리 파일도 올리지 않아요 (숫자 · 그림만 남겨요).
 - 이 저장소의 코드는 MIT 라이선스예요 ([LICENSE](LICENSE)).
-- 음표 나누기 모델 GAME(OpenVPI, 코드 MIT)은 앱에 들어 있지 않고, 처음 조교할 때 받아요.
+- AI 모델은 앱에 들어 있지 않고, 처음 조교할 때 각 배포처에서 받아요 (판 고정 + SHA-256 확인):
+  음표 나누기 GAME(OpenVPI, 코드 MIT, OpenUtau 패키지 목록의 판), 음 높이 읽기 RMVPE(RVC 프로젝트의 `rmvpe.onnx`, MIT),
+  가사 맞추기 HubertFA(wolfgitpr, 코드 Apache-2.0; 모델 가중치는 따로 라이선스를 밝히지 않아서 앱에 넣지 않고 받아서만 써요).
+  SwiftF0(MIT)는 pip로 설치해요. HubertFA 디코더를 옮긴 코드의 고지문은 [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)에 있어요.
 - 빌드된 앱에는 pyworld(MIT)와 그 안의 WORLD(수정 BSD)가 들어 있어요. 고지문은 [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)에 있고, 앱 안에도 같이 넣어요.
 - 시험용 보컬 `devtools/testdata/*.flac`과 정확도 비교 CI가 받는 Vocadito는 CC BY 4.0이에요. 만든 사람과 출처는 [devtools/testdata/README.md](devtools/testdata/README.md)에 있어요.
