@@ -45,7 +45,6 @@ OFF = {
     "GAME 음 높이 고침": [(notes, "TONE_FROM_F0", False)],
     "잔떨림 · 바로잡기 문턱": [(tune_mod, "JITTER_HZ", 0.0), (tune_mod, "CORRECT_GATE", 0.0)],
     "다듬기 음 높이 한도": [(refine_mod, "PITCH_FIX", "old")],
-    "다듬기 크기 한도": [(refine_mod, "DYN_TOTAL", 0.0), (refine_mod, "DYN_VOICED", False)],
     "숨 자리": [(tune_mod, "BREATH_ROOM", False)],
     "보컬 다시 분리": [(clean, "SEPARATE", "off")],
 }
@@ -53,6 +52,7 @@ FUSION = [(None, "pitch_method", "fusion")]
 # 기본값을 바꾸면 어떨지 (새 기본에 더해서)
 ALT = {
     "+ GAME 경계 증거": [(notes, "GAME_EVIDENCE", True)],
+    "+ 다듬기 크기 한도": [(refine_mod, "DYN_TOTAL", 6.0), (refine_mod, "DYN_VOICED", True)],
     "가사 맞추기 확신 0.6 넘을 때만": [(align_fa, "MIN_CONF", 0.6)],
     "가사 맞추기 확신 0.65 넘을 때만": [(align_fa, "MIN_CONF", 0.65)],
     "가사 맞추기 250ms 안만": [(align_fa, "MAX_MOVE", 0.25)],
