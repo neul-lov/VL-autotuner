@@ -56,6 +56,7 @@ ALT = {
     "가사 맞추기 확신 0.6 넘을 때만": [(align_fa, "MIN_CONF", 0.6)],
     "가사 맞추기 확신 0.65 넘을 때만": [(align_fa, "MIN_CONF", 0.65)],
     "가사 맞추기 250ms 안만": [(align_fa, "MAX_MOVE", 0.25)],
+    "가사 맞추기 150ms 안만": [(align_fa, "MAX_MOVE", 0.15)],
 }
 
 

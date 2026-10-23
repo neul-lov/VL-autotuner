@@ -49,3 +49,21 @@ def test_separate_only_with_backing(monkeypatch, tmp_path):
     monkeypatch.setattr(clean, "vocals", lambda *a, **k: pytest.fail("반주 없이 다시 분리했어요"))
     y = np.random.default_rng(0).standard_normal(44100)
     assert tune._for_analysis(y, 44100, None, [], lambda p, s: None) is y
+
+
+def test_vocals_cache_reuses_same_files(tmp_path, monkeypatch):
+    """CI 전용 저장: 같은 보컬 · 반주 파일이면 모델을 다시 돌리지 않고, 파일이 바뀌면 다시 돌린다."""
+    calls = []
+    monkeypatch.setattr(clean, "CACHE", str(tmp_path / "cache"))
+    monkeypatch.setattr(clean, "vocals", lambda y, sr, backing=None, progress=None: calls.append(1) or y * 0.5)
+    v, b = tmp_path / "sep_a.wav", tmp_path / "bk_a.wav"
+    v.write_bytes(b"vocal"), b.write_bytes(b"backing")
+    y = np.linspace(-1, 1, 4410)
+    one = clean.vocals_cached(y, 44100, v, b, backing=y)
+    two = clean.vocals_cached(y, 44100, v, b, backing=y)
+    assert len(calls) == 1 and np.allclose(one, two, atol=1e-6)
+    b.write_bytes(b"other backing")
+    clean.vocals_cached(y, 44100, v, b, backing=y)
+    assert len(calls) == 2
+    monkeypatch.setattr(clean, "CACHE", "")  # 앱에서는 저장하지 않는다
+    assert clean.cache_file(v, b, 44100) is None

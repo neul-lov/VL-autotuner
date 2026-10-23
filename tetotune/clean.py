@@ -8,7 +8,9 @@
 - 잔향 제거: anvuew의 dereverb_room (BS-RoFormer 모노, GPL-3.0), audiojs의 ONNX 변환. 앱에 넣지 않고 처음 쓸 때 받는다.
 STFT는 모델 밖에서 한다 (torch.stft와 같게: Hann, 가운데 맞춤, 반사 채우기). 긴 곡은 조각으로 겹쳐 돌린다 (MSST demix처럼).
 """
+import hashlib
 import importlib.util
+import os
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +19,8 @@ import numpy as np
 # CI (vocadito 분리 보컬 14곡): 곡에서 다시 뽑으면 SDR 13.2 → 17.3dB, 음 높이 튐 0.39 → 0.20/분. 보컬에서 한 번 더는 그대로.
 SEPARATE = "backing"
 DEREVERB = "off"  # 잔향 제거는 SDR이 오히려 떨어지고 (14.0 → 10.3dB) 음 높이도 그대로라서 쓰지 않는다
+# 시험용 (CI): 폴더를 주면 같은 보컬 · 반주 파일에서 다시 뽑은 보컬을 저장해 두고 다시 쓴다 (방식마다 다시 돌리지 않게)
+CACHE = os.environ.get("TETOTUNE_CLEAN_CACHE", "")
 
 MODELS = {
     "vocals": {
@@ -206,6 +210,33 @@ def vocals(y, sr, backing=None, progress=None):
     scale = min(1.0, 0.99 / peak)  # 반주를 더해서 넘치면 줄였다가 되돌린다
     out = SpecModel("vocals", path)(_to_channels(x * scale, 2), progress).mean(0) / scale
     return audio.resample(out, SR, sr) if sr != SR else out
+
+
+def cache_file(vocal, backing, sr):
+    """CACHE가 있으면 (보컬 파일, 반주 파일, sr, 모델)마다 다시 뽑은 보컬을 둘 곳. 없으면 None."""
+    if not CACHE or not vocal:
+        return None
+    h = hashlib.sha256(f"{MODELS['vocals']['sha256']} {LAYOUT['vocals']} {sr}".encode())
+    for p in (vocal, backing):
+        h.update(Path(p).read_bytes() if p else b"-")
+        h.update(b"|")
+    return Path(CACHE) / f"vocals-{h.hexdigest()[:32]}.npy"
+
+
+def vocals_cached(y, sr, vocal=None, backing_path=None, backing=None, progress=None):
+    """vocals()와 같지만 CACHE에 같은 파일로 뽑은 것이 있으면 그것을 (float32로 저장)."""
+    f = cache_file(vocal, backing_path if backing is not None else None, sr)
+    if f is not None and f.exists():
+        out = np.load(f)
+        if abs(len(out) - len(y)) <= 0.01 * sr:  # 다시 표본을 맞추면 한두 샘플 다를 수 있다
+            return out.astype(np.float64)
+    out = vocals(y, sr, backing=backing, progress=progress)
+    if f is not None and out is not None:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_suffix(".part.npy")
+        np.save(tmp, np.asarray(out, dtype=np.float32))
+        tmp.replace(f)
+    return out
 
 
 def dereverb(y, sr, progress=None):

@@ -292,7 +292,7 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
     y, sr = audio.load(vocal)
     if len(y) < sr * 0.5:
         raise ValueError("보컬이 너무 짧아요 (0.5초 이상)")
-    y_ana = _for_analysis(y, sr, backing, warnings, progress)  # 음 높이 · 음표 · 가사 자리는 깨끗하게 한 소리로
+    y_ana = _for_analysis(y, sr, backing, warnings, progress, vocal)  # 음 높이 · 음표 · 가사 자리는 깨끗하게 한 소리로
     progress(0.08, "음높이 읽는 중")
     f0, used = pitch.extract(y_ana, sr, o.pitch_method)
     n = len(f0)
@@ -527,7 +527,7 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
     return res
 
 
-def _for_analysis(y, sr, backing, warnings, progress):
+def _for_analysis(y, sr, backing, warnings, progress, vocal=None):
     """clean.SEPARATE · DEREVERB가 켜져 있고 모델이 있으면 반주를 다시 걸러 내고 잔향을 걷은 소리, 아니면 y 그대로.
     반주 파일이 보컬과 길이가 같으면 (StemMixer처럼 같은 곡에서 나눈 것) 둘을 더한 원래 곡에서 다시 뽑는다
     (SEPARATE "backing"은 이때만)."""
@@ -540,8 +540,8 @@ def _for_analysis(y, sr, backing, warnings, progress):
             if abs(len(b) - len(y)) <= 0.01 * len(y) + sr * 0.05:
                 bk = b
         if clean.wanted("vocals", bk is not None) and clean.model_path("vocals"):
-            out = clean.vocals(out, sr, backing=bk,
-                               progress=lambda f: progress(0.02 + 0.03 * f, "반주가 샌 곳 다시 걸러 내는 중 (보컬 분리 모델)"))
+            out = clean.vocals_cached(out, sr, vocal, backing, backing=bk,
+                                      progress=lambda f: progress(0.02 + 0.03 * f, "반주가 샌 곳 다시 걸러 내는 중 (보컬 분리 모델)"))
         if clean.wanted("dereverb") and clean.model_path("dereverb"):
             out = clean.dereverb(out, sr, progress=lambda f: progress(0.05 + 0.03 * f, "잔향 걷어 내는 중 (잔향 제거 모델)"))
     except Exception as e:  # 모델이 깨졌거나 메모리가 모자라면 원래 소리로
