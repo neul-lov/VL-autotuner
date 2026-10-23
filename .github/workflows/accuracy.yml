@@ -27,8 +27,8 @@ on:
         type: string
         default: ""
 
-concurrency:  # 손으로 돌린 비교는 push가 끊지 않게 따로
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}${{ inputs.diagnose && '-diag' || '' }}${{ inputs.quick && '-quick' || '' }}
+concurrency:  # 손으로 돌린 비교는 push가 끊지 않게 따로, 나눠 보기 · 빨리 견주기는 서로도 끊지 않게
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}${{ (inputs.diagnose || inputs.quick) && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 permissions:
@@ -291,7 +291,7 @@ jobs:
       max-parallel: 1  # Mac은 한 번에 5대: 새 방식 vs 예전 방식 둘 · 음표만 보는 둘 다음
       matrix:
         include:  # 하나씩 끈 것 중 렌더해야 차이가 보이는 것 (devtools/accuracy.py variants)
-          - {id: 3, only: "− 다듬기 크기 한도"}
+          - {id: 3, only: "+ 다듬기 크기 한도"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
