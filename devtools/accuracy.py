@@ -562,6 +562,9 @@ def fa_check(csd, lines=3):
     al = align_fa.Aligner(folder)
     print(f"가사 맞추기 모델: {folder}, 음소 {len(al.ids)}개, 사전 {len(al.dict)}개, 앞붙임 {al.prefix!r}, "
           f"{al.sr}Hz / {al.hop}", flush=True)
+    langs = sorted({k.split("/")[0] for k in al.ids if "/" in k})
+    print(f"  언어: {langs}, 한글용 다른 언어 음소: {[p for p in ('en/n', 'en/m', 'en/ng', 'en/l', 'zh/e') if p in al.ids]}",
+          flush=True)
     name, wav, rows = csd[0]
     y, sr = audio.load(wav)
     groups, cur = [], []
