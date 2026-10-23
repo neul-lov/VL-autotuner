@@ -2,7 +2,7 @@
 
 리눅스 CPU에서는 보컬 다시 분리가 곡 길이의 몇 배 걸려서, 방식마다 다시 돌리면 비교 잡 하나가 두 시간을 넘는다.
 여러 잡이 곡을 나눠 한 번씩만 돌리고 (--shard i/n), 비교 잡들은 조교할 때 같은 파일이면 이것을 쓴다 (clean.vocals_cached).
-python devtools/preclean.py out/sep out/csdsep --shard 0/6
+python devtools/preclean.py out/sep out/csdsep --shard 0/10
 """
 import sys
 import time
