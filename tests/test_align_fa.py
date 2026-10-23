@@ -147,6 +147,34 @@ def test_place_gives_up_when_notes_would_be_too_short():
     assert fa._place(g, [0.0, 2.0], ["か", "き"]) is None  # 음표 밖
 
 
+def test_place_gap_extend_pulls_note_start_to_vowel(monkeypatch):
+    """모음 시작이 음표 앞 틈(150ms 안)에 있으면: 기본은 음표 시작 그대로, GAP_EXTEND면 모음 시작으로 당긴다."""
+    g = [_n(0.0, 0.5, 60, "か"), _n(0.7, 1.2, 64, "き", 5.0)]
+    assert fa._place(g, [0.0, 0.58], ["か", "き"])[1].start == pytest.approx(0.7)
+    monkeypatch.setattr(fa, "GAP_EXTEND", True)
+    out = fa._place(g, [0.0, 0.58], ["か", "き"])
+    assert out[1].start == pytest.approx(0.58) and out[0].end == pytest.approx(0.5)
+    assert g[1].start == 0.7  # 원래 음표는 그대로
+
+
+def test_place_soft_split_uses_next_note_instead_of_giving_up(monkeypatch):
+    g = [_n(0.0, 0.5, 60, "か"), _n(0.62, 1.0, 62, "き", 5.0)]
+    assert fa._place(g, [0.0, 0.48], ["か", "き"]) is None  # 앞 음표 끝 20ms 안: 프레이즈를 버린다
+    monkeypatch.setattr(fa, "SOFT_SPLIT", True)
+    out = fa._place(g, [0.0, 0.48], ["か", "き"])
+    assert [(x.start, x.lyric) for x in out] == [(0.0, "か"), (0.62, "き")]
+    g = [_n(0.0, 0.5, 60, "か")]  # 뒤 음표가 없으면 40ms 앞에서 나눈다
+    out = fa._place(g, [0.0, 0.48], ["か", "き"])
+    assert [(round(x.start, 3), x.lyric) for x in out] == [(0.0, "か"), (0.46, "き")]
+
+
+def test_place_offset_shifts_every_onset(monkeypatch):
+    monkeypatch.setattr(fa, "OFFSET", 0.02)
+    g = [_n(0.0, 1.0, 60, "か"), _n(1.0, 1.5, 60, "き", 3.0)]
+    out = fa._place(g, [0.0, 0.6], ["か", "き"])
+    assert [round(x.start, 3) for x in out] == [0.02, 0.62, 1.0]
+
+
 def test_closure_notes_are_merged_then_split_again():
     """っ 음표는 앞 음절 끝의 막힘이라 모델에 넣지 않고, 음절 자리를 맞춘 뒤 같은 방법으로 다시 나눈다."""
     g = [_n(0.0, 0.41, 60, "き"), _n(0.41, 0.5, 60, "っ", 3.0), _n(0.5, 1.0, 62, "と", 3.0)]
@@ -163,3 +191,40 @@ def test_refine_without_model_keeps_notes(tmp_path, monkeypatch):
     g = [_n(0.0, 0.5, 60, "か"), _n(0.5, 1.0, 62, "き", 3.0)]
     out, fixed = fa.refine(g, np.zeros(44100, np.float32), 44100)
     assert out is g and fixed == 0
+
+
+class _FakeAligner:
+    """음절마다 정해 둔 모음 시작 (곡 시각)을 돌려주는 가짜 모델. 받은 구간 시작을 빼서 돌려준다."""
+    def __init__(self, vowel_at, sr=100):
+        self.vowel_at, self.sr, self.calls = vowel_at, sr, []
+
+    def sequence(self, syls):
+        return ["SP"], [-1]
+
+    def align(self, y, sr, syls):
+        a = self.offset
+        self.calls.append(list(syls))
+        return [(self.vowel_at[s] - a - 0.05, self.vowel_at[s] - a, self.vowel_at[s] - a + 0.1) for s in syls], 0.7
+
+
+def test_joint_alignment_moves_syllable_across_phrases(monkeypatch):
+    """가사 넣기가 「く」를 둘째 프레이즈에 넣었는데 소리로는 첫 프레이즈 끝: 한꺼번에 맞추면 제자리로 간다."""
+    g = [_n(0.0, 0.4, 60, "か"), _n(0.4, 1.0, 62, "き", 5.0),
+         _n(1.5, 1.8, 64, "く"), _n(1.8, 2.4, 65, "け", 5.0)]
+    fake = _FakeAligner({"か": 0.0, "き": 0.4, "く": 0.75, "け": 1.5})
+    monkeypatch.setattr(fa, "model_dir", lambda: "x")
+    monkeypatch.setattr(fa, "Aligner", lambda folder: fake)
+    orig_window = fa._fit
+
+    def fit(al, notes, a, b, y, sr, tag):
+        fake.offset = a
+        return orig_window(al, notes, a, b, y, sr, tag)
+    monkeypatch.setattr(fa, "_fit", fit)
+    y = np.zeros(300)
+    out, fixed = fa.refine(g, y, 100)  # 프레이즈마다: く는 둘째 프레이즈 첫 음표에 그대로
+    assert (1.5, "く") in [(round(x.start, 2), x.lyric) for x in out]
+    monkeypatch.setattr(fa, "JOINT", 30.0)
+    out, fixed = fa.refine(g, y, 100)
+    assert fixed == 2
+    assert [(round(x.start, 2), x.lyric) for x in out if x.lyric != "+"] == [(0.0, "か"), (0.4, "き"), (0.75, "く"), (1.5, "け")]
+    assert fake.calls[-1] == ["か", "き", "く", "け"]

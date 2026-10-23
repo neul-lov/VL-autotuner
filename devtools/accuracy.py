@@ -57,6 +57,17 @@ ALT = {
     "가사 맞추기 확신 0.65 넘을 때만": [(align_fa, "MIN_CONF", 0.65)],
     "가사 맞추기 250ms 안만": [(align_fa, "MAX_MOVE", 0.25)],
     "가사 맞추기 150ms 안만": [(align_fa, "MAX_MOVE", 0.15)],
+    # 나눠 보기(diagnose.py, 2026-10-23): 모델 모음 시작이 사람 노래 정답보다 17ms쯤 늦고, 50ms 넘게 틀린 음절의 18%는
+    # 음표 나누기가 안 돼서 프레이즈째 버린 것, 가사 줄 수와 찾은 프레이즈 수가 다른 곡에서 많이 틀린다
+    "가사 맞추기 −15ms": [(align_fa, "OFFSET", -0.015)],
+    "가사 맞추기 −15ms · 덜 버리기": [(align_fa, "OFFSET", -0.015), (align_fa, "SOFT_SPLIT", True),
+                                (align_fa, "GAP_EXTEND", True)],
+    "가사 맞추기 −15ms · 덜 버리기 · 15초 함께": [(align_fa, "OFFSET", -0.015), (align_fa, "SOFT_SPLIT", True),
+                                        (align_fa, "GAP_EXTEND", True), (align_fa, "JOINT", 15.0)],
+    "가사 맞추기 −15ms · 덜 버리기 · 30초 함께": [(align_fa, "OFFSET", -0.015), (align_fa, "SOFT_SPLIT", True),
+                                        (align_fa, "GAP_EXTEND", True), (align_fa, "JOINT", 30.0)],
+    "가사 맞추기 −15ms · 덜 버리기 · 첫 음절 0.4초": [(align_fa, "OFFSET", -0.015), (align_fa, "SOFT_SPLIT", True),
+                                           (align_fa, "GAP_EXTEND", True), (align_fa, "FIRST_MAX", 0.4)],
 }
 
 
