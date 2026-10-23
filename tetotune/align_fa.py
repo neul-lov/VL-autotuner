@@ -382,10 +382,11 @@ def refine(notes, y, sr):
         if gi + 1 < len(groups):
             b = min(b, groups[gi + 1][0].start)
         if not syls or b - a > MAX_PHRASE:
+            LAST.append({"phrase": gi, "syls": syls, "skip": "long" if syls else "empty"})
             out.extend(g)
             continue
         if al.sequence(syls) is None:
-            LAST.append({"phrase": gi, "unknown": "".join(syls)[:40]})
+            LAST.append({"phrase": gi, "syls": syls, "unknown": "".join(syls)[:40]})
             out.extend(g)
             continue
         try:
@@ -393,7 +394,8 @@ def refine(notes, y, sr):
         except Exception as e:  # 모델이 이 소리를 못 다루면 이 프레이즈만 원래대로
             times, conf = None, 0.0
             LAST.append({"phrase": gi, "error": str(e)[:200]})
-        new = _place(core_g, [a + v for _, v, _ in times], syls) if times is not None and conf >= MIN_CONF else None
+        why = []
+        new = _place(core_g, [a + v for _, v, _ in times], syls, why=why) if times is not None and conf >= MIN_CONF else None
         if new is not None and closures:
             new = nt._insert_closures(new, closures)
         old = [x.start for x in g if x.lyric != "+"]
@@ -403,7 +405,10 @@ def refine(notes, y, sr):
         LAST.append({"phrase": gi, "conf": round(float(conf), 3), "n": len(syls), "placed": new is not None,
                      "moved_ms": round(1000 * float(np.median(moved)), 1) if moved else None,
                      "moved_max_ms": round(1000 * float(np.max(moved)), 1) if moved else None,
-                     "before": old, "after": [x.start for x in new if x.lyric != "+"] if new else None})
+                     "before": old, "after": [x.start for x in new if x.lyric != "+"] if new else None,
+                     "syls": syls, "raw": [a + v for _, v, _ in times] if times is not None else None,
+                     "raw_start": [a + t for t, _, _ in times] if times is not None else None,
+                     "why": why[0] if why else ("align" if times is None else ("conf" if conf < MIN_CONF else ""))})
         if new is None:
             out.extend(g)
             continue
@@ -430,7 +435,7 @@ def _without_closures(g):
     return out, closures
 
 
-def _place(g, onsets, syls, near=NEAR):
+def _place(g, onsets, syls, near=NEAR, why=None):
     """프레이즈 음표 g에 음절 syls를 onsets(모음 시작) 자리로 넣는다. 가까운 음표 경계(near 안)는 그 자리로 옮기고,
     없으면 그 자리에서 음표를 나눈다 (같은 음으로 다른 음절). 음 높이 · 길이가 너무 짧아지면 None (원래대로)."""
     from . import notes as nt
@@ -462,6 +467,8 @@ def _place(g, onsets, syls, near=NEAR):
         if k is not None:
             x = g[k]
             if v - x.start < 0.04 or x.end - v < 0.04:
+                if why is not None:
+                    why.append(f"split{j}")
                 return None
             g.insert(k + 1, nt.Note(v, x.end, x.tone, "+", 3.0))
             x.end = v
@@ -470,6 +477,8 @@ def _place(g, onsets, syls, near=NEAR):
         # 틈 안: 바로 뒤 음표가 가까우면 그 음표
         k = next((i for i in range(last + 1, len(g)) if g[i].start >= v), None)
         if k is None or g[k].start - v > 0.15:
+            if why is not None:
+                why.append(f"gap{j}" if k is not None else f"end{j}")
             return None
         picked.append(g[k])
     for x, syl in zip(picked, syls):

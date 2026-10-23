@@ -14,6 +14,14 @@ on:
         description: "음 높이 읽기 방법 · 보컬 다시 분리 모델 확인도 (결과는 이미 나왔어요)"
         type: boolean
         default: false
+      diagnose:
+        description: "어디서 틀리는지 나눠 보기만 (CSD, from_run 실행이 준비한 시험 노래 · 다시 뽑은 보컬을 써요)"
+        type: boolean
+        default: false
+      from_run:
+        description: "diagnose가 쓸 시험 노래를 준비한 실행 번호 (같은 브랜치)"
+        type: string
+        default: ""
 
 concurrency:  # 손으로 돌린 비교는 push가 끊지 않게 따로
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
@@ -33,6 +41,7 @@ env:
 jobs:
   prepare:
     name: 시험 노래 · 모델 준비 (한 번만)
+    if: ${{ !inputs.diagnose }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -139,7 +148,7 @@ jobs:
   preclean-merge:
     name: 보컬 다시 분리 미리 (합치기)
     needs: preclean
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && needs.preclean.result != 'skipped' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/cache/restore@v4
@@ -525,7 +534,7 @@ jobs:
   merge:
     name: 방식별 정확도 (합친 표)
     needs: [compare-mac-key, compare-mac, compare-mac-notes, compare-linux]
-    if: always()
+    if: ${{ always() && !inputs.diagnose }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -541,3 +550,40 @@ jobs:
       - run: |
           python -W ignore devtools/accuracy.py --merge res/acc_*.json | tee merged.txt
           cat merged.txt >> "$GITHUB_STEP_SUMMARY"
+
+  diagnose:
+    name: 어디서 틀리는지 (${{ matrix.set }})
+    if: github.event_name == 'workflow_dispatch' && inputs.diagnose
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {set: "CSD 깨끗한 보컬", args: ""}
+          - {set: "CSD 분리한 보컬", args: "--sep out/csdsep"}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements.txt -r requirements-extra.txt mir_eval
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            vocadito
+            csd
+            out/sep
+            out/csdsep
+            models
+          key: testdata-${{ inputs.from_run }}-1
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v4
+        with:
+          path: clean
+          key: clean-${{ inputs.from_run }}-1
+      - name: 나눠 보기 (숫자만)
+        run: |
+          set -o pipefail
+          python -W ignore devtools/diagnose.py --csd csd --csd-n 12 ${{ matrix.args }} | tee out/diag.txt
+          sed -n '/^## /,$p' out/diag.txt >> "$GITHUB_STEP_SUMMARY"
