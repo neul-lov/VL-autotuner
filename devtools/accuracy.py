@@ -489,6 +489,7 @@ def main():
     ap.add_argument("--render-csd", type=int, default=0, help="CSD 몇 곡을 가사 넣고 조교해서 테토로 렌더해 비교할지")
     ap.add_argument("--only", help="쉼표로 나눈 방식 이름만")
     ap.add_argument("--json", help="결과를 이 파일에 (여러 잡 결과를 합칠 때)")
+    ap.add_argument("--tag", default="", help="결과 방식 이름 뒤에 붙일 말 (다른 기계에서 돈 같은 방식과 나눠 볼 때)")
     args = ap.parse_args()
     refs = [Path(p) for p in args.refs if (Path(p) / "truth.json").exists()]
     krefs = [Path(p) for p in args.refs_ko if (Path(p) / "truth.json").exists()]
@@ -562,7 +563,7 @@ def main():
             for key, items in sets.items():
                 if items:
                     rend[key] = render_set(name, items, patches, args)
-        results[name] = {"row": row, "render": rend}
+        results[name + args.tag] = {"row": row, "render": rend}
     if args.json:
         Path(args.json).write_text(json.dumps(results, ensure_ascii=False), encoding="utf-8")
     print_tables(results)
@@ -636,7 +637,11 @@ def merge_main():
     for f in sys.argv[2:]:
         results.update(json.loads(Path(f).read_text(encoding="utf-8")))
     order = list(variants())
-    print_tables({k: results[k] for k in sorted(results, key=lambda k: order.index(k) if k in order else 99)})
+
+    def rank(k):  # 기계마다 (꼬리말 없는 Mac 먼저), 그 안에서는 variants 순서
+        base = next((v for v in order if k == v or k.startswith(v + " (")), None)
+        return (k not in order, order.index(base) if base else 99, k)
+    print_tables({k: results[k] for k in sorted(results, key=rank)})
 
 
 if __name__ == "__main__":

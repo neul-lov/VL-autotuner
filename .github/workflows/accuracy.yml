@@ -1,7 +1,9 @@
 name: 조교 정확도 비교
 
 # 조교 방식을 바꿀 때 실제 테토 · 사람 노래로 정확도를 비교해요 (소리는 재생하지 않고 숫자만)
-# 방식이 많아서 몇 개씩 나눠 여러 Mac에서 돌리고, 마지막에 표 하나로 합쳐요.
+# 시험 노래 받기 · 분리는 한 번만 (prepare, 이 저장소 Actions 캐시에만 두고 올리지 않아요).
+# 테토 렌더가 있어야 보이는 비교는 Mac에서, 음표 · 가사 · 음 높이만 보는 비교는 한꺼번에 많이 도는 리눅스에서 돌리고
+# 마지막에 표 하나로 합쳐요.
 on:
   push:
     branches: ["claude/accuracy*"]
@@ -18,52 +20,25 @@ defaults:
   run:
     shell: bash
 
+env:
+  TETOTUNE_MODELS: ${{ github.workspace }}/models
+
 jobs:
-  compare:
-    name: 정확도 (${{ matrix.only }})
-    runs-on: macos-latest
-    timeout-minutes: 300
-    strategy:
-      fail-fast: false
-      matrix:
-        include:  # 하나씩 끈 판마다 Mac 하나 (devtools/accuracy.py variants)
-          - {id: 1, only: "새 기본"}
-          - {id: 2, only: "PR6 기본"}
-          - {id: 3, only: "− 음 높이 합치기 (Harvest)"}
-          - {id: 4, only: "− OpenUtau 그대로 PITD"}
-          - {id: 5, only: "− 가사 맞추기 모델"}
-          - {id: 6, only: "− GAME 경계 증거"}
-          - {id: 7, only: "− GAME 모음 시작 그대로"}
-          - {id: 8, only: "− っ · + 고침"}
-          - {id: 9, only: "− GAME 음 높이 고침"}
-          - {id: 10, only: "− 잔떨림 · 바로잡기 문턱"}
-          - {id: 11, only: "− 다듬기 한도"}
-          - {id: 12, only: "− 숨 자리"}
-    env:
-      TETOTUNE_MODELS: ${{ github.workspace }}/models
+  prepare:
+    name: 시험 노래 · 모델 준비 (한 번만)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "10.0.x"
-      - run: python -m pip install -r requirements.txt -r requirements-extra.txt mir_eval
-      - name: Demucs 설치 (분리한 보컬 만들기용)
-        id: demucs
-        continue-on-error: true
-        run: python -m pip install "torch==2.5.1" "torchaudio==2.5.1" "demucs==4.0.1"
-      - name: 시험 노래 캐시 (vocadito · CSD 압축, 올리지 않고 이 저장소 Actions 안에만)
+      - run: python -m pip install -r requirements.txt -r requirements-extra.txt "torch==2.5.1" "torchaudio==2.5.1" "demucs==4.0.1"
+      - name: 받은 압축 캐시 (vocadito · CSD)
         uses: actions/cache@v4
         with:
           path: data
           key: songs-vocadito5578807-csd4916302
-      - name: 모델 캐시 (RMVPE · 가사 맞추기, 앱이 받는 것과 같은 판)
-        uses: actions/cache@v4
-        with:
-          path: models
-          key: models-${{ hashFiles('tetotune/f0models.py', 'tetotune/align_fa.py') }}
       - name: vocadito 받기 (사람 노래 40곡 + 사람이 표시한 음 높이 · 음표, CC BY 4.0)
         run: |
           mkdir -p data
@@ -79,28 +54,87 @@ jobs:
             curl -fL --retry 3 -o data/CSD.zip "https://zenodo.org/records/4916302/files/CSD.zip?download=1"
           fi
           python -c "import hashlib,sys; h=hashlib.md5(open('data/CSD.zip','rb').read()).hexdigest(); print(h); sys.exit(h != '74d121dd8706fded26a15526a379f7a2')"
-          mkdir -p csd && unzip -q data/CSD.zip "*korean/*" -d csd
-          find csd -maxdepth 3 -type d
-          f=$(find csd -path "*korean/csv/*a.csv" | sort | head -1); echo "$f"; head -5 "$f"
-          l=$(find csd -path "*korean/lyric/*a.txt" | sort | head -1); echo "$l"; head -3 "$l"
-      - name: 분리한 보컬 만들기 (vocadito · CSD + 잔향 + 만든 반주 → Demucs, 올리지 않아요)
-        if: steps.demucs.outcome == 'success'
-        continue-on-error: true
+          mkdir -p csdfull && unzip -q data/CSD.zip "*korean/*" -d csdfull
+          f=$(find csdfull -path "*korean/csv/*a.csv" | sort | head -1); echo "$f"; head -5 "$f"
+          l=$(find csdfull -path "*korean/lyric/*a.txt" | sort | head -1); echo "$l"; head -3 "$l"
+          # 비교에 쓰는 12곡만 남긴다 (accuracy.py csd_songs와 같은 곡)
+          python - <<'EOF'
+          import shutil, sys
+          from pathlib import Path
+          sys.path.insert(0, "devtools")
+          from accuracy import csd_songs
+          for name, wav, rows in csd_songs("csdfull", 12):
+              base = wav.parent.parent
+              for sub, ext in (("wav", ".wav"), ("csv", ".csv"), ("lyric", ".txt")):
+                  src = base / sub / (name + ext)
+                  if src.exists():
+                      dst = Path("csd/korean") / sub / src.name
+                      dst.parent.mkdir(parents=True, exist_ok=True)
+                      shutil.copy(src, dst)
+              print(name, len(rows))
+          EOF
+      - name: 분리한 보컬 만들기 (vocadito · CSD + 잔향 + 만든 반주 → Demucs)
         run: |
           python -W ignore devtools/make_separated.py vocadito out/sep 1,3,5,9,10,13,14,17,21,22,25,29,33,37
-          python -W ignore devtools/make_separated.py --csd csd out/csdsep 12
-      - name: 모델 받기 (앱이 처음 조교할 때 받는 것과 같은 것)
-        continue-on-error: true
+          if [ -d csd ]; then python -W ignore devtools/make_separated.py --csd csd out/csdsep 12; fi
+      - name: 모델 받기 (앱이 처음 조교할 때 받는 것과 같은 판)
         run: |
-          python -c "from tetotune import align_fa, f0models; print(f0models.ensure_rmvpe(print)); print(align_fa.ensure_model(print))"
-          ls -la models/rmvpe models/hfa
+          python -c "from tetotune import game; d = game.ensure_model(print); print(d); assert d"
+          python -c "from tetotune import f0models; print(f0models.ensure_rmvpe(print))" || echo "RMVPE를 받지 못했어요"
+          python -c "from tetotune import align_fa; print(align_fa.ensure_model(print))" || echo "가사 맞추기 모델을 받지 못했어요"
+          ls -la models/* || true
           cat models/hfa/VERSION || true
-          python -c "import json; v=json.load(open('models/hfa/vocab.json')); print({k: (len(x) if k == 'vocab' else x) for k, x in v.items()}); print(sorted(v['vocab']))"
-          python -c "import json; print(json.load(open('models/hfa/config.json')).get('mel_spec_config'))"
+          python -c "import json; v=json.load(open('models/hfa/vocab.json')); print({k: (len(x) if k == 'vocab' else x) for k, x in v.items()}); print(sorted(v['vocab']))" || true
+          python -c "import json; print(json.load(open('models/hfa/config.json')).get('mel_spec_config'))" || true
+      - name: 준비한 것 캐시에 (이 실행에서만 씀, 올리지 않아요)
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            vocadito
+            csd
+            out/sep
+            out/csdsep
+            models
+          key: testdata-${{ github.run_id }}-${{ github.run_attempt }}
+
+  compare-mac:
+    name: 정확도 + 테토 렌더 (${{ matrix.only }})
+    needs: prepare
+    runs-on: macos-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:  # 렌더해야 차이가 보이는 것 (devtools/accuracy.py variants)
+          - {id: 1, only: "새 기본"}
+          - {id: 2, only: "PR6 기본"}
+          - {id: 3, only: "− OpenUtau 그대로 PITD"}
+          - {id: 4, only: "− 다듬기 한도"}
+          - {id: 5, only: "− 잔떨림 · 바로잡기 문턱"}
+          - {id: 6, only: "− 숨 자리"}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - run: python -m pip install -r requirements.txt -r requirements-extra.txt mir_eval
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            vocadito
+            csd
+            out/sep
+            out/csdsep
+            models
+          key: testdata-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
       - name: OpenUtau (Mac) 받기
         env:
           GH_TOKEN: ${{ github.token }}
-        run: devtools/openutau_harness/get_openutau.sh rmvpe game
+        run: devtools/openutau_harness/get_openutau.sh
       - name: 테토 음원 받기 (공식 배포, 시험에만 쓰고 올리지 않아요)
         run: |
           curl -fL --retry 3 -o teto.zip https://kasaneteto.jp/assets/download/utau/TETO-OUset240323.zip
@@ -128,12 +162,61 @@ jobs:
             --render "$PWD/OpenUtau.app/Contents/MacOS" "$PWD/ourun" --render-songs 3,10,14,22 --render-refs 4 \
             --render-sep-songs 1,3,5,9,10,13,14,17,21,22,25,29,33,37 \
             --csd csd --csd-n 12 --csd-sep out/csdsep --render-csd 4 \
-            --only "${{ matrix.only }}" --json "out/acc_${{ matrix.id }}.json" | tee out/accuracy.txt
+            --only "${{ matrix.only }}" --json "out/acc_m${{ matrix.id }}.json" | tee out/accuracy.txt
           sed -n '/^|/,$p' out/accuracy.txt >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: accuracy-${{ matrix.id }}
+          name: accuracy-m${{ matrix.id }}
+          path: |
+            out/acc_*.json
+            out/accuracy.txt
+          retention-days: 14
+
+  compare-linux:
+    name: 음표 · 가사 · 음 높이 (${{ matrix.only }})
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:  # 렌더 없이 보이는 것. 새 기본 · PR6 기본은 같은 리눅스에서 비교할 기준
+          - {id: 1, only: "새 기본"}
+          - {id: 2, only: "PR6 기본"}
+          - {id: 3, only: "− 음 높이 합치기 (Harvest)"}
+          - {id: 4, only: "− 가사 맞추기 모델"}
+          - {id: 5, only: "− GAME 경계 증거"}
+          - {id: 6, only: "− GAME 모음 시작 그대로"}
+          - {id: 7, only: "− っ · + 고침"}
+          - {id: 8, only: "− GAME 음 높이 고침"}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements.txt -r requirements-extra.txt mir_eval
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            vocadito
+            csd
+            out/sep
+            out/csdsep
+            models
+          key: testdata-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
+      - name: 방식별 비교 (렌더 없이)
+        run: |
+          set -o pipefail
+          python -W ignore devtools/accuracy.py --vocadito vocadito --separated out/sep \
+            --csd csd --csd-n 12 --csd-sep out/csdsep \
+            --only "${{ matrix.only }}" --tag " (리눅스)" --json "out/acc_l${{ matrix.id }}.json" | tee out/accuracy.txt
+          sed -n '/^|/,$p' out/accuracy.txt >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: accuracy-l${{ matrix.id }}
           path: |
             out/acc_*.json
             out/accuracy.txt
@@ -143,8 +226,6 @@ jobs:
     name: 음 높이 읽기 방법 (Harvest · RMVPE · SwiftF0 · 합치기, 렌더 없이)
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    env:
-      TETOTUNE_MODELS: ${{ github.workspace }}/models
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -167,24 +248,25 @@ jobs:
 
   clean:
     name: 보컬 다시 분리 · 잔향 제거 모델 확인 (렌더 없이)
+    needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 240
-    env:
-      TETOTUNE_MODELS: ${{ github.workspace }}/models
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install -r requirements.txt -r requirements-extra.txt "torch==2.5.1" "torchaudio==2.5.1" "demucs==4.0.1"
-      - name: vocadito 받기
-        run: |
-          url=$(curl -fsSL https://zenodo.org/api/records/5578807 | python -c 'import json,sys; print([f["links"]["self"] for f in json.load(sys.stdin)["files"] if f["key"].endswith(".zip")][0])')
-          curl -fL --retry 3 -o vocadito.zip "$url"
-          mkdir -p vocadito && unzip -q vocadito.zip -d vocadito && rm -rf vocadito/__MACOSX
-      - name: 분리한 보컬 만들기 (14곡, 올리지 않아요)
-        run: python -W ignore devtools/make_separated.py vocadito out/sep 1,3,5,9,10,13,14,17,21,22,25,29,33,37
-      - run: python -c "from tetotune import f0models; print(f0models.ensure_rmvpe(print))"
+      - run: python -m pip install -r requirements.txt -r requirements-extra.txt
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            vocadito
+            csd
+            out/sep
+            out/csdsep
+            models
+          key: testdata-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
       - name: 모델 확인 · 분리 SDR · 음 높이 읽기
         run: |
           set -o pipefail
@@ -193,7 +275,7 @@ jobs:
 
   merge:
     name: 방식별 정확도 (합친 표)
-    needs: compare
+    needs: [compare-mac, compare-linux]
     if: always()
     runs-on: ubuntu-latest
     steps:
