@@ -1,6 +1,8 @@
 """OpenUtau가 렌더링한 wav를 원래 보컬과 비교한다 (재생 없음, 숫자만).
-사용: python compare_render.py <결과 폴더> <렌더 wav> [그림.png] [--truth 정답 보컬.wav]
---truth: 조교에 넣은 보컬(guide_vocals.wav) 대신 이 보컬과 비교 (분리한 보컬로 조교했을 때 깨끗한 원래 보컬)"""
+사용: python compare_render.py <결과 폴더> <렌더 wav> [그림.png] [--truth 정답 보컬.wav] [--f0-truth 음 높이.csv]
+--truth: 조교에 넣은 보컬(guide_vocals.wav) 대신 이 보컬과 비교 (분리한 보컬로 조교했을 때 깨끗한 원래 보컬)
+--f0-truth: 원래 보컬의 음 높이를 Harvest로 읽지 않고 사람이 표시한 음 높이(시각, Hz; 0 = 소리 없음)를 쓴다.
+  Harvest로 읽으면 Harvest로 곡선을 만든 조교가 유리해서, 사람이 표시한 정답이 있으면 둘 다 잰다"""
 import json
 import sys
 from pathlib import Path
@@ -91,13 +93,33 @@ def smoothness(prev, ms, vs, dbs, mr, vr, dbr, notes):
             "event_kinds": dict(sorted(kinds.items(), key=lambda kv: -kv[1])), "events": events[:60]}
 
 
+def f0_frames(csv_path, n):
+    """사람이 표시한 음 높이 csv (시각, Hz) → HOP 프레임마다 (midi, 소리 있음). 가장 가까운 표시가 10ms 넘게 멀면 소리 없음."""
+    rows = []
+    for line in Path(csv_path).read_text().splitlines():
+        try:
+            rows.append([float(v) for v in line.split(",")[:2]])
+        except ValueError:
+            continue  # 머리글
+    ref = np.array(rows, dtype=float).reshape(-1, 2)
+    if len(ref) < 2:
+        return np.full(n, np.nan), np.zeros(n, dtype=bool)
+    t = np.arange(n) * HOP
+    i = np.clip(np.searchsorted(ref[:, 0], t), 1, len(ref) - 1)
+    i = np.where(np.abs(ref[i - 1, 0] - t) < np.abs(ref[i, 0] - t), i - 1, i)
+    m = pitch.hz_to_midi(np.where(np.abs(ref[i, 0] - t) <= 0.01, ref[i, 1], 0.0))
+    return m, np.isfinite(m)
+
+
 def main():
     argv = sys.argv[1:]
-    truth = None
-    if "--truth" in argv:
-        k = argv.index("--truth")
-        truth = argv[k + 1]
-        argv = argv[:k] + argv[k + 2:]
+    opts = {}
+    for flag in ("--truth", "--f0-truth"):
+        if flag in argv:
+            k = argv.index(flag)
+            opts[flag] = argv[k + 1]
+            argv = argv[:k] + argv[k + 2:]
+    truth, f0_truth = opts.get("--truth"), opts.get("--f0-truth")
     folder, render = Path(argv[0]), argv[1]
     png = argv[2] if len(argv) > 2 else None
     prev = json.loads((folder / "preview.json").read_text())
@@ -117,6 +139,8 @@ def main():
         return np.where(v, m, np.nan), v, db
 
     ms, vs, dbs = analyse(ys)
+    if f0_truth:
+        ms, vs = f0_frames(f0_truth, n)
     mr, vr, dbr = analyse(yr)
     ms = ms + prev["shift"]
     both = vs & vr

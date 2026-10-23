@@ -45,7 +45,8 @@ OFF = {
     "っ · + 고침": [(notes, "CLOSURE", False), (notes, "PLUS_FIX", False)],
     "GAME 음 높이 고침": [(notes, "TONE_FROM_F0", False)],
     "잔떨림 · 바로잡기 문턱": [(tune_mod, "JITTER_HZ", 0.0), (tune_mod, "CORRECT_GATE", 0.0)],
-    "다듬기 한도": [(refine_mod, "PITCH_FIX", "old"), (refine_mod, "DYN_TOTAL", 0.0), (refine_mod, "DYN_VOICED", False)],
+    "다듬기 음 높이 한도": [(refine_mod, "PITCH_FIX", "old")],
+    "다듬기 크기 한도": [(refine_mod, "DYN_TOTAL", 0.0), (refine_mod, "DYN_VOICED", False)],
     "숨 자리": [(tune_mod, "BREATH_ROOM", False)],
     "보컬 다시 분리": [(clean, "SEPARATE", "off")],
 }
@@ -123,6 +124,9 @@ def run_tune(wav, lyrics_text, out):
     res = tune(wav, out, lyrics_text, backing=str(bk) if bk and bk.exists() else None, options=Options(**OPTS),
                title="t")
     FA_LOG.extend(align_fa.LAST)
+    if bk and clean.wanted("vocals", True) and not clean.model_path("vocals") and "noclean" not in USED:
+        USED.add("noclean")
+        print("  보컬 다시 분리 모델이 없어서 분리한 보컬을 그대로 읽었어요", flush=True)
     if res.pitch_method not in USED:
         USED.add(res.pitch_method)
         print(f"  쓴 방법: {res.pitch_method}", flush=True)
@@ -174,15 +178,26 @@ def score_ref(truth, prev):
     for i, t in enumerate(tn):  # 시작 오차: 가장 가까운 추정 음절 (짝이 없어도)
         e = min(abs(x[0] - t[0]) for x in syl) * 1000 if syl else 999
         err["v" if notes._voiced_onset(t[3]) else "o"].append(e)
-    return {"n": len(tn), "tp": tp, "p": p, "r": r, "lyric": lyric, "tone": tone, "err_v": err["v"], "err_o": err["o"]}
+    hit = {i for i, _ in pairs}
+    miss = []  # 짝을 못 찾은 정답 음절: (시각, 정답 가사, 가장 가까운 추정 음절까지 ms, 그 가사)
+    for i, t in enumerate(tn):
+        if i not in hit and syl:
+            j = min(range(len(syl)), key=lambda j: abs(syl[j][0] - t[0]))
+            miss.append((round(t[0], 2), t[3], int((syl[j][0] - t[0]) * 1000), syl[j][3]))
+    return {"n": len(tn), "tp": tp, "p": p, "r": r, "lyric": lyric, "tone": tone, "err_v": err["v"], "err_o": err["o"],
+            "miss": miss, "extra": len(syl) - tp}
 
 
-def eval_refs(refs, patches):
+def eval_refs(refs, patches, label=""):
     res = []
     for d in refs:
         with patched(patches), tempfile.TemporaryDirectory() as tmp:
             prev = run_tune(d / "ref_ref.wav", (d / "lyrics.txt").read_text(encoding="utf-8"), Path(tmp) / "o")
         res.append(score_ref(json.load(open(d / "truth.json")), prev))
+        r = res[-1]
+        if r["miss"] or r["extra"]:  # 어느 음절을 놓치는지 (방식끼리 비교해서 무엇이 가사 · 음표를 떨어뜨리는지 찾게)
+            print(f"  {label} {d.name}: 놓침 {len(r['miss'])} · 남는 음절 {r['extra']}",
+                  " ".join(f"{t}s {a}→{dt:+d}ms {b}" for t, a, dt, b in r["miss"][:8]), flush=True)
     n = sum(r["n"] for r in res)
     tp = sum(r["tp"] for r in res)
     est = sum(r["tp"] / r["p"] if r["p"] else 0 for r in res)
@@ -523,10 +538,12 @@ def _render_only(ou, work, ustx):
     return sorted(d.glob("render_*.wav"))[0]
 
 
-def compare_wav(folder, wav, truth=None):
+def compare_wav(folder, wav, truth=None, f0_truth=None):
     cmd = [sys.executable, str(ROOT / "devtools/compare_render.py"), str(folder), str(wav)]
     if truth:
         cmd += ["--truth", str(truth)]
+    if f0_truth:
+        cmd += ["--f0-truth", str(f0_truth)]
     return json.loads(subprocess.run(cmd, check=True, capture_output=True, text=True).stdout)
 
 
@@ -541,9 +558,10 @@ def _mean(cs, k):
 
 
 def render_set(name, items, patches, args):
-    """items: [(이름, 보컬, 가사, 비교할 정답 보컬 또는 None)] → 곡마다 비교 결과."""
+    """items: [(이름, 보컬, 가사, 비교할 정답 보컬 또는 None[, 사람이 표시한 음 높이 csv])] → 곡마다 비교 결과.
+    음 높이 csv가 있으면 그것을 기준으로 잰 결과도 c["by_f0"]에 (Harvest 기준은 Harvest 곡선이 유리하다)."""
     out = []
-    for label, wav, text, truth in items:
+    for label, wav, text, truth, *f0_truth in items:
         with patched(patches), tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp) / "o"
             try:
@@ -553,12 +571,19 @@ def render_set(name, items, patches, args):
                                            rounds=Cfg.refine)
                     print(f"{name} {label} 고치기", json.dumps(rr["rounds"], ensure_ascii=False), flush=True)
                     c = compare_wav(folder, folder / "teto_preview.wav", truth)
+                    if f0_truth:
+                        c["by_f0"] = compare_wav(folder, folder / "teto_preview.wav", truth, f0_truth[0])
                 else:
                     c = render_compare(Path(args.render[0]), Path(args.render[1]), folder, truth)
             except (RuntimeError, subprocess.CalledProcessError) as e:
                 print(f"{name} {label} 렌더 못 함: {e}", flush=True)
                 continue
         c["song"] = label
+        if "by_f0" in c:
+            c["by_f0"].pop("events", None)
+            c["by_f0"]["song"] = label
+            print(f"{name} {label} (사람이 표시한 음 높이 기준)",
+                  json.dumps({k: c["by_f0"].get(k) for k in RENDER_KEYS + ("event_kinds",)}, ensure_ascii=False), flush=True)
         events = c.pop("events", [])
         print(f"{name} {label}", json.dumps({k: c.get(k) for k in RENDER_KEYS + ("event_kinds",)}, ensure_ascii=False),
               flush=True)
@@ -623,10 +648,10 @@ def main():
         try:
             FA_LOG.clear()
             if refs:
-                row.update(eval_refs(refs, patches))
+                row.update(eval_refs(refs, patches, name))
                 fa_summary(f"{name} 테토 정답")
             if krefs:
-                row.update({"k" + k: v for k, v in eval_refs(krefs, patches).items()})
+                row.update({"k" + k: v for k, v in eval_refs(krefs, patches, name).items()})
                 fa_summary(f"{name} 한글 정답")
             if songs:
                 row.update(eval_vocadito(songs, patches))
@@ -649,8 +674,8 @@ def main():
             sets = {
                 "ref": [(d.name, d / "ref_ref.wav", (d / "lyrics.txt").read_text(encoding="utf-8"), None) for d in refs[:n]],
                 "kref": [(d.name, d / "ref_ref.wav", (d / "lyrics.txt").read_text(encoding="utf-8"), None) for d in krefs[:n]],
-                "vocadito": [(str(k), wav, "", None) for k, wav, _, _ in songs if k in want],
-                "sep": [(str(k), f, "", clean) for k, f, _, _, clean in sep
+                "vocadito": [(str(k), wav, "", None, f0) for k, wav, f0, _ in songs if k in want],
+                "sep": [(str(k), f, "", clean, f0) for k, f, f0, _, clean in sep
                         if k in ({int(x) for x in args.render_sep_songs.split(",")} if args.render_sep_songs else want)],
                 "csd": [(name, wav, csd_lyrics(rows), None) for name, wav, rows in csd[:args.render_csd]],
                 "csdsep": [(name, w, csd_lyrics(rows), clean) for name, w, rows, clean in csd_sep[:args.render_csd]],
@@ -658,6 +683,9 @@ def main():
             for key, items in sets.items():
                 if items:
                     rend[key] = render_set(name, items, patches, args)
+                    by_f0 = [c.pop("by_f0") for c in rend[key] if "by_f0" in c]
+                    if by_f0:
+                        rend[key + "_f0"] = by_f0
         results[name + args.tag] = {"row": row, "render": rend}
     if args.json:
         Path(args.json).write_text(json.dumps(results, ensure_ascii=False), encoding="utf-8")
@@ -698,7 +726,8 @@ def print_tables(results):
         print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for name, r in rows.items():
             print(f"| {name} | {csd_cell(r)} | {csd_cell(r, 's')} |")
-    labels = {"ref": "테토 정답", "kref": "한글 정답", "vocadito": "사람 노래", "sep": "분리한 보컬", "csd": "CSD (가사)",
+    labels = {"ref": "테토 정답", "kref": "한글 정답", "vocadito": "사람 노래", "vocadito_f0": "사람 노래 (사람이 표시한 음 높이 기준)",
+              "sep": "분리한 보컬", "sep_f0": "분리한 보컬 (사람이 표시한 음 높이 기준)", "csd": "CSD (가사)",
               "csdsep": "분리 CSD (가사)"}
     for key, label in labels.items():
         have = [(name, v["render"][key]) for name, v in results.items() if v["render"].get(key)]
