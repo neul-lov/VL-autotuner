@@ -7,6 +7,7 @@ name: 조교 정확도 비교
 on:
   push:
     branches: ["claude/accuracy*"]
+    paths-ignore: ["**.md"]  # README만 고친 것은 다시 재지 않아요
   workflow_dispatch:
     inputs:
       extra:
