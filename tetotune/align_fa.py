@@ -398,7 +398,9 @@ def refine(notes, y, sr):
         old = [x.start for x in g if x.lyric != "+"]
         moved = [abs(x.start - o) for x, o in zip([x for x in new if x.lyric != "+"], old)] if new else []
         LAST.append({"phrase": gi, "conf": round(float(conf), 3), "n": len(syls), "placed": new is not None,
-                     "moved_ms": round(1000 * float(np.median(moved)), 1) if moved else None})
+                     "moved_ms": round(1000 * float(np.median(moved)), 1) if moved else None,
+                     "moved_max_ms": round(1000 * float(np.max(moved)), 1) if moved else None,
+                     "before": old, "after": [x.start for x in new if x.lyric != "+"] if new else None})
         if new is None:
             out.extend(g)
             continue
