@@ -66,6 +66,10 @@ ALT = {
                                         (align_fa, "GAP_EXTEND", True), (align_fa, "JOINT", 15.0)],
     "가사 맞추기 −15ms · 덜 버리기 · 30초 함께": [(align_fa, "OFFSET", -0.015), (align_fa, "SOFT_SPLIT", True),
                                         (align_fa, "GAP_EXTEND", True), (align_fa, "JOINT", 30.0)],
+    "가사 맞추기 −15ms · 덜 버리기 · 세 번 돌려 가운데": [(align_fa, "OFFSET", -0.015), (align_fa, "SOFT_SPLIT", True),
+                                          (align_fa, "GAP_EXTEND", True), (align_fa, "TTA", 3)],
+    "가사 맞추기 −15ms · 덜 버리기 · 다섯 번 돌려 가운데": [(align_fa, "OFFSET", -0.015), (align_fa, "SOFT_SPLIT", True),
+                                           (align_fa, "GAP_EXTEND", True), (align_fa, "TTA", 5)],
     "가사 맞추기 −15ms · 덜 버리기 · 첫 음절 0.4초": [(align_fa, "OFFSET", -0.015), (align_fa, "SOFT_SPLIT", True),
                                            (align_fa, "GAP_EXTEND", True), (align_fa, "FIRST_MAX", 0.4)],
 }

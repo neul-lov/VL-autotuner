@@ -24,6 +24,7 @@ MAX_PHRASE = 40.0  # 초. 모델이 배운 길이(45초)보다 긴 프레이즈�
 OFFSET = 0.0  # 초. 모델이 찾은 모음 시작에 더한다 (사람 노래 정답과 견줘 정한다)
 FIRST_MAX = 0.2  # 초. 프레이즈 첫 음절은 이 안에서만 옮긴다
 GAP_EXTEND = False  # 모음 시작이 음표 앞 틈에 있으면 그 음표 시작을 모음 시작으로 당긴다 (False면 음표 시작 그대로)
+TTA = 1  # 프레이즈마다 모델을 몇 번 돌릴지: 구간 시작을 모델 한 칸(10ms)의 1/TTA씩 밀어 돌리고 음절마다 가운데 값을 쓴다
 JOINT = 0.0  # 초. 이 길이 안의 이웃 프레이즈는 한꺼번에 맞춘다 (0 = 프레이즈마다)
 SOFT_SPLIT = False  # 모음 시작이 음표 끝 40ms 안이면 프레이즈를 버리지 않고 뒤 음표(150ms 안)를 쓰거나 40ms 앞에서 나눈다
 VOWELS = {"a", "i", "u", "e", "o", "N"}
@@ -424,7 +425,7 @@ def _fit(al, g, a, b, y, sr, tag):
         LAST.append({"phrase": tag, "syls": syls, "unknown": "".join(syls)[:40]})
         return None
     try:
-        times, conf = al.align(y[int(a * sr):int(b * sr)], sr, syls)
+        times, conf = _align_tta(al, y, sr, a, b, syls)
     except Exception as e:  # 모델이 이 소리를 못 다루면 이 프레이즈만 원래대로
         times, conf = None, 0.0
         LAST.append({"phrase": tag, "error": str(e)[:200]})
@@ -444,6 +445,23 @@ def _fit(al, g, a, b, y, sr, tag):
                  "raw_start": [a + t for t, _, _ in times] if times is not None else None,
                  "why": why[0] if why else ("align" if times is None else ("conf" if conf < MIN_CONF else ""))})
     return new
+
+
+def _align_tta(al, y, sr, a, b, syls):
+    """al.align을 구간 시작을 조금씩 밀어 TTA번 돌려서 음절마다 (시작, 모음 시작, 끝)의 가운데 값 (구간 시작 a 기준).
+    한 번은 틀려도 나머지가 맞으면 가운데 값은 맞는다. 맞춘 번이 없으면 (None, 확신)."""
+    hop = getattr(al, "hop", 441) / getattr(al, "sr", 44100)
+    runs, confs = [], []
+    for k in range(max(1, TTA)):
+        d = k * hop / max(1, TTA)
+        times, conf = al.align(y[int((a + d) * sr):int(b * sr)], sr, syls)
+        confs.append(conf)
+        if times is not None:
+            runs.append(np.array(times, dtype=float) + d)
+    if not runs:
+        return None, float(np.mean(confs))
+    med = np.median(np.stack(runs), axis=0) if len(runs) > 1 else runs[0]
+    return [tuple(float(v) for v in row) for row in med], float(np.mean(confs))
 
 
 def _without_closures(g):
