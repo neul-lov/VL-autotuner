@@ -39,3 +39,13 @@ def test_analysis_audio_is_the_vocal_when_off(monkeypatch):
     monkeypatch.setattr(clean, "DEREVERB", "off")
     y = np.zeros(44100)
     assert tune._for_analysis(y, 44100, None, [], lambda p, s: None) is y
+
+
+def test_separate_only_with_backing(monkeypatch, tmp_path):
+    """기본(SEPARATE "backing")은 반주 파일이 있을 때만 다시 분리한다. 반주가 없으면 모델을 받지도 쓰지도 않는다."""
+    assert clean.SEPARATE == "backing" and clean.DEREVERB == "off"
+    assert clean.wanted("vocals", "bk.wav") and not clean.wanted("vocals", None) and not clean.wanted("dereverb", "bk.wav")
+    monkeypatch.setattr(clean, "model_path", lambda name: tmp_path / "x.onnx")
+    monkeypatch.setattr(clean, "vocals", lambda *a, **k: pytest.fail("반주 없이 다시 분리했어요"))
+    y = np.random.default_rng(0).standard_normal(44100)
+    assert tune._for_analysis(y, 44100, None, [], lambda p, s: None) is y

@@ -13,8 +13,10 @@ from pathlib import Path
 
 import numpy as np
 
-SEPARATE = "off"  # "auto" = 모델이 있으면 다시 분리, "off" = 안 함 (CI에서 맞는지 확인한 뒤 켠다)
-DEREVERB = "off"
+# "backing" = 반주 파일이 있을 때만 보컬 + 반주(= 원래 곡)에서 다시 뽑는다, "auto" = 반주가 없어도 보컬에서 한 번 더, "off" = 안 함.
+# CI (vocadito 분리 보컬 14곡): 곡에서 다시 뽑으면 SDR 13.2 → 17.3dB, 음 높이 튐 0.39 → 0.20/분. 보컬에서 한 번 더는 그대로.
+SEPARATE = "backing"
+DEREVERB = "off"  # 잔향 제거는 SDR이 오히려 떨어지고 (14.0 → 10.3dB) 음 높이도 그대로라서 쓰지 않는다
 
 MODELS = {
     "vocals": {
@@ -39,6 +41,12 @@ SR = 44100
 
 def _ort():
     return importlib.util.find_spec("onnxruntime") is not None
+
+
+def wanted(name, backing=False):
+    """이 조교에 name 모델을 쓸지 (설정과 반주 파일이 있는지로)."""
+    mode = SEPARATE if name == "vocals" else DEREVERB
+    return mode == "auto" or (mode == "backing" and bool(backing))
 
 
 def model_path(name):
