@@ -47,37 +47,30 @@ OFF = {
     "다듬기 음 높이 한도": [(refine_mod, "PITCH_FIX", "old")],
     "숨 자리": [(tune_mod, "BREATH_ROOM", False)],
     "보컬 다시 분리": [(clean, "SEPARATE", "off")],
+    # PR10 뒤: 나눠 보기(diagnose.py)에서 50ms 넘게 틀린 음절의 78%는 모델이 찾은 모음 시작 자체가 틀린 것(17ms쯤 늦음),
+    # 18%는 음표를 나누지 못해 프레이즈째 버린 것이었고, 가사 줄 수와 찾은 프레이즈 수가 다른 곡에서 많이 틀렸다
+    "이웃 프레이즈 함께 맞추기": [(align_fa, "JOINT", 0.0)],
+    "가사 맞추기 시간 보정 · 덜 버리기": [(align_fa, "OFFSET", 0.0), (align_fa, "SOFT_SPLIT", False),
+                                (align_fa, "GAP_EXTEND", False)],
 }
+PR10 = OFF["이웃 프레이즈 함께 맞추기"] + OFF["가사 맞추기 시간 보정 · 덜 버리기"]
 FUSION = [(None, "pitch_method", "fusion")]
 # 기본값을 바꾸면 어떨지 (새 기본에 더해서)
 ALT = {
     "+ GAME 경계 증거": [(notes, "GAME_EVIDENCE", True)],
     "+ 다듬기 크기 한도": [(refine_mod, "DYN_TOTAL", 6.0), (refine_mod, "DYN_VOICED", True)],
-    "가사 맞추기 확신 0.6 넘을 때만": [(align_fa, "MIN_CONF", 0.6)],
-    "가사 맞추기 확신 0.65 넘을 때만": [(align_fa, "MIN_CONF", 0.65)],
-    "가사 맞추기 250ms 안만": [(align_fa, "MAX_MOVE", 0.25)],
-    "가사 맞추기 150ms 안만": [(align_fa, "MAX_MOVE", 0.15)],
-    # 나눠 보기(diagnose.py, 2026-10-23): 모델 모음 시작이 사람 노래 정답보다 17ms쯤 늦고, 50ms 넘게 틀린 음절의 18%는
-    # 음표 나누기가 안 돼서 프레이즈째 버린 것, 가사 줄 수와 찾은 프레이즈 수가 다른 곡에서 많이 틀린다
-    "가사 맞추기 −15ms": [(align_fa, "OFFSET", -0.015)],
-    "가사 맞추기 −15ms · 덜 버리기": [(align_fa, "OFFSET", -0.015), (align_fa, "SOFT_SPLIT", True),
-                                (align_fa, "GAP_EXTEND", True)],
-    "가사 맞추기 −15ms · 덜 버리기 · 15초 함께": [(align_fa, "OFFSET", -0.015), (align_fa, "SOFT_SPLIT", True),
-                                        (align_fa, "GAP_EXTEND", True), (align_fa, "JOINT", 15.0)],
-    "가사 맞추기 −15ms · 덜 버리기 · 30초 함께": [(align_fa, "OFFSET", -0.015), (align_fa, "SOFT_SPLIT", True),
-                                        (align_fa, "GAP_EXTEND", True), (align_fa, "JOINT", 30.0)],
-    "가사 맞추기 −15ms · 덜 버리기 · 세 번 돌려 가운데": [(align_fa, "OFFSET", -0.015), (align_fa, "SOFT_SPLIT", True),
-                                          (align_fa, "GAP_EXTEND", True), (align_fa, "TTA", 3)],
-    "가사 맞추기 −15ms · 덜 버리기 · 다섯 번 돌려 가운데": [(align_fa, "OFFSET", -0.015), (align_fa, "SOFT_SPLIT", True),
-                                           (align_fa, "GAP_EXTEND", True), (align_fa, "TTA", 5)],
-    "가사 맞추기 −15ms · 덜 버리기 · 첫 음절 0.4초": [(align_fa, "OFFSET", -0.015), (align_fa, "SOFT_SPLIT", True),
-                                           (align_fa, "GAP_EXTEND", True), (align_fa, "FIRST_MAX", 0.4)],
+    "가사 맞추기 −5ms": [(align_fa, "OFFSET", -0.005)],
+    # 빨리 견주기(quick, CSD 12곡 음절 시작 50ms 안, PR10 기본 0.706)에서 본 것 — 손으로 다시 보려면 "새 기본 & align_fa.X=값":
+    # 함께 맞추기 15 · 30 · 45초 0.758 · 0.777 · 0.768, 시간 보정 −5 · −15 · −25ms (15초 함께) 0.743 · 0.758 · 0.739
+    # (테토 정답 노래는 −5ms가 조금 낫다), 여러 번 돌려 가운데(TTA 3 · 5) 0.748 · 0.743 (보정 · 덜 버리기만 0.750),
+    # 첫 음절 0.4초 · 앞뒤 여유 0.6 · 0.5초 · 받침을 영어 음소로(KO_FINALS) · ㅓ를 중국어 음소로(KO_EO): ±0.005 안
 }
 
 
 def variants():
     """이름 → [(모듈, 이름, 값)]. 첫 번째가 지금 기본값. (None, 옵션 이름, 값)은 조교 설정을 바꾼다."""
-    out = {"새 기본": FUSION, "PR6 기본": [p for v in OFF.values() for p in v], "− 음 높이 합치기 (Harvest)": []}
+    out = {"새 기본": FUSION, "PR10 기본": FUSION + PR10, "PR6 기본": [p for v in OFF.values() for p in v],
+           "− 음 높이 합치기 (Harvest)": []}
     for k, v in OFF.items():
         out[f"− {k}"] = FUSION + v
     for k, v in ALT.items():
