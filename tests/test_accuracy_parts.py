@@ -60,8 +60,9 @@ def _sung(spans, n, gaps=()):
     return voiced, db
 
 
-def test_game_melisma_keeps_syllables_on_consonants():
+def test_game_melisma_keeps_syllables_on_consonants(monkeypatch):
     """あ い(+ +) し て(+) る: GAME이 8음표로 나눠도 음절은 자음 틈이 있는 곳에서 시작한다 (예전: 시간 순서대로 앞에 몰림)."""
+    monkeypatch.setattr(nt, "GAME_EVIDENCE", True)  # 기본은 꺼짐 (notes.py)
     n = int(4.0 / HOP)
     bounds = [0.0, 0.4, 0.8, 1.0, 1.2, 1.6, 2.0, 2.4, 2.8]
     tones = [60, 62, 64, 62, 60, 62, 64, 60]
