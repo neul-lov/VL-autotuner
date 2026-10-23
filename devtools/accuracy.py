@@ -260,9 +260,88 @@ def _hangul(s):
     return len(s) == 1 and HANGUL_SYL[0] <= s <= HANGUL_SYL[1]
 
 
+# CSD csv · txt의 음절은 발음 기호 (n_a, s_a_n, w_a: 음소를 _로 이음). 가사(lyric)는 한글 그대로.
+CSD_VOWELS = {"a", "ae", "eo", "e", "o", "u", "eu", "ui", "i", "oe"}
+_CSD_JUNG = [("", "a"), ("", "ae"), ("y", "a"), ("y", "ae"), ("", "eo"), ("", "e"), ("y", "eo"), ("y", "e"), ("", "o"),
+             ("w", "a"), ("w", "ae"), ("", "oe"), ("y", "o"), ("", "u"), ("w", "eo"), ("w", "e"), ("w", "i"), ("y", "u"),
+             ("", "eu"), ("", "ui"), ("", "i")]
+_CSD_CHO = [{"g", "k", "kk"}, {"kk", "g", "k"}, {"n"}, {"d", "t", "tt"}, {"tt", "d", "t"}, {"r", "l", "n"}, {"m"},
+            {"b", "p", "pp"}, {"pp", "b", "p"}, {"s", "ss"}, {"ss", "s"}, set(), {"j", "jj", "ch"}, {"jj", "j", "ch"},
+            {"ch", "j"}, {"k", "g"}, {"t", "d"}, {"p", "b"}, {"h"}]
+_CSD_SAME = [{"ae", "e"}, {"oe", "e", "ae"}, {"ui", "i", "e"}]
+
+
+def _csd_vowel_eq(a, b):
+    return a == b or any(a in g and b in g for g in _CSD_SAME)
+
+
+def _csd_token(tok):
+    """n_a → (첫 자음, 반모음, 모음). 모음이 없으면 모음은 None."""
+    ph = [x for x in tok.split("_") if x]
+    vi = next((i for i, x in enumerate(ph) if x in CSD_VOWELS), None)
+    if vi is None:
+        return (ph[0] if ph else "", "", None)
+    head = ph[:vi]
+    glide = head[-1] if head and head[-1] in ("y", "w") else ""
+    onset = head[0] if head and head[0] not in ("y", "w") else ""
+    return onset, glide, ph[vi]
+
+
+def csd_align(text, tokens):
+    """한글 가사 음절 text와 CSD 발음 음절 tokens(음표마다, 같은 수이거나 더 많음)를 맞춘다 → 음표마다 음절 또는 "+",
+    모음이 맞은 비율. 한 음절을 여러 음으로 부른 곳은 뒤 음표가 "+" (보통 모음만 적혀 있다)."""
+    n, m = len(text), len(tokens)
+    if n == 0 or n > m:
+        return None, 0.0
+    lyr = []
+    for c in text:
+        code = ord(c) - 0xAC00
+        cho, jung = code // 588, (code % 588) // 28
+        lyr.append((cho, *_CSD_JUNG[jung]))
+    tok = [_csd_token(t) for t in tokens]
+
+    def assign(i, j):
+        cho, glide, vowel = lyr[i]
+        on, gl, v = tok[j]
+        sc = 3.0 if v is not None and _csd_vowel_eq(vowel, v) else -2.0
+        if glide == gl:
+            sc += 0.5
+        if (on in _CSD_CHO[cho]) or (cho == 11 and on == "") or (cho == 18 and on == ""):
+            sc += 1.0
+        return sc
+
+    def cont(i, j):
+        on, gl, v = tok[j]
+        return 1.0 if not on and v is not None and _csd_vowel_eq(lyr[i][2], v) else -1.5
+
+    neg = -1e9
+    dp = np.full((n + 1, m + 1), neg)
+    back = np.zeros((n + 1, m + 1), dtype=np.int8)  # 1 = 음절 시작, 2 = 앞 음절 이어 부르기
+    dp[0, 0] = 0.0
+    for j in range(1, m + 1):
+        for i in range(1, min(n, j) + 1):
+            a = dp[i - 1, j - 1] + assign(i - 1, j - 1)
+            c = dp[i, j - 1] + cont(i - 1, j - 1) if j - 1 >= i else neg
+            if a >= c:
+                dp[i, j], back[i, j] = a, 1
+            else:
+                dp[i, j], back[i, j] = c, 2
+    out, i, j, ok = ["+"] * m, n, m, 0
+    while j > 0:
+        if back[i, j] == 1:
+            out[j - 1] = text[i - 1]
+            ok += tok[j - 1][2] is not None and _csd_vowel_eq(lyr[i - 1][2], tok[j - 1][2])
+            i -= 1
+        j -= 1
+    return out, ok / n
+
+
 def csd_songs(root, count=0):
     """→ [(이름, 오디오, [(시작, 끝, midi, 음절 또는 "+")])] (korean, 같은 노래를 두 조로 부른 것 중 a만).
-    한 음절을 여러 음으로 부른 곳은 음표가 나뉘어 있는데, 가사 파일(lyric)과 맞춰 보고 남는 음표는 "+"로 둔다."""
+    csv 음절은 발음 기호라서 가사 파일(lyric, 한글)과 모음 · 자음으로 맞춘다. 한 음절을 여러 음으로 부른 곳은 음표가
+    나뉘어 있어서, 남는 음표는 "+"로 둔다. 잘 맞지 않는 노래(모음이 맞은 비율 90% 아래)는 뺀다."""
+    import unicodedata
+
     root = Path(root)
     out = []
     for wav in sorted(root.rglob("korean/wav/*a.wav")):
@@ -272,15 +351,25 @@ def csd_songs(root, count=0):
         rows = []
         for row in csv.reader(open(csvp, encoding="utf-8-sig")):
             try:
-                rows.append([float(row[0]), float(row[1]), int(round(float(row[2]))), row[3].strip()])
+                rows.append([float(row[0]), float(row[1]), int(round(float(row[2]))),
+                             unicodedata.normalize("NFC", row[3].strip())])
             except (ValueError, IndexError):
                 continue  # 머리글
         if not rows:
             continue
         lyr = wav.parent.parent / "lyric" / (wav.stem + ".txt")
-        text = [c for c in lyr.read_text(encoding="utf-8-sig") if _hangul(c)] if lyr.exists() else []
+        raw = unicodedata.normalize("NFC", lyr.read_text(encoding="utf-8-sig")) if lyr.exists() else ""
+        text = [c for c in raw if _hangul(c)]
         syl = [r[3] for r in rows]
-        if text and len(text) < len(syl):
+        if sum(map(_hangul, syl)) < len(syl) / 2:  # 발음 기호
+            lab, rate = csd_align(text, syl)
+            if lab is None or rate < 0.9:
+                print(f"CSD {wav.stem}: 가사 {len(text)}음절 · 음표 {len(rows)}개를 맞추지 못해서 뺌 (모음 {rate:.2f}), "
+                      f"처음 {syl[:6]} {''.join(text[:12])}", flush=True)
+                continue
+            for r, x in zip(rows, lab):
+                r[3] = x
+        elif text and len(text) < len(syl):
             keep = set()
             for a, b, k in difflib.SequenceMatcher(None, syl, text, autojunk=False).get_matching_blocks():
                 keep.update(range(a, a + k))
