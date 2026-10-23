@@ -28,7 +28,7 @@ on:
         default: ""
 
 concurrency:  # 손으로 돌린 비교는 push가 끊지 않게 따로
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}${{ inputs.diagnose && '-diag' || '' }}${{ inputs.quick && '-quick' || '' }}
   cancel-in-progress: true
 
 permissions:
