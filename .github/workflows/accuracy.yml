@@ -210,9 +210,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:  # 새 방식 vs 예전 방식: Mac 자리를 먼저 받게 따로 둔다
-          - {id: 1, only: "새 기본"}
-          - {id: 2, only: "PR10 기본"}
+        include:  # 새 방식 vs 예전 방식: Mac 자리를 먼저 받게 따로 둔다.
+          # 새 기본 · PR10 기본 렌더는 0c84fec 실행(40015622800)에 있어서, 지금은 렌더가 나빠진 까닭을 찾는 판만
+          - {id: 1, only: "새 기본 & align_fa.OFFSET=0.0"}
+          - {id: 2, only: "가사 맞추기 −5ms"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -290,8 +291,8 @@ jobs:
       fail-fast: false
       max-parallel: 1  # Mac은 한 번에 5대: 새 방식 vs 예전 방식 둘 · 음표만 보는 둘 다음
       matrix:
-        include:  # 렌더해야 차이가 보이는 것 (devtools/accuracy.py variants). 지금은 PR6 기본과 이어 보려고
-          - {id: 3, only: "PR6 기본"}
+        include:  # 렌더해야 차이가 보이는 것 (devtools/accuracy.py variants)
+          - {id: 3, only: "− 가사 맞추기 시간 보정 · 덜 버리기"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -367,8 +368,7 @@ jobs:
       fail-fast: false
       matrix:
         include:  # 테토 정답 노래(렌더해야 만든다)로만 보이는 음표 · 가사 차이: 렌더 비교 없이 방식 넷씩
-          - {id: 7, only: "새 기본,− 이웃 프레이즈 함께 맞추기,− 가사 맞추기 시간 보정 · 덜 버리기"}
-          - {id: 8, only: "가사 맞추기 −5ms,− 가사 맞추기 모델"}
+          - {id: 7, only: "가사 맞추기 −5ms & align_fa.SOFT_SPLIT=False & align_fa.GAP_EXTEND=False,새 기본 & align_fa.SOFT_SPLIT=False & align_fa.GAP_EXTEND=False"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -436,14 +436,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:  # 렌더 없이 보이는 것. 새 기본 · PR6 기본은 같은 리눅스에서 비교할 기준
-          - {id: 1, only: "새 기본"}
-          - {id: 2, only: "PR10 기본"}
-          - {id: 3, only: "PR6 기본"}
-          - {id: 4, only: "− 가사 맞추기 모델"}
-          - {id: 5, only: "− 이웃 프레이즈 함께 맞추기"}
-          - {id: 6, only: "− 가사 맞추기 시간 보정 · 덜 버리기"}
-          - {id: 7, only: "가사 맞추기 −5ms"}
+        include:  # 렌더 없이 보이는 것. 새 기본 · PR10 기본 · 하나씩 뺀 판은 0c84fec 실행(40015622800)에 있다
+          - {id: 1, only: "새 기본 & align_fa.OFFSET=0.0"}
+          - {id: 2, only: "가사 맞추기 −5ms & align_fa.SOFT_SPLIT=False & align_fa.GAP_EXTEND=False"}
+          - {id: 3, only: "새 기본 & align_fa.SOFT_SPLIT=False & align_fa.GAP_EXTEND=False"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
