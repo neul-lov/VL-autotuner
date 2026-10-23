@@ -18,6 +18,14 @@ ONSET_ANY = True  # False면 자음 같은(무성 · 높은 대역) 짧은 음�
 SYL_GAP = 0.12  # 음절 시작 후보 두 곳이 이보다 가까우면 약한 쪽은 마지막에 고른다 (_evidence, 0이면 끔)
 USE_GAME = True  # GAME 모델이 있으면 음표 나누기를 GAME으로 (game.py). 없으면 아래 비터비
 VOWEL_ONSET = True  # 울리는 자음(ま · な · ら · や · わ · が행 등)으로 시작하는 음절은 음표 시작을 모음 시작으로 옮긴다
+VOWEL_ONSET_GAME = False  # GAME 음표에도 (GAME은 이미 모음 시작에 음표를 둔다: DiffSinger처럼 자음은 앞 낱말 몫)
+GAME_EVIDENCE = False  # True면 GAME이 나눈 곳마다 자음 틈 · 크기 꺼짐 · 소리 빛깔 바뀜으로 새 음절일 가능성을 따로 매긴다.
+# 끈 까닭 (CI 2차): 한글 테토 정답 가사 152 → 켜면 136/168, 음표 F1 0.917 → 0.899, 일본어도 298 → 295/336.
+# 한 모음을 여러 음으로 부르는 곳은 가사 맞추기 모델(align_fa)이 음절 시작을 다시 잡는다
+GAME_MERGE = 0.09  # 초. GAME 음표가 이보다 짧으면 이웃에 합친다 (미끄러짐 · 비브라토 조각). 0 = 안 함
+CLOSURE = True  # っ는 음절 시작 자리를 차지하지 않고 앞 음절 끝의 짧은 음표로 (다음 자음 앞 막힘)
+TONE_FROM_F0 = True  # GAME 음표 높이가 그 음표 가운데에서 읽은 음 높이와 1~2반음 다르면 읽은 쪽으로 (읽은 음이 고를 때만)
+PLUS_FIX = True  # 앞 음표에 붙지 않은 "+"(소리 없이 남는다)는 앞 음표를 늘이거나 앞 모음으로 부른다
 
 
 class Note:
@@ -178,9 +186,11 @@ def segment(midi, voiced, db, novelty=None, auto_split_db=6.0, noise=None, hiban
     return notes, offset
 
 
-def from_game(game_notes, midi, voiced):
+def from_game(game_notes, midi, voiced, db=None, novelty=None):
     """GAME 음표 [(시작, 끝, midi 소수)] → Note 목록. 쉼(REST_GAP보다 긴 틈) 뒤는 프레이즈 시작.
-    GAME이 나눈 곳은 새 음절일 가능성이 커서 무성 틈(자음)과 같은 세기로 둔다."""
+    GAME_EVIDENCE면 나눈 곳마다 새 음절일 가능성(세기)을 소리로 매긴다 (비터비 쪽 segment와 같은 눈금):
+    자음 틈(무성)이 있으면 5, 아니면 1 + 음 차이 + 크기 꺼짐 + 소리 빛깔 바뀜. 예전에는 모두 5라서 가사가
+    음표 순서대로만 들어갔다 (한 모음을 여러 음으로 부르면 다음 음절이 너무 일찍)."""
     offset = tuning_offset(midi, voiced)
     out = []
     for s, e, p in game_notes:
@@ -190,7 +200,99 @@ def from_game(game_notes, midi, voiced):
         if out and gap < 0:
             out[-1].end = s
         out.append(Note(s, e, int(np.round(p - offset)), strength=10.0 if gap > REST_GAP else 5.0))
+    if TONE_FROM_F0:
+        _tone_from_f0(out, midi, voiced, offset)
+    if GAME_EVIDENCE and db is not None and out:
+        _game_evidence(out, voiced, db, novelty)
+        if GAME_MERGE > 0:
+            out = _merge_game(out, GAME_MERGE)
     return out, offset
+
+
+def _tone_from_f0(out, midi, voiced, offset, lo=0.6, hi=2.5):
+    """음표 가운데 60%에서 읽은 음 높이가 고르고(70% 넘게 소리 남, 사분위 폭 70센트 안) GAME 높이와 lo~hi반음 다르면
+    읽은 음 높이로. 한 옥타브쯤 다른 것은 음 높이 읽기가 틀렸을 때가 많아서 두지 않는다."""
+    n = len(midi)
+    for x in out:
+        a, b = int(x.start / HOP), int(x.end / HOP)
+        k = (b - a) // 5
+        a, b = max(0, a + k), min(n, b - k)
+        if b - a < 10:
+            continue
+        v = voiced[a:b] & np.isfinite(midi[a:b])
+        if v.mean() < 0.7:
+            continue
+        m = midi[a:b][v] - offset
+        q1, med, q3 = np.percentile(m, [25, 50, 75])
+        if q3 - q1 > 0.7:
+            continue
+        if lo < abs(med - x.tone) < hi:
+            x.tone = int(np.round(med))
+
+
+def _nov_z(novelty, voiced):
+    if novelty is None or not voiced.any():
+        return np.zeros(len(voiced))
+    ref = np.median(novelty[voiced])
+    spread = np.median(np.abs(novelty[voiced] - ref)) * 1.4826 + 1e-9
+    return (novelty - ref) / spread
+
+
+def _game_evidence(out, voiced, db, novelty):
+    """프레이즈 안 GAME 경계마다 세기, 음표 안에는 같은 음으로 바뀐 음절 후보(dips)."""
+    from scipy.ndimage import uniform_filter1d
+
+    db_s = uniform_filter1d(db, 5)
+    nz = _nov_z(novelty, voiced)
+    n = len(db)
+    w = int(0.15 / HOP)
+    for i, x in enumerate(out):
+        if i and x.strength < 10:
+            prv = out[i - 1]
+            k = int(round(x.start / HOP))
+            a, b = max(0, int(round(prv.end / HOP)) - int(0.06 / HOP)), min(n, k + int(0.03 / HOP))
+            unv = max((e - s for s, e in _runs(~voiced[a:b])), default=0) * HOP
+            if unv >= 0.02:
+                x.strength = 5.0 + min(2.0, unv / 0.05)  # 자음 (ㅅ · ㅎ · か행 …)
+            else:
+                lo = db_s[max(0, k - int(0.04 / HOP)):min(n, k + int(0.04 / HOP) + 1)].min()
+                left = db_s[max(0, k - w):k].max() if k > 0 else lo
+                right = db_s[k + 1:min(n, k + w)].max() if k + 1 < n else lo
+                depth = max(0.0, min(left, right) - lo)
+                bonus = max(0.0, float(nz[max(0, k - 6):k + 7].max()) - 1.0)
+                x.strength = 1.0 + min(2.0, 0.5 * abs(x.tone - prv.tone)) + min(4.0, depth / 2) + min(4.0, bonus)
+        fa, fb = int(round(x.start / HOP)), int(round(x.end / HOP))
+        fv = fb
+        while fv > fa and not voiced[min(n, fv) - 1]:
+            fv -= 1
+        if fv - fa > int(0.25 / HOP):
+            x.dips = [(c * HOP, sc) for c, sc, _ in _cuts(db_s, nz, fa, min(fv, n))]
+
+
+def _merge_game(notes, min_len):
+    """짧은 GAME 음표(음이 넘어가는 중간 · 비브라토 조각)를 높이가 가까운 이웃에 합친다. 없어진 경계는 약한 후보로 남긴다
+    (음절이 모자라면 가사 맞추기가 거기서 나눈다). 자음 틈으로 시작하는 짧은 음표는 짧은 음절일 수 있어서 둔다."""
+    notes = list(notes)
+    i = 0
+    while i < len(notes) and len(notes) > 1:
+        x = notes[i]
+        if x.end - x.start >= min_len or x.strength >= 5:
+            i += 1
+            continue
+        prv = notes[i - 1] if i > 0 and abs(notes[i - 1].end - x.start) < 1e-6 else None
+        nxt = notes[i + 1] if i + 1 < len(notes) and notes[i + 1].strength < 5 \
+            and abs(notes[i + 1].start - x.end) < 1e-6 else None
+        if nxt and (not prv or abs(nxt.tone - x.tone) <= abs(prv.tone - x.tone)):
+            nxt.dips = [(nxt.start, min(NEUTRAL, nxt.strength))] + x.dips + nxt.dips
+            nxt.start, nxt.strength = x.start, x.strength
+        elif prv:
+            prv.dips += [(x.start, min(NEUTRAL, x.strength))] + x.dips
+            prv.end = x.end
+        else:
+            i += 1
+            continue
+        notes.pop(i)
+    return notes
 
 
 def _consonant_like(note, voiced, hiband):
@@ -354,6 +456,14 @@ def _align_group(notes, syls):
     고르지 않은 음표 경계는 "+"(한 음절을 여러 음에 걸쳐 부르기), 고른 음표 안 후보에서는 음표를 나눈다."""
     if not notes or not syls:
         return notes
+    if CLOSURE and "っ" in syls[1:]:
+        core, closures = [], set()
+        for x in syls:
+            if x == "っ" and core:
+                closures.add(len(core) - 1)
+            else:
+                core.append(x)
+        return _insert_closures(_align_group(notes, core), closures)
     ev = _evidence(notes)
     chosen = ev[:len(syls) - 1]
     starts = {notes[0].start} | {e[3] for e in chosen if e[1] == "b"}
@@ -385,6 +495,60 @@ def _align_group(notes, syls):
         for n in notes:
             n.weak = True
     return notes
+
+
+def _insert_closures(notes, closures, most=0.09):
+    """っ: 그 앞 음절이 끝나는 음표의 마지막 조금(most초, 음표 절반까지)을 っ 음표로 나눈다. OpenUtau(presamp)는 っ를
+    앞 모음 + 다음 자음(VC)으로 불러서 다음 자음 앞에서 소리가 막힌다. 예전에는 っ도 음절 하나라서 음표 경계를 하나
+    차지했다 (きっと가 き · っ · と로 나뉘어 と가 늦게)."""
+    starts = [i for i, x in enumerate(notes) if x.lyric != "+"]
+    for j in sorted(closures, reverse=True):
+        if j >= len(starts):
+            continue
+        k = (starts[j + 1] if j + 1 < len(starts) else len(notes)) - 1
+        x = notes[k]
+        if x.end - x.start < 0.06:
+            continue
+        t = max(x.start + 0.5 * (x.end - x.start), x.end - most)
+        c = Note(t, x.end, x.tone, "っ", strength=3.0)
+        x.end = t
+        notes.insert(k + 1, c)
+    return notes
+
+
+def vowel_of(lyric):
+    """음절의 모음만: か → あ, きゃ → あ, 강 → 아. 모르면 None."""
+    if not lyric or lyric == "+":
+        return None
+    c = lyric[-1]
+    if "가" <= c <= "힣":
+        return chr(0xAC00 + 11 * 588 + ((ord(c) - 0xAC00) % 588) // 28 * 28)
+    from .lyrics import VOWEL
+    return VOWEL.get(c) or ("ん" if c == "ん" else None)
+
+
+def fix_plus(notes, breaths=(), max_gap=0.3, default="ら"):
+    """ "+"(앞 음절 이어 부르기)는 OpenUtau에서 앞 음표에 딱 붙어 있어야 이어진다. 틈이 있으면 "+"라는 가사로 가서
+    소리가 나지 않는다 (틈 뒤 "+", 음절을 하나도 못 받은 프레이즈). 숨이 없는 짧은 틈이면 앞 음표를 늘이고,
+    아니면 앞 음절의 모음으로 부른다. → 고친 수"""
+    spans = [(b.start, b.end) if isinstance(b, Note) else (b[0], b[1]) for b in breaths]
+    prev, last, fixed = None, None, 0
+    for x in notes:
+        if x.lyric != "+":
+            prev, last = x, x.lyric
+            continue
+        if prev is not None and abs(x.start - prev.end) < 1e-9:
+            prev = x
+            continue
+        gap = x.start - prev.end if prev is not None else 99.0
+        if prev is not None and 0 < gap < max_gap and not any(s < x.start and e > prev.end for s, e in spans):
+            prev.end = x.start
+        else:
+            x.lyric = vowel_of(last) or default
+            x.weak = True
+        fixed += 1
+        prev = x
+    return fixed
 
 
 def _phrases(notes):

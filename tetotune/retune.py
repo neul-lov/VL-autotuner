@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from . import audio, edit
+from . import audio, edit, oupitch
 from .notes import REST_GAP
 from .tune import Options, _simplify, tune
 
@@ -170,6 +170,12 @@ def retune(folder, start, end, options=None, lyrics_text=None, renote=False, pro
         shift = int(round(off * p.tps))
         lo, hi = int(round((a - EDGE) * p.tps)), int(round((b + EDGE) * p.tps))
         part = p.part
+        grid, held = p.sung_pitch()  # 구간 밖은 지금 부르는 음 높이 그대로 (음표가 바뀌어도 PITD를 다시 써서 지킨다)
+        new_notes = sorted(new["voice_parts"][0]["notes"], key=lambda x: x["position"])
+        new_pitd = next((c for c in new["voice_parts"][0].get("curves", []) if c["abbr"] == "pitd"), None)
+        inside = (grid >= lo) & (grid <= hi)
+        if new_notes and inside.any():
+            held = np.where(inside, oupitch.sung(new_notes, new_pitd, p.tps, grid - shift), held)
         keep = [x for x in part["notes"] if not lo <= x["position"] <= hi]
         add = []
         for x in new["voice_parts"][0]["notes"]:
@@ -186,11 +192,14 @@ def retune(folder, start, end, options=None, lyrics_text=None, renote=False, pro
         part["notes"] = merged
         cur = {c["abbr"]: c for c in part.get("curves", [])}
         for c in new["voice_parts"][0].get("curves", []):
+            if c["abbr"] == "pitd":
+                continue  # 아래 keep_pitch가 다시 쓴다
             c = {"abbr": c["abbr"], "xs": [x + shift for x in c["xs"]], "ys": list(c["ys"])}
             if c["abbr"] not in cur:
                 cur[c["abbr"]] = {"abbr": c["abbr"], "xs": [], "ys": []}
                 part.setdefault("curves", []).append(cur[c["abbr"]])
             _splice_curve(cur[c["abbr"]], c, lo, hi)
+        p.keep_pitch(grid, held)
         # 바꿀 것을 모두 결과 폴더 안의 임시 파일로 먼저 만들고, 되돌리기 기록(소리 포함)을 남긴 뒤 한 번에 바꿔 넣는다.
         # 중간에 실패하면 기록으로 되돌려서 소리 · 음표 · 미리 보기가 서로 어긋나지 않게
         prev_path = folder / "preview.json"

@@ -87,25 +87,26 @@ def ensure_model(progress=lambda s: None):
     return dest
 
 
-def _download(url, path, sha256):
-    """url → path. 크기가 MAX_DOWNLOAD를 넘거나 SHA-256이 다르면 ValueError (받은 파일은 지운다)."""
+def _download(url, path, sha256, max_bytes=None, what="GAME 모델"):
+    """url → path. 크기가 max_bytes(기본 MAX_DOWNLOAD)를 넘거나 SHA-256이 다르면 ValueError (받은 파일은 지운다)."""
     import hashlib
     import urllib.request
 
+    limit = max_bytes or MAX_DOWNLOAD
     h, size = hashlib.sha256(), 0
     try:
         with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "OpenUtau"}), timeout=60) as r, \
                 open(path, "wb") as f:
-            if int(r.headers.get("Content-Length") or 0) > MAX_DOWNLOAD:
-                raise ValueError("GAME 모델 파일이 너무 커요")
+            if int(r.headers.get("Content-Length") or 0) > limit:
+                raise ValueError(f"{what} 파일이 너무 커요")
             while chunk := r.read(1 << 20):
                 size += len(chunk)
-                if size > MAX_DOWNLOAD:
-                    raise ValueError("GAME 모델 파일이 너무 커요")
+                if size > limit:
+                    raise ValueError(f"{what} 파일이 너무 커요")
                 h.update(chunk)
                 f.write(chunk)
         if h.hexdigest() != sha256.lower():
-            raise ValueError(f"GAME 모델 파일이 예상과 달라요 (SHA-256 {h.hexdigest()})")
+            raise ValueError(f"{what} 파일이 예상과 달라요 (SHA-256 {h.hexdigest()})")
     except BaseException:
         Path(path).unlink(missing_ok=True)
         raise

@@ -87,13 +87,19 @@ class Project:
     def _curve(self, abbr):
         return next((c for c in self.part.get("curves", []) if c["abbr"] == abbr), None)
 
-    def base_at(self, ticks):
-        """OpenUtau가 음표만으로 만드는 계단 (센트): 그 틱 뒤에 끝나는 첫 음표의 높이."""
+    def sung_pitch(self):
+        """지금 테토가 부르는 음 높이 (OpenUtau 계산 그대로, 센트) → (틱 격자, 값). 음표를 바꾼 뒤 keep_pitch로 되살린다."""
+        from . import oupitch
+
         ns = sorted(self.notes, key=lambda x: x["position"])
-        ends = np.array([x["position"] + x["duration"] for x in ns])
-        tones = np.array([x["tone"] for x in ns]) * 100.0
-        k = np.searchsorted(ends, ticks, side="right")
-        return tones[np.minimum(k, len(ns) - 1)]
+        grid = np.arange(max(0, ns[0]["position"] - 2 * TICKS), ns[-1]["position"] + ns[-1]["duration"] + 2 * TICKS)
+        return grid, oupitch.sung(ns, self._curve("pitd"), self.tps, grid)
+
+    def keep_pitch(self, grid, held):
+        """음표를 바꾼 뒤: 피치 점을 다시 쓰고, 부르는 음 높이가 바꾸기 전(sung_pitch)과 같게 PITD를 다시 쓴다."""
+        from . import oupitch
+
+        oupitch.rewrite(self.part, self.tps, grid, held)
 
     def shift_pitd(self, a, b, delta):
         """틱 a~b의 PITD에 delta(틱 배열 → 센트)를 더한다."""
@@ -213,13 +219,11 @@ def op_merge(p, j):
     i, k = sung[j], sung[j + 1]
     x, y = p.notes[i], p.notes[k]
     a, end = x["position"], y["position"] + y["duration"]
-    old = p.base_at(np.arange(a // INTERVAL * INTERVAL, end + INTERVAL, INTERVAL))
+    grid, held = p.sung_pitch()
     tone = x["tone"] if x["duration"] >= y["duration"] else y["tone"]
     x["duration"], x["tone"] = end - a, tone
     del p.notes[k]
-    grid0 = np.arange(a // INTERVAL * INTERVAL, end + INTERVAL, INTERVAL)
-    new = p.base_at(grid0)
-    p.shift_pitd(grid0[0], grid0[-1], lambda g: np.interp(g, grid0, old - new))
+    p.keep_pitch(grid, held)
 
 
 OPS = {"lyric": op_lyric, "move_left": op_move_left, "move_right": op_move_right, "extend": op_extend,

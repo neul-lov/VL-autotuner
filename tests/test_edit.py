@@ -61,14 +61,14 @@ def test_unextend_pulls_syllables(folder):
 
 
 def test_merge_keeps_sung_pitch(folder):
+    from tetotune import oupitch
     p = edit.Project(folder)
-    grid = np.arange(480, 1200, 5)
-    before = p.base_at(grid) + np.interp(grid, [0, 3000], [0, 0])
+    grid = np.arange(480, 1200)  # OpenUtau가 어느 틱에서 재도 (5틱 격자가 어디서 시작하든)
+    before = oupitch.sung(p.notes, p._curve("pitd"), p.tps, grid)
     edit.apply(folder, "merge", 0)  # あ(60) + い(62): 길이가 같으면 앞 음표 높이, い는 뒤로 민다
     p = edit.Project(folder)
-    c = next(c for c in p.part["curves"] if c["abbr"] == "pitd")
-    after = p.base_at(grid) + np.interp(grid, c["xs"], c["ys"])
-    assert np.max(np.abs(after - before)) <= 1.6
+    after = oupitch.sung(p.notes, p._curve("pitd"), p.tps, grid)
+    assert np.max(np.abs(after - before)) <= 2.5
     assert [p.notes[i]["lyric"] for i in p.sung()][:4] == ["あ", "い", "+", "う"]  # 음절은 한 음표씩 밀린다
 
 
