@@ -133,14 +133,16 @@ def fa_summary(label):
     """가사 맞추기 모델 기록 요약을 찍고 비운다 (확신 문턱 MIN_CONF을 정할 때 본다)."""
     rows = [r for r in FA_LOG if "conf" in r]
     errs = [r["error"] for r in FA_LOG if "error" in r]
+    unknown = [r["unknown"] for r in FA_LOG if "unknown" in r]
     FA_LOG.clear()
-    if not rows and not errs:
+    if not rows and not errs and not unknown:
         return
     conf = np.array([r["conf"] for r in rows]) if rows else np.array([np.nan])
     moved = [r["moved_ms"] for r in rows if r.get("moved_ms") is not None]
     print(f"  가사 맞추기 {label}: 프레이즈 {len(rows)}개 중 {sum(r['placed'] for r in rows)}개 맞춤, "
           f"확신 10/50/90% {np.nanpercentile(conf, 10):.3f}/{np.nanpercentile(conf, 50):.3f}/{np.nanpercentile(conf, 90):.3f}, "
-          f"옮긴 거리 중앙 {np.median(moved) if moved else float('nan'):.0f}ms, 오류 {len(errs)} {errs[:2]}", flush=True)
+          f"옮긴 거리 중앙 {np.median(moved) if moved else float('nan'):.0f}ms, 오류 {len(errs)} {errs[:2]}, "
+          f"모르는 음절이라 건너뜀 {len(unknown)} {unknown[:3]}", flush=True)
 
 
 # ---------------------------------------------------------------- 테토 정답 노래
