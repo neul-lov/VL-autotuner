@@ -27,7 +27,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {id: 1, only: "새 기본,PR3 기본"}
+          - {id: 1, only: "새 기본,PR4 기본"}
           - {id: 2, only: "다듬기 없음"}
     steps:
       - uses: actions/checkout@v4
@@ -50,7 +50,7 @@ jobs:
       - name: 분리한 보컬 만들기 (vocadito + 잔향 + 만든 반주 → Demucs, 올리지 않아요)
         if: steps.demucs.outcome == 'success'
         continue-on-error: true
-        run: python -W ignore devtools/make_separated.py vocadito out/sep 3,10,14,22
+        run: python -W ignore devtools/make_separated.py vocadito out/sep 1,3,5,9,10,13,14,17,21,22,25,29,33,37
       - name: OpenUtau (Mac) 받기
         env:
           GH_TOKEN: ${{ github.token }}
@@ -80,6 +80,7 @@ jobs:
           set -o pipefail
           python -W ignore devtools/accuracy.py --refs out/ref* --refs-ko out/kref* --vocadito vocadito --separated out/sep \
             --render "$PWD/OpenUtau.app/Contents/MacOS" "$PWD/ourun" --render-songs 3,10,14,22 --render-refs 4 \
+            --render-sep-songs 1,3,5,9,10,13,14,17,21,22,25,29,33,37 \
             --only "${{ matrix.only }}" --json "out/acc_${{ matrix.id }}.json" | tee out/accuracy.txt
           sed -n '/^|/,$p' out/accuracy.txt >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4

@@ -123,6 +123,7 @@ def main():
             y = audio.resample(y, sr, SR)
         v = reverb(y)
         acc = accompaniment(notes, len(v) / SR, seed=k)
+        acc = np.pad(acc, (0, max(0, len(v) - len(acc))))[:len(v)]  # 초 → 샘플 반올림으로 한 샘플 모자랄 때가 있다
         acc *= np.sqrt(np.mean(v ** 2)) / max(1e-9, np.sqrt(np.mean(acc ** 2)))  # 보컬 : 반주 = 0dB
         mix = v + acc
         mix /= max(1.0, np.abs(mix).max() / 0.95)
