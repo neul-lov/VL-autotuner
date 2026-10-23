@@ -172,6 +172,17 @@ def hangul_phones(syl, prev=None):
     return out
 
 
+def _romaji_phones(r):
+    """사전에 없는 로마자 → 자음 · 모음 (ti → t i, kwa → kw a, n → N)."""
+    if r in ("n", "N"):
+        return ["N"]
+    if r == "cl":
+        return ["cl"]
+    if not r or r[-1] not in "aiueo":
+        return None
+    return [r[:-1], r[-1]] if len(r) > 1 else [r]
+
+
 class Aligner:
     def __init__(self, folder):
         import onnxruntime as ort
@@ -193,22 +204,28 @@ class Aligner:
                     k, v = line.split("\t", 1)
                     self.dict[k.strip()] = v.strip().split()
         self.ids = self.vocab["vocab"]
+        self.sil = self.ids.get("SP", 0)
 
     def phones(self, syl, prev=None):
-        """음절 → 모델 음소 목록 (없는 음소가 있으면 None)."""
+        """음절 → 모델 음소 목록 (없는 음소가 있으면 None). っ · 받침 막힘(cl)은 모델에서 쉼(SP)과 같은 음소라서
+        (merged_phoneme_groups) 빼고, 음절 사이에 넣는 SP가 맡는다."""
         if len(syl) == 1 and "가" <= syl <= "힣":
             ph = hangul_phones(syl, prev)
         else:
             r = kana_romaji(syl)
             if r is None:
                 return None
-            ph = self.dict.get(r) or self.dict.get({"n": "N", "cl": "cl"}.get(r, r)) or ([r] if r in ("N", "cl") else None)
-            if ph is None and r == "n":
-                ph = ["N"]
+            ph = _romaji_phones(r) if r in ("n", "cl") else (self.dict.get(r) or _romaji_phones(r))
         if not ph:
             return None
-        ph = [self.prefix + p if p not in ("SP", "AP") else p for p in ph]
-        return ph if all(p in self.ids for p in ph) else None
+        out = []
+        for p in ph:
+            q = self.prefix + p if self.prefix + p in self.ids else p
+            if q not in self.ids:
+                return None
+            if self.ids[q] != self.sil:
+                out.append(q)
+        return out or None
 
     def sequence(self, syls):
         """음절 목록 → (음소 순서 (앞뒤 · 사이에 SP), 음소마다 음절 번호 (SP는 −1)) 또는 None (모르는 음절)."""
@@ -357,7 +374,8 @@ def refine(notes, y, sr):
     groups = nt._phrases(notes)
     out, fixed = [], 0
     for gi, g in enumerate(groups):
-        syls = [x.lyric for x in g if x.lyric != "+"]
+        core_g, closures = _without_closures(g) if nt.CLOSURE else (g, set())
+        syls = [x.lyric for x in core_g if x.lyric != "+"]
         a = max(0.0, g[0].start - 0.4, groups[gi - 1][-1].end if gi else 0.0)
         b = g[-1].end + 0.3
         if gi + 1 < len(groups):
@@ -365,12 +383,18 @@ def refine(notes, y, sr):
         if not syls or b - a > MAX_PHRASE:
             out.extend(g)
             continue
+        if al.sequence(syls) is None:
+            LAST.append({"phrase": gi, "unknown": "".join(syls)[:40]})
+            out.extend(g)
+            continue
         try:
             times, conf = al.align(y[int(a * sr):int(b * sr)], sr, syls)
         except Exception as e:  # 모델이 이 소리를 못 다루면 이 프레이즈만 원래대로
             times, conf = None, 0.0
             LAST.append({"phrase": gi, "error": str(e)[:200]})
-        new = _place(g, [a + v for _, v, _ in times], syls) if times is not None and conf >= MIN_CONF else None
+        new = _place(core_g, [a + v for _, v, _ in times], syls) if times is not None and conf >= MIN_CONF else None
+        if new is not None and closures:
+            new = nt._insert_closures(new, closures)
         old = [x.start for x in g if x.lyric != "+"]
         moved = [abs(x.start - o) for x, o in zip([x for x in new if x.lyric != "+"], old)] if new else []
         LAST.append({"phrase": gi, "conf": round(float(conf), 3), "n": len(syls), "placed": new is not None,
@@ -381,6 +405,24 @@ def refine(notes, y, sr):
         out.extend(new)
         fixed += 1
     return out, fixed
+
+
+def _without_closures(g):
+    """っ 음표(앞 음절 끝의 막힘, notes._insert_closures)를 앞 음표에 도로 붙인다 → (음표, っ 앞 음절 번호).
+    모델로 음절 자리를 맞춘 뒤 같은 방법으로 다시 나눈다."""
+    from . import notes as nt
+
+    out, closures, n = [], set(), 0
+    for x in g:
+        if x.lyric == "っ" and n and abs(out[-1].end - x.start) < 1e-6:
+            p = out[-1]
+            out[-1] = nt.Note(p.start, x.end, p.tone, p.lyric, p.strength)
+            closures.add(n - 1)
+            continue
+        out.append(x)
+        if x.lyric != "+":
+            n += 1
+    return out, closures
 
 
 def _place(g, onsets, syls, near=NEAR):

@@ -37,8 +37,38 @@ def test_every_hangul_syllable_uses_known_phones():
 
 
 def _decode_vocab():
-    names = ["SP", "AP", "ja/a", "ja/k", "ja/i", "ja/cl", "ja/N"]
-    return {"vocab": {p: i for i, p in enumerate(names)}, "vocab_size": len(names)}
+    names = ["SP", "AP", "ja/a", "ja/k", "ja/i", "ja/N"]
+    v = {p: i for i, p in enumerate(names)}
+    v["cl"] = 0  # 실제 vocab.json처럼 っ(cl)는 쉼과 한 무리
+    return {"vocab": v, "vocab_size": len(names)}
+
+
+def _aligner(prefix="ja/"):
+    """모델 없이 음소 바꾸기만 (실제 v0.0.7 vocab.json처럼: 일본어 음소는 ja/…, 쉼 무리 SP · cl · AP …는 0)."""
+    al = fa.Aligner.__new__(fa.Aligner)
+    lex = sorted(JA - {"SP", "AP", "cl"})
+    al.ids = {p: 0 for p in ("", "<SP>", "AP", "CL", "EP", "GS", "SP", "cl", "pau")}
+    al.ids.update({prefix + p: i + 1 for i, p in enumerate(lex)})
+    al.prefix, al.dict, al.sil = prefix, {}, 0
+    return al
+
+
+@pytest.mark.parametrize("syl,prev,phones", [
+    ("각", None, ["ja/k", "ja/a"]), ("안", None, ["ja/a", "ja/N"]), ("ん", None, ["ja/N"]), ("てぃ", None, ["ja/t", "ja/i"]),
+    ("くぁ", None, ["ja/kw", "ja/a"]), ("し", None, ["ja/sh", "ja/i"]), ("っ", None, None), ("ka", None, None),
+])
+def test_phones_use_model_vocab(syl, prev, phones):
+    """っ · 받침 막힘(cl)은 모델에서 쉼과 같은 음소라 빼고 (음절 사이 SP가 맡음), 사전에 없는 로마자는 자음 + 모음으로."""
+    assert _aligner().phones(syl, prev) == phones
+
+
+def test_every_hangul_syllable_has_model_phones():
+    al = _aligner()
+    for code in range(0xAC00, 0xD7A4):
+        assert al.phones(chr(code), "아"), chr(code)
+    seq, word = al.sequence(["각", "시", "ん"])
+    assert seq == ["SP", "ja/k", "ja/a", "SP", "ja/sh", "ja/i", "SP", "ja/N", "SP"]
+    assert word == [-1, 0, 0, -1, 1, 1, -1, 2, -1]
 
 
 def test_decoder_finds_phoneme_edges():
@@ -47,7 +77,7 @@ def test_decoder_finds_phoneme_edges():
     v = vocab["vocab"]
     truth = [("SP", 10), ("ja/k", 6), ("ja/a", 30), ("SP", 4), ("ja/k", 5), ("ja/i", 25), ("SP", 20)]
     T = sum(n for _, n in truth)
-    logits = np.full((1, len(v), T), -4.0, np.float32)
+    logits = np.full((1, vocab["vocab_size"], T), -4.0, np.float32)
     edges = np.full((1, T), -6.0, np.float32)
     t = 0
     for p, n in truth:
@@ -71,7 +101,7 @@ def test_decoder_may_skip_silence_but_not_phonemes():
     vocab = _decode_vocab()
     v = vocab["vocab"]
     T = 40
-    logits = np.full((1, len(v), T), -4.0, np.float32)
+    logits = np.full((1, vocab["vocab_size"], T), -4.0, np.float32)
     logits[0, v["ja/a"], :20] = 4.0
     logits[0, v["ja/i"], 20:] = 4.0
     edges = np.full((1, T), -6.0, np.float32)
@@ -115,6 +145,17 @@ def test_place_gives_up_when_notes_would_be_too_short():
     g = [_n(0.0, 0.5, 60, "か"), _n(0.5, 1.0, 60, "き", 3.0)]
     assert fa._place(g, [0.0, 0.98], ["か", "き"]) is None  # 끝에서 20ms: 너무 짧다
     assert fa._place(g, [0.0, 2.0], ["か", "き"]) is None  # 음표 밖
+
+
+def test_closure_notes_are_merged_then_split_again():
+    """っ 음표는 앞 음절 끝의 막힘이라 모델에 넣지 않고, 음절 자리를 맞춘 뒤 같은 방법으로 다시 나눈다."""
+    g = [_n(0.0, 0.41, 60, "き"), _n(0.41, 0.5, 60, "っ", 3.0), _n(0.5, 1.0, 62, "と", 3.0)]
+    core, closures = fa._without_closures(g)
+    assert [(x.start, x.end, x.lyric) for x in core] == [(0.0, 0.5, "き"), (0.5, 1.0, "と")] and closures == {0}
+    assert g[0].end == 0.41  # 원래 음표는 그대로 (맞추지 못하면 원래대로 쓴다)
+    out = nt._insert_closures(fa._place(core, [0.0, 0.55], ["き", "と"]), closures)
+    assert [(round(x.start, 3), round(x.end, 3), x.lyric) for x in out] == \
+        [(0.0, 0.46, "き"), (0.46, 0.55, "っ"), (0.55, 1.0, "と")]
 
 
 def test_refine_without_model_keeps_notes(tmp_path, monkeypatch):
