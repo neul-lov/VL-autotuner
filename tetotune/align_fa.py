@@ -21,6 +21,11 @@ MIN_CONF = 0.0  # 프레이즈 맞추기 확신이 이보다 낮으면 그 프�
 NEAR = 0.08  # 초. 음절 시작 가까이(이 안) 음표 경계가 있으면 그 경계를 옮기고, 없으면 음표를 나눈다
 MAX_MOVE = 0.0  # 초. 음절 하나라도 이보다 멀리 옮기면 그 프레이즈는 원래대로 (0 = 제한 없음, CI에서 정한다)
 MAX_PHRASE = 40.0  # 초. 모델이 배운 길이(45초)보다 긴 프레이즈는 맞추지 않는다
+OFFSET = 0.0  # 초. 모델이 찾은 모음 시작에 더한다 (사람 노래 정답과 견줘 정한다)
+FIRST_MAX = 0.2  # 초. 프레이즈 첫 음절은 이 안에서만 옮긴다
+GAP_EXTEND = False  # 모음 시작이 음표 앞 틈에 있으면 그 음표 시작을 모음 시작으로 당긴다 (False면 음표 시작 그대로)
+JOINT = 0.0  # 초. 이 길이 안의 이웃 프레이즈는 한꺼번에 맞춘다 (0 = 프레이즈마다)
+SOFT_SPLIT = False  # 모음 시작이 음표 끝 40ms 안이면 프레이즈를 버리지 않고 뒤 음표(150ms 안)를 쓰거나 40ms 앞에서 나눈다
 VOWELS = {"a", "i", "u", "e", "o", "N"}
 LAST = []  # 마지막 조교의 프레이즈마다 {확신, 맞춤 여부, 옮긴 거리} (시험 기록용)
 
@@ -364,7 +369,8 @@ def _viterbi(seq_id, ph_prob_log, edge_prob):
 # ---------------------------------------------------------------- 음표에 넣기
 def refine(notes, y, sr):
     """가사를 넣은 음표(notes.align 뒤) → 프레이즈마다 모델로 음절 모음 시작을 찾아 음표 경계를 옮기거나 나눈다.
-    모델이 없거나 맞추지 못한 프레이즈는 그대로. → (notes, 고친 프레이즈 수)."""
+    JOINT초 안의 이웃 프레이즈는 먼저 한꺼번에 맞춰서, 가사 넣기가 음절을 옆 프레이즈에 잘못 나눈 것도 고친다
+    (못 맞추면 프레이즈마다). 모델이 없거나 맞추지 못한 프레이즈는 그대로. → (notes, 고친 프레이즈 수)."""
     from . import notes as nt
 
     LAST.clear()
@@ -373,48 +379,71 @@ def refine(notes, y, sr):
         return notes, 0
     al = Aligner(folder)
     groups = nt._phrases(notes)
-    out, fixed = [], 0
-    for gi, g in enumerate(groups):
-        core_g, closures = _without_closures(g) if nt.CLOSURE else (g, set())
-        syls = [x.lyric for x in core_g if x.lyric != "+"]
-        a = max(0.0, g[0].start - 0.4, groups[gi - 1][-1].end if gi else 0.0)
-        b = g[-1].end + 0.3
-        if gi + 1 < len(groups):
-            b = min(b, groups[gi + 1][0].start)
-        if not syls or b - a > MAX_PHRASE:
-            LAST.append({"phrase": gi, "syls": syls, "skip": "long" if syls else "empty"})
-            out.extend(g)
-            continue
-        if al.sequence(syls) is None:
-            LAST.append({"phrase": gi, "syls": syls, "unknown": "".join(syls)[:40]})
-            out.extend(g)
-            continue
-        try:
-            times, conf = al.align(y[int(a * sr):int(b * sr)], sr, syls)
-        except Exception as e:  # 모델이 이 소리를 못 다루면 이 프레이즈만 원래대로
-            times, conf = None, 0.0
-            LAST.append({"phrase": gi, "error": str(e)[:200]})
-        why = []
-        new = _place(core_g, [a + v for _, v, _ in times], syls, why=why) if times is not None and conf >= MIN_CONF else None
-        if new is not None and closures:
-            new = nt._insert_closures(new, closures)
-        old = [x.start for x in g if x.lyric != "+"]
-        moved = [abs(x.start - o) for x, o in zip([x for x in new if x.lyric != "+"], old)] if new else []
-        if MAX_MOVE > 0 and moved and max(moved) > MAX_MOVE:  # 음절이 통째로 다른 자리로 가는 것은 모델이 틀릴 때가 많다
-            new = None
-        LAST.append({"phrase": gi, "conf": round(float(conf), 3), "n": len(syls), "placed": new is not None,
-                     "moved_ms": round(1000 * float(np.median(moved)), 1) if moved else None,
-                     "moved_max_ms": round(1000 * float(np.max(moved)), 1) if moved else None,
-                     "before": old, "after": [x.start for x in new if x.lyric != "+"] if new else None,
-                     "syls": syls, "raw": [a + v for _, v, _ in times] if times is not None else None,
-                     "raw_start": [a + t for t, _, _ in times] if times is not None else None,
-                     "why": why[0] if why else ("align" if times is None else ("conf" if conf < MIN_CONF else ""))})
+
+    def window(i, j):  # 프레이즈 i..j의 소리 구간 (앞뒤 조금 여유, 이웃 프레이즈와 겹치지 않게)
+        a = max(0.0, groups[i][0].start - 0.4, groups[i - 1][-1].end if i else 0.0)
+        b = groups[j][-1].end + 0.3
+        if j + 1 < len(groups):
+            b = min(b, groups[j + 1][0].start)
+        return a, b
+
+    out, fixed, gi = [], 0, 0
+    while gi < len(groups):
+        gj = gi
+        if JOINT > 0:
+            while gj + 1 < len(groups) and window(gi, gj + 1)[1] - window(gi, gj + 1)[0] <= JOINT:
+                gj += 1
+        if gj > gi:
+            new = _fit(al, [x for g in groups[gi:gj + 1] for x in g], *window(gi, gj), y, sr, f"{gi}-{gj}")
+            if new is not None:
+                out.extend(new)
+                fixed += gj - gi + 1
+                gi = gj + 1
+                continue
+            LAST.pop()  # 한꺼번에 못 맞춘 기록은 빼고 프레이즈마다 다시
+        new = _fit(al, groups[gi], *window(gi, gi), y, sr, gi)
         if new is None:
-            out.extend(g)
-            continue
-        out.extend(new)
-        fixed += 1
+            out.extend(groups[gi])
+        else:
+            out.extend(new)
+            fixed += 1
+        gi += 1
     return out, fixed
+
+
+def _fit(al, g, a, b, y, sr, tag):
+    """음표 g(프레이즈 하나 또는 이웃 여럿)의 음절을 소리 y[a:b]에서 맞춰 넣은 새 음표, 못 하면 None. LAST에 기록."""
+    from . import notes as nt
+
+    core_g, closures = _without_closures(g) if nt.CLOSURE else (g, set())
+    syls = [x.lyric for x in core_g if x.lyric != "+"]
+    if not syls or b - a > MAX_PHRASE:
+        LAST.append({"phrase": tag, "syls": syls, "skip": "long" if syls else "empty"})
+        return None
+    if al.sequence(syls) is None:
+        LAST.append({"phrase": tag, "syls": syls, "unknown": "".join(syls)[:40]})
+        return None
+    try:
+        times, conf = al.align(y[int(a * sr):int(b * sr)], sr, syls)
+    except Exception as e:  # 모델이 이 소리를 못 다루면 이 프레이즈만 원래대로
+        times, conf = None, 0.0
+        LAST.append({"phrase": tag, "error": str(e)[:200]})
+    why = []
+    new = _place(core_g, [a + v for _, v, _ in times], syls, why=why) if times is not None and conf >= MIN_CONF else None
+    if new is not None and closures:
+        new = nt._insert_closures(new, closures)
+    old = [x.start for x in g if x.lyric != "+"]
+    moved = [abs(x.start - o) for x, o in zip([x for x in new if x.lyric != "+"], old)] if new else []
+    if MAX_MOVE > 0 and moved and max(moved) > MAX_MOVE:  # 음절이 통째로 다른 자리로 가는 것은 모델이 틀릴 때가 많다
+        new = None
+    LAST.append({"phrase": tag, "conf": round(float(conf), 3), "n": len(syls), "placed": new is not None,
+                 "moved_ms": round(1000 * float(np.median(moved)), 1) if moved else None,
+                 "moved_max_ms": round(1000 * float(np.max(moved)), 1) if moved else None,
+                 "before": old, "after": [x.start for x in new if x.lyric != "+"] if new else None,
+                 "syls": syls, "raw": [a + v for _, v, _ in times] if times is not None else None,
+                 "raw_start": [a + t for t, _, _ in times] if times is not None else None,
+                 "why": why[0] if why else ("align" if times is None else ("conf" if conf < MIN_CONF else ""))})
+    return new
 
 
 def _without_closures(g):
@@ -443,11 +472,12 @@ def _place(g, onsets, syls, near=NEAR, why=None):
     g = [nt.Note(x.start, x.end, x.tone, "+", x.strength) for x in g]
     picked = []  # 음절마다 고른 음표
     for j, v in enumerate(onsets):
+        v += OFFSET
         if picked:
             v = max(v, picked[-1].start + 0.04)
         if j == 0:
             x = g[0]
-            if abs(v - x.start) <= 0.2 and x.end - v > 0.05:
+            if abs(v - x.start) <= FIRST_MAX and x.end - v > 0.05:
                 x.start = v
             picked.append(x)
             continue
@@ -466,6 +496,14 @@ def _place(g, onsets, syls, near=NEAR, why=None):
         k = next((i for i in range(last, len(g)) if g[i].start < v < g[i].end), None)
         if k is not None:
             x = g[k]
+            if SOFT_SPLIT and x.end - v < 0.04 and x.end - x.start >= 0.12:
+                nxt = k + 1 if k + 1 < len(g) and g[k + 1].start - v <= 0.15 else None
+                if nxt is not None:
+                    if GAP_EXTEND and g[nxt].start - x.end > 0.005:
+                        g[nxt].start = x.end + 0.005
+                    picked.append(g[nxt])
+                    continue
+                v = x.end - 0.0401
             if v - x.start < 0.04 or x.end - v < 0.04:
                 if why is not None:
                     why.append(f"split{j}")
@@ -480,6 +518,8 @@ def _place(g, onsets, syls, near=NEAR, why=None):
             if why is not None:
                 why.append(f"gap{j}" if k is not None else f"end{j}")
             return None
+        if GAP_EXTEND and k > 0 and v > g[k - 1].end + 0.005:
+            g[k].start = v
         picked.append(g[k])
     for x, syl in zip(picked, syls):
         x.lyric = syl
