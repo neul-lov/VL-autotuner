@@ -105,14 +105,14 @@ jobs:
           key: testdata-${{ github.run_id }}-${{ github.run_attempt }}
 
   preclean:
-    name: 보컬 다시 분리 미리 (${{ matrix.shard }}/6)
+    name: 보컬 다시 분리 미리 (${{ matrix.shard }}/10)
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:  # 리눅스 CPU에서는 곡 길이의 몇 배 걸려서 곡을 나눠 한 번씩만. 비교 잡들은 같은 파일이면 이것을 쓴다
-        shard: [0, 1, 2, 3, 4, 5]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -129,7 +129,7 @@ jobs:
             models
           key: testdata-${{ github.run_id }}-${{ github.run_attempt }}
           fail-on-cache-miss: true
-      - run: python -W ignore devtools/preclean.py out/sep out/csdsep --shard ${{ matrix.shard }}/6
+      - run: mkdir -p clean && python -W ignore devtools/preclean.py out/sep out/csdsep --shard ${{ matrix.shard }}/10
       - uses: actions/cache/save@v4
         with:
           path: clean
@@ -165,6 +165,22 @@ jobs:
         with:
           path: clean
           key: clean-${{ github.run_id }}-${{ github.run_attempt }}-5
+      - uses: actions/cache/restore@v4
+        with:
+          path: clean
+          key: clean-${{ github.run_id }}-${{ github.run_attempt }}-6
+      - uses: actions/cache/restore@v4
+        with:
+          path: clean
+          key: clean-${{ github.run_id }}-${{ github.run_attempt }}-7
+      - uses: actions/cache/restore@v4
+        with:
+          path: clean
+          key: clean-${{ github.run_id }}-${{ github.run_attempt }}-8
+      - uses: actions/cache/restore@v4
+        with:
+          path: clean
+          key: clean-${{ github.run_id }}-${{ github.run_attempt }}-9
       - run: mkdir -p clean && ls clean | wc -l
       - uses: actions/cache/save@v4
         with:
@@ -337,8 +353,8 @@ jobs:
       fail-fast: false
       matrix:
         include:  # 테토 정답 노래(렌더해야 만든다)로만 보이는 음표 · 가사 차이: 렌더 비교 없이 방식 넷씩
-          - {id: 7, only: "새 기본,PR6 기본,− 음 높이 합치기 (Harvest),− 가사 맞추기 모델"}
-          - {id: 8, only: "− GAME 경계 증거,− GAME 모음 시작 그대로,− っ · + 고침,− GAME 음 높이 고침"}
+          - {id: 7, only: "새 기본,− 가사 맞추기 모델,가사 맞추기 확신 0.6 넘을 때만,가사 맞추기 확신 0.65 넘을 때만"}
+          - {id: 8, only: "가사 맞추기 250ms 안만,가사 맞추기 150ms 안만"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -409,12 +425,11 @@ jobs:
         include:  # 렌더 없이 보이는 것. 새 기본 · PR6 기본은 같은 리눅스에서 비교할 기준
           - {id: 1, only: "새 기본"}
           - {id: 2, only: "PR6 기본"}
-          - {id: 3, only: "− 음 높이 합치기 (Harvest)"}
           - {id: 4, only: "− 가사 맞추기 모델"}
-          - {id: 5, only: "− GAME 경계 증거"}
-          - {id: 6, only: "− GAME 모음 시작 그대로"}
-          - {id: 7, only: "− っ · + 고침"}
-          - {id: 8, only: "− GAME 음 높이 고침"}
+          - {id: 5, only: "가사 맞추기 확신 0.6 넘을 때만"}
+          - {id: 6, only: "가사 맞추기 확신 0.65 넘을 때만"}
+          - {id: 7, only: "가사 맞추기 250ms 안만"}
+          - {id: 8, only: "가사 맞추기 150ms 안만"}
           - {id: 9, only: "− 보컬 다시 분리"}
     steps:
       - uses: actions/checkout@v4
