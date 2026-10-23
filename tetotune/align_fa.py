@@ -27,7 +27,13 @@ GAP_EXTEND = False  # 모음 시작이 음표 앞 틈에 있으면 그 음표 �
 TTA = 1  # 프레이즈마다 모델을 몇 번 돌릴지: 구간 시작을 모델 한 칸(10ms)의 1/TTA씩 밀어 돌리고 음절마다 가운데 값을 쓴다
 JOINT = 0.0  # 초. 이 길이 안의 이웃 프레이즈는 한꺼번에 맞춘다 (0 = 프레이즈마다)
 SOFT_SPLIT = False  # 모음 시작이 음표 끝 40ms 안이면 프레이즈를 버리지 않고 뒤 음표(150ms 안)를 쓰거나 40ms 앞에서 나눈다
-VOWELS = {"a", "i", "u", "e", "o", "N"}
+WIN_BEFORE, WIN_AFTER = 0.4, 0.3  # 초. 프레이즈 앞뒤로 모델에 더 주는 소리 (이웃 프레이즈와 겹치지 않게)
+# 한글을 모델 음소로 바꾸는 법. 모델은 일본어 · 중국어 · 영어 노래로 배웠다 (음소 앞에 ja/ · zh/ · en/).
+# KO_FINALS "en": 받침 ㄴ · ㅁ · ㅇ · ㄹ을 일본어 ん · r 대신 영어 n · m · ng · l로 (모델에 없으면 일본어 그대로)
+# KO_EO "zh": ㅓ를 일본어 o 대신 중국어 e [ɤ]로
+KO_FINALS = "ja"
+KO_EO = "ja"
+VOWELS = {"a", "i", "u", "e", "o", "N", "zh/e"}
 LAST = []  # 마지막 조교의 프레이즈마다 {확신, 맞춤 여부, 옮긴 거리} (시험 기록용)
 
 
@@ -150,6 +156,8 @@ _JUNG = [["a"], ["e"], ["y", "a"], ["y", "e"], ["o"], ["e"], ["y", "o"], ["y", "
          ["w", "e"], ["y", "o"], ["u"], ["w", "o"], ["w", "e"], ["w", "i"], ["y", "u"], ["u"], ["u", "i"], ["i"]]
 _JONG = [None, "cl", "cl", "cl", "N", "N", "N", "cl", "r", "cl", "N", "cl", "r", "r", "cl", "r", "N", "cl", "cl", "cl",
          "cl", "N", "cl", "cl", "cl", "cl", "cl", "cl"]
+_JONG_EN = {4: "en/n", 5: "en/n", 6: "en/n", 10: "en/m", 16: "en/m", 21: "en/ng", 8: "en/l", 11: "en/l", 12: "en/l",
+            13: "en/l", 15: "en/l"}
 _PAL = {"k": "ky", "g": "gy", "n": "ny", "h": "hy", "m": "my", "r": "ry", "b": "by", "p": "py", "s": "sh", "t": "ch",
         "d": "j", "z": "j"}
 
@@ -173,8 +181,12 @@ def hangul_phones(syl, prev=None):
         v = v[1:]
     elif c:
         out.append(c)
+    if KO_EO == "zh" and jung in (4, 6, 14):  # ㅓ ㅕ ㅝ
+        v = v[:-1] + ["zh/e|o"]
     out += v
-    if _JONG[jong]:
+    if KO_FINALS == "en" and jong in _JONG_EN:
+        out.append(_JONG_EN[jong] + "|" + _JONG[jong])
+    elif _JONG[jong]:
         out.append(_JONG[jong])
     return out
 
@@ -227,8 +239,9 @@ class Aligner:
             return None
         out = []
         for p in ph:
-            q = self.prefix + p if self.prefix + p in self.ids else p
-            if q not in self.ids:
+            q = next((q for alt in p.split("|") for q in (alt if "/" in alt else self.prefix + alt, alt)
+                      if q in self.ids), None)  # "en/n|N": 앞의 것이 모델에 없으면 뒤의 것
+            if q is None:
                 return None
             if self.ids[q] != self.sil:
                 out.append(q)
@@ -382,8 +395,8 @@ def refine(notes, y, sr):
     groups = nt._phrases(notes)
 
     def window(i, j):  # 프레이즈 i..j의 소리 구간 (앞뒤 조금 여유, 이웃 프레이즈와 겹치지 않게)
-        a = max(0.0, groups[i][0].start - 0.4, groups[i - 1][-1].end if i else 0.0)
-        b = groups[j][-1].end + 0.3
+        a = max(0.0, groups[i][0].start - WIN_BEFORE, groups[i - 1][-1].end if i else 0.0)
+        b = groups[j][-1].end + WIN_AFTER
         if j + 1 < len(groups):
             b = min(b, groups[j + 1][0].start)
         return a, b

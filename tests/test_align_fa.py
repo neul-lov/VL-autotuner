@@ -71,6 +71,23 @@ def test_every_hangul_syllable_has_model_phones():
     assert word == [-1, 0, 0, -1, 1, 1, -1, 2, -1]
 
 
+def test_korean_finals_and_eo_from_other_languages_fall_back_to_japanese(monkeypatch):
+    """KO_FINALS "en" · KO_EO "zh": 모델에 그 음소가 있으면 쓰고, 없으면 일본어 그대로."""
+    monkeypatch.setattr(fa, "KO_FINALS", "en")
+    monkeypatch.setattr(fa, "KO_EO", "zh")
+    assert fa.hangul_phones("안") == ["a", "en/n|N"]
+    assert fa.hangul_phones("멍") == ["m", "zh/e|o", "en/ng|N"]
+    assert fa.hangul_phones("별") == ["py", "zh/e|o", "en/l|r"]
+    al = _aligner()
+    assert al.phones("안") == ["ja/a", "ja/N"]  # 영어 음소가 없는 모델
+    al.ids.update({"en/n": 90, "en/ng": 91, "zh/e": 92})
+    assert al.phones("안") == ["ja/a", "en/n"]
+    assert al.phones("멍") == ["ja/m", "zh/e", "en/ng"]
+    times = fa._syllable_times([(0.0, 0.1, 1), (0.1, 0.3, 2), (0.3, 0.4, 3)], ["SP", "ja/m", "zh/e", "en/ng", "SP"],
+                               [-1, 0, 0, 0, -1], 1, "ja/")
+    assert times == [(0.0, 0.1, 0.4)]  # 모음 시작 = zh/e 시작
+
+
 def test_decoder_finds_phoneme_edges():
     """음소마다 프레임 확률이 높은 구간이 있으면 디코더가 그 경계를 찾는다 (프레임 10ms)."""
     vocab = _decode_vocab()
