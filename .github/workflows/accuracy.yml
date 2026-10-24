@@ -212,7 +212,7 @@ jobs:
       matrix:
         include:  # 새 방식 vs 예전 방식: Mac 자리를 먼저 받게 따로 둔다
           - {id: 1, only: "새 기본"}
-          - {id: 2, only: "PR6 기본"}
+          - {id: 2, only: "PR10 기본"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -290,8 +290,8 @@ jobs:
       fail-fast: false
       max-parallel: 1  # Mac은 한 번에 5대: 새 방식 vs 예전 방식 둘 · 음표만 보는 둘 다음
       matrix:
-        include:  # 하나씩 끈 것 중 렌더해야 차이가 보이는 것 (devtools/accuracy.py variants)
-          - {id: 3, only: "+ 다듬기 크기 한도"}
+        include:  # 렌더해야 차이가 보이는 것 (devtools/accuracy.py variants)
+          - {id: 3, only: "가사 맞추기 −15ms"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -367,8 +367,7 @@ jobs:
       fail-fast: false
       matrix:
         include:  # 테토 정답 노래(렌더해야 만든다)로만 보이는 음표 · 가사 차이: 렌더 비교 없이 방식 넷씩
-          - {id: 7, only: "새 기본,− 가사 맞추기 모델,가사 맞추기 확신 0.6 넘을 때만,가사 맞추기 확신 0.65 넘을 때만"}
-          - {id: 8, only: "가사 맞추기 250ms 안만,가사 맞추기 150ms 안만"}
+          - {id: 7, only: "− 이웃 프레이즈 함께 맞추기,− 가사 맞추기 시간 보정 · 덜 버리기,− 가사 맞추기 모델"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -436,15 +435,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:  # 렌더 없이 보이는 것. 새 기본 · PR6 기본은 같은 리눅스에서 비교할 기준
+        include:  # 렌더 없이 보이는 것. 새 기본 · PR10 기본은 같은 리눅스에서 비교할 기준
           - {id: 1, only: "새 기본"}
-          - {id: 2, only: "PR6 기본"}
-          - {id: 4, only: "− 가사 맞추기 모델"}
-          - {id: 5, only: "가사 맞추기 확신 0.6 넘을 때만"}
-          - {id: 6, only: "가사 맞추기 확신 0.65 넘을 때만"}
-          - {id: 7, only: "가사 맞추기 250ms 안만"}
-          - {id: 8, only: "가사 맞추기 150ms 안만"}
-          - {id: 9, only: "− 보컬 다시 분리"}
+          - {id: 2, only: "PR10 기본"}
+          - {id: 3, only: "가사 맞추기 −15ms"}
+          - {id: 4, only: "− 이웃 프레이즈 함께 맞추기"}
+          - {id: 5, only: "− 가사 맞추기 시간 보정 · 덜 버리기"}
+          - {id: 6, only: "− 가사 맞추기 모델"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

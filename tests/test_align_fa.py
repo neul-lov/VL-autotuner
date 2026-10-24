@@ -9,6 +9,13 @@ from tetotune import notes as nt
 JA = set("AP N SP a b by ch cl d dy e f g gw gy h hy i j k kw ky m my n ny o p py r ry s sh t ts ty u v w y z".split())
 
 
+@pytest.fixture(autouse=True)
+def _plain(monkeypatch):
+    """기본 동작부터 시험한다: 시간 보정 · 덜 버리기 · 틈 당기기 · 함께 맞추기는 끈 채로 (그 시험들이 켠다)."""
+    for k, v in (("OFFSET", 0.0), ("SOFT_SPLIT", False), ("GAP_EXTEND", False), ("JOINT", 0.0)):
+        monkeypatch.setattr(fa, k, v)
+
+
 @pytest.mark.parametrize("kana,romaji", [
     ("か", "ka"), ("し", "shi"), ("つ", "tsu"), ("ん", "n"), ("っ", "cl"), ("きゃ", "kya"), ("しゃ", "sha"),
     ("ちょ", "cho"), ("じゅ", "ju"), ("ふぁ", "fa"), ("てぃ", "ti"), ("でゅ", "dyu"), ("うぃ", "wi"), ("くぁ", "kwa"),
