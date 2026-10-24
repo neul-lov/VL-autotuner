@@ -59,7 +59,8 @@ FUSION = [(None, "pitch_method", "fusion")]
 ALT = {
     "+ GAME 경계 증거": [(notes, "GAME_EVIDENCE", True)],
     "+ 다듬기 크기 한도": [(refine_mod, "DYN_TOTAL", 6.0), (refine_mod, "DYN_VOICED", True)],
-    "가사 맞추기 −5ms": [(align_fa, "OFFSET", -0.005)],
+    # 사람 노래 음절 시작은 더 맞지만 (CSD 0.764 → 0.777, 분리 0.743 → 0.769) 테토 렌더가 나빠진다 (README)
+    "가사 맞추기 −15ms": [(align_fa, "OFFSET", -0.015)],
     # 빨리 견주기(quick, CSD 12곡 음절 시작 50ms 안, PR10 기본 0.706)에서 본 것 — 손으로 다시 보려면 "새 기본 & align_fa.X=값":
     # 함께 맞추기 15 · 30 · 45초 0.758 · 0.777 · 0.768, 시간 보정 −5 · −15 · −25ms (15초 함께) 0.743 · 0.758 · 0.739
     # (테토 정답 노래는 −5ms가 조금 낫다), 여러 번 돌려 가운데(TTA 3 · 5) 0.748 · 0.743 (보정 · 덜 버리기만 0.750),
