@@ -423,11 +423,36 @@ final class AppModel: ObservableObject {
             show("OpenUtau를 찾지 못했어요. 응용 프로그램 폴더에 넣어 주세요", success: false)
             return
         }
+        // OpenUtau skips the launch argument while it has an unsaved project to recover: say so up front
+        if Self.openUtauHasRecovery() {
+            reveal(item)
+            show("OpenUtau가 먼저 복구할 작업을 물어봐요. 그 창을 닫은 뒤 파일 → 열기로 project.ustx를 열어 주세요", success: false)
+        }
         let config = NSWorkspace.OpenConfiguration()
         config.arguments = [item.ustx]
-        ws.openApplication(at: app, configuration: config) { _, error in
-            if error != nil { Task { @MainActor in self.show("OpenUtau를 열지 못했어요", success: false) } }
+        ws.openApplication(at: app, configuration: config) { opened, error in
+            Task { @MainActor in
+                if error != nil {
+                    self.show("OpenUtau를 열지 못했어요", success: false)
+                    return
+                }
+                // OpenUtau quits right away when another process named OpenUtau is running
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                if let opened, opened.isTerminated {
+                    self.reveal(item)
+                    self.show("OpenUtau가 켜지자마자 꺼졌어요. OpenUtau를 직접 연 뒤 파일 → 열기로 project.ustx를 열어 주세요", success: false)
+                }
+            }
         }
+    }
+
+    /// OpenUtau's prefs.json keeps RecoveryPath while an autosaved, unsaved project is waiting to be recovered.
+    static func openUtauHasRecovery() -> Bool {
+        let prefs = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/OpenUtau/prefs.json")
+        guard let data = try? Data(contentsOf: prefs),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let path = json["RecoveryPath"] as? String, !path.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        return FileManager.default.fileExists(atPath: path)
     }
 
     func reveal(_ item: ResultItem) {
