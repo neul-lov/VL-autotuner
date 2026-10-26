@@ -739,18 +739,22 @@ private struct ResultSection: View {
                 TransportBar(model: model, player: model.player)
                 PreviewView(preview: p, before: model.before, compareRange: model.compareRange,
                             selectedNote: $model.selectedNote, selection: $model.selection, focus: $model.focusTime,
-                            player: model.player)
+                            player: model.player,
+                            openNote: { i in
+                                guard let item = model.selected, i < p.notes.count else { return }
+                                model.openInEasyUtau(item, at: p.notes[i].start)
+                            })
                     .frame(height: 260)
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 legend
                 if let job = model.resultJob {
                     JobCard(job: job)
                 } else if let i = model.selectedNote, i < p.notes.count {
-                    NoteEditorBar(model: model, preview: p, index: i)
+                    NoteBar(model: model, preview: p, index: i)
                 } else if let r = model.selection {
                     RangeBar(model: model, range: r, retuning: $retuning)
                 } else {
-                    Text("음표를 누르면 가사 · 음절을 고칠 수 있고, 끌어서 구간을 고르면 그 구간만 다시 조교할 수 있어요. 빈 곳을 누르면 거기부터 들어요.")
+                    Text("음표를 누르면 EasyUtau에서 손으로 고칠 수 있고, 끌어서 구간을 고르면 그 구간만 다시 조교할 수 있어요. 빈 곳을 누르면 거기부터 들어요.")
                         .font(.system(size: 10.5, weight: .medium))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

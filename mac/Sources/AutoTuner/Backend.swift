@@ -538,14 +538,6 @@ final class Backend {
 
     func previewJob(_ id: String) async throws -> PreviewJob { try await get("api/jobs/\(id)", as: PreviewJob.self) }
 
-    /// Changes notes or lyrics of a result (see tetotune/edit.py). `index` = the note's place in `Preview.notes`.
-    func edit(_ resultID: String, op: String, index: Int, text: String? = nil, time: Double? = nil) async throws -> Preview {
-        var items = [URLQueryItem(name: "op", value: op), URLQueryItem(name: "index", value: "\(index)")]
-        if let text { items.append(URLQueryItem(name: "text", value: text)) }
-        if let time { items.append(URLQueryItem(name: "time", value: "\(time)")) }
-        return try JSONDecoder().decode(Preview.self, from: try await post("api/results/\(resultID)/edit", items))
-    }
-
     func undo(_ resultID: String) async throws -> Preview {
         try JSONDecoder().decode(Preview.self, from: try await post("api/results/\(resultID)/undo", []))
     }
