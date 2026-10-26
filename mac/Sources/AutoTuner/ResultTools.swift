@@ -66,15 +66,15 @@ struct TransportBar: View {
     }
 }
 
-/// Editing the clicked note: its lyric, which note a syllable starts on, holding a syllable over more notes.
-struct NoteEditorBar: View {
+/// The clicked note: listen to it, see why it was flagged, and hand it to EasyUtau to fix by hand.
+struct NoteBar: View {
     @ObservedObject var model: AppModel
     let preview: Preview
     let index: Int
-    @State private var text = ""
 
     private var note: Preview.Note { preview.notes[index] }
     private var held: Bool { note.lyric == "+" }
+    private var hasEasyUtau: Bool { AppModel.easyUtauApp != nil }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -85,40 +85,30 @@ struct NoteEditorBar: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                 Spacer()
-                tool("play.fill", "이 음표 들어 보기") { model.play(note.start, note.end) }
-                tool("xmark", "닫기") { model.selectedNote = nil }
+                CircleIconButton(icon: "play.fill", help: "이 음표 들어 보기", size: 24) {
+                    model.play(note.start, note.end)
+                }
+                CircleIconButton(icon: "xmark", help: "닫기", size: 24) { model.selectedNote = nil }
             }
-            HStack(spacing: 6) {
-                TextField("음절 (비우면 +)", text: $text)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 110)
-                    .onSubmit { model.edit("lyric", text: text, done: "가사를 고쳤어요") }
-                button("가사 바꾸기", "character.cursor.ibeam") { model.edit("lyric", text: text, done: "가사를 고쳤어요") }
-                Divider().frame(height: 18)
-                button("앞 음표로", "arrow.left", help: "이 음절을 앞 음표(+)부터 불러요") {
-                    model.edit("move_left", done: "음절을 앞으로 옮겼어요")
+            HStack(spacing: 8) {
+                Button {
+                    model.selected.map { model.openInEasyUtau($0, at: note.start) }
+                } label: {
+                    PrimaryCapsule(title: hasEasyUtau ? "EasyUtau에서 고치기" : "EasyUtau 받기",
+                                   icon: hasEasyUtau ? "slider.horizontal.3" : "arrow.down.circle")
                 }
-                button("뒤 음표로", "arrow.right", help: "이 음절을 뒤 음표(+)부터 불러요 (이 음표는 앞 음절을 늘여 불러요)") {
-                    model.edit("move_right", done: "음절을 뒤로 옮겼어요")
-                }
-                if held {
-                    button("새 음절로", "text.insert", help: "늘여 부르던 이 음표에서 다음 음절을 불러요 (뒤 음절을 한 칸씩 당겨요)") {
-                        model.edit("unextend", done: "다음 음절을 당겨 왔어요")
-                    }
-                } else {
-                    button("늘여 부르기", "arrow.right.to.line", help: "이 음표는 앞 음절을 늘여 부르고, 이 음절부터 한 칸씩 뒤로 밀어요") {
-                        model.edit("extend", done: "앞 음절을 늘여 부르게 했어요")
-                    }
-                }
-                Divider().frame(height: 18)
-                button("나누기", "scissors", help: "이 음표를 반으로 나눠요 (뒤쪽은 늘여 부르기)") {
-                    model.edit("split", done: "음표를 나눴어요")
-                }
-                button("다음과 합치기", "arrow.triangle.merge", help: "다음 음표와 하나로 (테토가 부르는 음 높이는 그대로)") {
-                    model.edit("merge", done: "음표를 합쳤어요")
-                }
+                .buttonStyle(PressableStyle())
+                .disabled(model.selected == nil)
+                .help(hasEasyUtau
+                      ? "이 음표를 EasyUtau에서 열어요. 가사 · 음 높이 · 떨림 · 발음을 손으로 고치고, 들어 보면서 바로 확인할 수 있어요"
+                      : "음표를 손으로 고치는 앱이에요. 받아서 응용 프로그램 폴더에 넣으면 여기서 바로 넘어가요")
+                Text(hasEasyUtau
+                     ? "가사 · 음 높이 · 떨림 · 발음은 EasyUtau에서 고쳐요 (같은 project.ustx를 쓰니 고친 건 그대로 남아요)"
+                     : "자동 조교 결과를 손으로 다듬으려면 EasyUtau가 필요해요")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .disabled(model.editing || model.resultJob != nil)
             let reasons = preview.marks.filter { $0.start < note.end && $0.end > note.start }
             ForEach(reasons, id: \.self) { f in
                 Label(f.reason, systemImage: "exclamationmark.triangle.fill")
@@ -128,21 +118,6 @@ struct NoteEditorBar: View {
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.teto.opacity(0.07)))
-        .onAppear { text = held ? "" : note.lyric }
-        .onChange(of: index) { _, _ in text = held ? "" : note.lyric }
-        .onChange(of: note.lyric) { _, l in text = l == "+" ? "" : l }
-    }
-
-    private func button(_ title: String, _ icon: String, help: String? = nil, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Label(title, systemImage: icon).font(.system(size: 11, weight: .semibold))
-        }
-        .controlSize(.small)
-        .help(help ?? title)
-    }
-
-    private func tool(_ icon: String, _ help: String, _ action: @escaping () -> Void) -> some View {
-        CircleIconButton(icon: icon, help: help, size: 24, action: action)
     }
 }
 
