@@ -222,6 +222,15 @@ final class AppModel: ObservableObject {
             results = list
             if selected == nil, let first = list.first { select(first) }
         }
+        await syncSelectedPreview()
+    }
+
+    /// EasyUtau · OpenUtau에서 고치고 돌아왔을 때: 서버가 바뀐 project.ustx로 맞춘 미리 보기를 다시 받는다
+    /// (음표가 바뀌었으면 "테토로 다시 불러 보기"가 나온다).
+    private func syncSelectedPreview() async {
+        guard let item = selected, resultJob == nil, !loadingPreview, preview != nil,
+              let p = try? await backend.preview(item.id), selected?.id == item.id, resultJob == nil else { return }
+        if p != preview { withAnimation(.easeOut(duration: 0.2)) { preview = p } }
     }
 
     // MARK: Inputs
