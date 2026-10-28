@@ -1,0 +1,115 @@
+name: 엔진 · AI 비교
+
+# 앱이 쓰는 엔진 자리마다 다른 엔진 · AI 모델을 같은 정답으로 견줘요 (소리는 재생하지 않고 숫자만).
+# 노래 · 분리한 보컬은 이 실행의 캐시에만 두고 올리지 않아요 (CSD는 CC BY-NC-SA라 숫자만 올려요).
+# 브랜치 이름으로 무엇을 견줄지 골라요: claude/engines-align… (가사 맞추기)
+on:
+  push:
+    branches: ["claude/engines*"]
+    paths-ignore: ["**.md"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  TETOTUNE_MODELS: ${{ github.workspace }}/models
+  MFA_ROOT_DIR: ${{ github.workspace }}/mfa_root
+
+jobs:
+  songs:
+    name: 시험 노래 준비 (CSD 한국 동요 모두 + 분리한 보컬 12곡)
+    if: ${{ contains(github.ref_name, 'align') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements.txt -r requirements-extra.txt "torch==2.5.1" "torchaudio==2.5.1" "demucs==4.0.1"
+      - name: CSD 받기 (사람이 부른 한국 동요 + 음절마다 시작 정답, CC BY-NC-SA 4.0, 숫자만 써요)
+        run: |
+          mkdir -p data
+          curl -fL --retry 3 -o data/CSD.zip "https://zenodo.org/records/4916302/files/CSD.zip?download=1"
+          python -c "import hashlib,sys; h=hashlib.md5(open('data/CSD.zip','rb').read()).hexdigest(); print(h); sys.exit(h != '74d121dd8706fded26a15526a379f7a2')"
+          mkdir -p csd && unzip -q data/CSD.zip "*korean/wav/*a.wav" "*korean/csv/*" "*korean/lyric/*" -d csd
+          rm -rf data
+          python -c "import sys; sys.path.insert(0, 'devtools'); from accuracy import csd_songs; s = csd_songs('csd'); print(len(s), '곡', sum(len(r) for _, _, r in s), '음표')"
+      - name: 분리한 보컬 만들기 (accuracy.yml과 같은 12곡 · 같은 방법)
+        run: python -W ignore devtools/make_separated.py --csd csd out/csdsep 12
+      - name: 가사 맞추기 모델 (앱이 받는 것과 같은 판)
+        run: python -c "from tetotune import align_fa; d = align_fa.ensure_model(print); print(d); assert d"
+      - uses: actions/cache/save@v4
+        with:
+          path: |
+            csd
+            out/csdsep/sep_*.wav
+            models
+          key: engines-testdata-${{ github.run_id }}-${{ github.run_attempt }}
+
+  align:
+    name: 가사 맞추기 엔진 (${{ matrix.set }})
+    needs: songs
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {tag: clean30, set: "CSD 깨끗한 보컬 · 30초씩 묶어서 (앱과 같게)", args: "--joint 30"}
+          - {tag: clean0, set: "CSD 깨끗한 보컬 · 프레이즈마다", args: "--joint 0"}
+          - {tag: sep30, set: "CSD 분리한 보컬 12곡 · 30초씩", args: "--joint 30 --sep out/csdsep"}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements.txt -r requirements-extra.txt "torch==2.5.1" "torchaudio==2.5.1" uroman
+      - name: Montreal Forced Aligner (conda-forge)
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: mfa
+          create-args: montreal-forced-aligner
+          condarc: |
+            channels:
+              - conda-forge
+          init-shell: bash
+          post-cleanup: none
+      - name: MFA 한국어 모델 받기 (korean_mfa, CC BY 4.0)
+        shell: bash -el {0}
+        run: |
+          micromamba activate mfa
+          mfa version
+          mfa model download acoustic korean_mfa
+          mfa model download dictionary korean_mfa
+          find "$MFA_ROOT_DIR/pretrained_models" -maxdepth 2 | head -20
+          echo "MFA_CMD=$MAMBA_EXE run -r $MAMBA_ROOT_PREFIX -n mfa mfa" >> "$GITHUB_ENV"
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            csd
+            out/csdsep/sep_*.wav
+            models
+          key: engines-testdata-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
+      - name: 엔진 견주기 (숫자만)
+        run: |
+          set -o pipefail
+          mkdir -p out
+          python -W ignore devtools/align_bench.py --csd csd ${{ matrix.args }} --engines hfa,mfa,mfa_ft,mms \
+            --json "out/align_${{ matrix.tag }}.json" | tee out/align.txt
+          { echo "## 가사 맞추기 엔진 · ${{ matrix.set }}"; echo; sed -n '/^### /,$p' out/align.txt; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: align-${{ matrix.tag }}
+          path: out/align_${{ matrix.tag }}.json
+          retention-days: 14
