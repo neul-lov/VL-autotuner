@@ -104,9 +104,15 @@ class MFA:
                "--beam", os.environ.get("MFA_BEAM", "100"), "--retry_beam", os.environ.get("MFA_RETRY_BEAM", "400"),
                "-j", jobs, "--output_format", "json"] + self.extra
         r = subprocess.run(cmd, capture_output=True, text=True)
-        print(f"  mfa align: 끝남 {r.returncode}", flush=True)
-        if r.returncode != 0:
-            print((r.stdout + r.stderr)[-3000:], flush=True)
+        outs = list(out.rglob("*.json")) + list(out.rglob("*.TextGrid")) if out.exists() else []
+        print(f"  mfa align: 끝남 {r.returncode}, 결과 파일 {len(outs)}개", flush=True)
+        if r.returncode != 0 or not outs:
+            print((r.stdout + r.stderr)[-6000:], flush=True)
+            # MFA는 자세한 기록을 MFA_ROOT_DIR/<말뭉치>/*.log에 쓴다
+            root = Path(os.environ.get("MFA_ROOT_DIR", Path.home() / "Documents" / "MFA"))
+            for log in sorted(root.rglob("*.log"), key=lambda f: f.stat().st_mtime)[-3:]:
+                print(f"  --- {log}", flush=True)
+                print(log.read_text(encoding="utf-8", errors="replace")[-3000:], flush=True)
         got = 0
         for k, it in enumerate(items):
             words, phones = self._read(out, f"u{k:05d}")
