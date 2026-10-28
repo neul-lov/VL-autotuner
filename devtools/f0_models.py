@@ -1,4 +1,5 @@
-"""음 높이 읽기 방법 비교 (렌더 없이): Harvest · RMVPE(새 판) · SwiftF0 · 셋 합치기를 사람이 표시한 정답(vocadito f0)과 비교.
+"""음 높이 읽기 방법 비교 (렌더 없이): Harvest · RMVPE(새 판) · SwiftF0 · CREPE · 셋 합치기 · 넷 합치기를
+사람이 표시한 정답(vocadito f0)과 비교.
 조교처럼 읽은 뒤 정리(pitch.clean)하고 음표 안 빈 곳은 앞뒤를 이어 메운 다음 잰다 (f0_robust.py와 같은 기준).
 - 튐 /분: 정답과 150센트 넘게 다른 곳이 30ms 넘게 이어진 횟수
 - RPA: 정답 소리 나는 곳 중 50센트 안 · RPA10: 10센트 안 (정밀함)
@@ -15,16 +16,25 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "devtools"))
 from f0_robust import score, truth  # noqa: E402
-from tetotune import audio, pitch  # noqa: E402
+from tetotune import audio, f0models, pitch  # noqa: E402
 
-METHODS = ("harvest", "rmvpe2", "swift", "fusion")
+METHODS = ("harvest", "rmvpe2", "swift", "crepe", "fusion", "fusion4")  # fusion4 = 합치기에 CREPE도
 
 
 def analyze(wav, k, root):
     y, sr = audio.load(wav)
     out = {}
     for m in METHODS:
-        f0, used = pitch.extract(y, sr, m)
+        if m == "fusion4":
+            if not f0models.crepe_path():
+                continue
+            saved, f0models.USE = f0models.USE, ("rmvpe", "crepe", "swift", "harvest")
+            try:
+                f0, used = pitch.extract(y, sr, "fusion")
+            finally:
+                f0models.USE = saved
+        else:
+            f0, used = pitch.extract(y, sr, m)
         if m != "harvest" and used == "harvest":
             continue
         n = len(f0)

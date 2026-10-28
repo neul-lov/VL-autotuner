@@ -1,4 +1,5 @@
-"""로컬 AI 음 높이 읽기: RMVPE(RVC 2023-10-06 판, MIT)와 SwiftF0(MIT, pip로 설치)를 Harvest와 함께 쓴다.
+"""로컬 AI 음 높이 읽기: RMVPE(RVC 2023-10-06 판, MIT)와 SwiftF0(MIT, pip로 설치)를 Harvest와 함께 쓴다
+(CREPE full(onnxcrepe, MIT)도 USE에 넣으면 같이).
 
 분리한 보컬은 반주가 새고 잔향이 남아서 Harvest 혼자서는 다른 소리를 따라가거나 옥타브 · 다른 음으로 잠깐 튄다.
 세 방법은 틀리는 곳이 서로 달라서, 둘 이상이 같은 음(80센트 안)이라고 하는 프레임만 쓰고 셋 다 다른 곳은 비워 둔다
@@ -18,6 +19,10 @@ RMVPE_MAX = 400 << 20
 RMVPE_THRESHOLD = 0.03  # 이보다 확신이 낮으면 소리 없음 (RVC와 같은 값; 소리 있음은 다시 크기로 가린다)
 CHUNK = 30.0  # 초. RMVPE는 긴 곡을 한 번에 넣으면 메모리를 많이 써서 조각으로 (앞뒤 PAD초 겹침)
 PAD = 1.0
+CREPE_URL = "https://github.com/yqzhishen/onnxcrepe/releases/download/v1.1.0/full.onnx"  # CREPE full (MIT)
+CREPE_SHA256 = "119845c72c702e052e5262430f9d120bce46176689aa226c39d09dea5cc3a610"
+CREPE_MAX = 120 << 20
+CREPE_THRESHOLD = 0.5  # 이보다 확신이 낮으면 소리 없음
 AGREE = 80.0  # 센트. 두 방법이 이만큼 안이면 같은 음
 SOLO = 0.5  # 다른 방법과 맞지 않는 방법 하나는 무게가 이보다 클 때만 쓴다 (RMVPE 0.55만 넘는다). 1 = 둘 이상 맞을 때만
 
@@ -56,6 +61,34 @@ def ensure_rmvpe(progress=lambda s: None):
 
 def swift_available():
     return _ort() and importlib.util.find_spec("swift_f0") is not None
+
+
+def crepe_path():
+    from .game import models_home
+
+    p = models_home() / "crepe" / "full.onnx"
+    return p if p.exists() and _ort() else None
+
+
+def ensure_crepe(progress=lambda s: None):
+    """CREPE 모델이 없으면 받는다 → 경로 또는 None (onnxruntime 없음)."""
+    import tempfile
+
+    from .game import _download, models_home
+
+    if not _ort():
+        return None
+    found = crepe_path()
+    if found:
+        return found
+    dest = models_home() / "crepe" / "full.onnx"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    progress("음 높이 읽기 모델(CREPE) 받는 중 (처음 한 번)")
+    with tempfile.TemporaryDirectory(dir=dest.parent) as tmp:
+        part = Path(tmp) / "full.onnx"
+        _download(CREPE_URL, part, CREPE_SHA256, CREPE_MAX, "음 높이 읽기 모델(CREPE)")
+        part.replace(dest)
+    return dest
 
 
 # ---------------------------------------------------------------- RMVPE
@@ -175,6 +208,42 @@ def swift_f0(y16, n5):
     return np.where(conf >= 0.5, hz[j], 0.0), conf
 
 
+# ---------------------------------------------------------------- CREPE
+class Crepe:
+    """CREPE full (onnxcrepe 판, 16kHz 1024샘플 창마다 360칸 = RMVPE와 같은 20센트 칸). 정규화는 모델 안에 있다."""
+
+    def __init__(self, path):
+        import onnxruntime as ort
+
+        opts = ort.SessionOptions()
+        opts.log_severity_level = 3
+        self.sess = ort.InferenceSession(str(path), opts, providers=["CPUExecutionProvider"])
+
+    def f0(self, y16, n5):
+        """→ (5ms 프레임 Hz, 확신). 10ms마다 읽고 사이 5ms 프레임은 양옆이 소리 있고 50센트 안일 때만 가운데 값."""
+        hop = 160
+        yp = np.pad(np.asarray(y16, dtype=np.float32), (512, 512 + hop))
+        n10 = (n5 + 1) // 2 + 1
+        need = (n10 - 1) * hop + 1024
+        if len(yp) < need:
+            yp = np.pad(yp, (0, need - len(yp)))
+        frames = np.lib.stride_tricks.as_strided(yp, shape=(n10, 1024), strides=(hop * yp.strides[0], yp.strides[0]))
+        prob = np.concatenate([self.sess.run(None, {"frames": np.ascontiguousarray(frames[i:i + 2048])})[0]
+                               for i in range(0, n10, 2048)])
+        hz10, c10 = _decode(prob, CREPE_THRESHOLD)
+        hz, conf = np.zeros(n5), np.zeros(n5)
+        k = np.arange(n10) * 2
+        ok = k < n5
+        hz[k[ok]], conf[k[ok]] = hz10[ok], c10[ok]
+        a, b = hz10[:-1], hz10[1:]
+        mid = np.where((a > 0) & (b > 0) & (np.abs(1200 * np.log2(np.maximum(a, 1e-9) / np.maximum(b, 1e-9))) <= 50),
+                       np.sqrt(np.maximum(a * b, 0)), 0.0)
+        k = np.arange(n10 - 1) * 2 + 1
+        ok = k < n5
+        hz[k[ok]], conf[k[ok]] = mid[ok], np.minimum(c10[:-1], c10[1:])[ok]
+        return hz, conf
+
+
 # ---------------------------------------------------------------- 합치기
 def fuse(tracks, agree=AGREE, solo=None):
     """tracks: [(Hz, 무게)] 같은 길이 → Hz (0 = 믿을 수 없음 · 소리 없음).
@@ -198,16 +267,22 @@ def fuse(tracks, agree=AGREE, solo=None):
     return np.where(ok, 440.0 * 2 ** ((np.nan_to_num(best_v) - 69) / 12), 0.0)
 
 
-WEIGHTS = {"rmvpe": 0.55, "swift": 0.3, "harvest": 0.3}
+WEIGHTS = {"rmvpe": 0.55, "crepe": 0.45, "swift": 0.3, "harvest": 0.3}
+USE = ("rmvpe", "swift", "harvest")  # 합칠 방법 ("crepe"를 넣으면 CREPE도, 모델이 있을 때)
 
 
-def extract(y16, n5, harvest_hz, use=("rmvpe", "swift", "harvest")):
+def extract(y16, n5, harvest_hz, use=None):
     """→ (Hz, 쓴 방법 이름 목록). 모델이 없는 방법은 빠진다. 하나도 없으면 (None, [])."""
+    use = USE if use is None else use
     tracks, names = [], []
     if "rmvpe" in use and rmvpe_path():
         hz, _ = Rmvpe(rmvpe_path()).f0(y16, n5)
         tracks.append((hz, WEIGHTS["rmvpe"]))
         names.append("rmvpe")
+    if "crepe" in use and crepe_path():
+        hz, _ = Crepe(crepe_path()).f0(y16, n5)
+        tracks.append((hz, WEIGHTS["crepe"]))
+        names.append("crepe")
     if "swift" in use and swift_available():
         hz, _ = swift_f0(y16, n5)
         tracks.append((hz, WEIGHTS["swift"]))
