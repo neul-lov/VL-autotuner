@@ -2,7 +2,7 @@ name: 엔진 · AI 비교
 
 # 앱이 쓰는 엔진 자리마다 다른 엔진 · AI 모델을 같은 정답으로 견줘요 (소리는 재생하지 않고 숫자만).
 # 노래 · 분리한 보컬은 이 실행의 캐시에만 두고 올리지 않아요 (CSD는 CC BY-NC-SA라 숫자만 올려요).
-# 브랜치 이름으로 무엇을 견줄지 골라요: claude/engines-align… (가사 맞추기)
+# 브랜치 이름으로 무엇을 견줄지 골라요: claude/engines-align… (가사 맞추기), claude/engines-render… (렌더 엔진, Mac)
 on:
   push:
     branches: ["claude/engines*"]
@@ -115,3 +115,155 @@ jobs:
           name: align-${{ matrix.tag }}
           path: out/align_${{ matrix.tag }}.json
           retention-days: 14
+
+  render-songs:
+    name: 렌더 엔진 시험 노래 · 모델 준비
+    if: ${{ contains(github.ref_name, 'render') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements.txt -r requirements-extra.txt
+      - name: vocadito 받기 (사람 노래 40곡 + 사람이 표시한 음 높이 · 음표, CC BY 4.0)
+        run: |
+          url=$(curl -fsSL https://zenodo.org/api/records/5578807 | python -c 'import json,sys; print([f["links"]["self"] for f in json.load(sys.stdin)["files"] if f["key"].endswith(".zip")][0])')
+          curl -fL --retry 3 -o vocadito.zip "$url"
+          mkdir -p vocadito && unzip -q vocadito.zip -d vocadito && rm -rf vocadito/__MACOSX vocadito.zip
+      - name: CSD 받기 (accuracy.yml과 같은 12곡만 남겨요, CC BY-NC-SA 4.0, 숫자만 써요)
+        run: |
+          curl -fL --retry 3 -o CSD.zip "https://zenodo.org/records/4916302/files/CSD.zip?download=1"
+          python -c "import hashlib,sys; h=hashlib.md5(open('CSD.zip','rb').read()).hexdigest(); print(h); sys.exit(h != '74d121dd8706fded26a15526a379f7a2')"
+          mkdir -p csdfull && unzip -q CSD.zip "*korean/*" -d csdfull && rm CSD.zip
+          python - <<'PY'
+          import shutil, sys
+          from pathlib import Path
+          sys.path.insert(0, "devtools")
+          from accuracy import csd_songs
+          for name, wav, rows in csd_songs("csdfull", 12):
+              base = wav.parent.parent
+              for sub, ext in (("wav", ".wav"), ("csv", ".csv"), ("lyric", ".txt")):
+                  src = base / sub / (name + ext)
+                  if src.exists():
+                      dst = Path("csd/korean") / sub / src.name
+                      dst.parent.mkdir(parents=True, exist_ok=True)
+                      shutil.copy(src, dst)
+              print(name, len(rows))
+          PY
+      - name: 모델 받기 (앱이 처음 조교할 때 받는 것과 같은 판)
+        run: |
+          python -c "from tetotune import game; d = game.ensure_model(print); print(d); assert d"
+          python -c "from tetotune import f0models; print(f0models.ensure_rmvpe(print))"
+          python -c "from tetotune import align_fa; d = align_fa.ensure_model(print); print(d); assert d"
+      - uses: actions/cache/save@v4
+        with:
+          path: |
+            vocadito
+            csd
+            models
+          key: engines-render-${{ github.run_id }}-${{ github.run_attempt }}
+
+  render:
+    name: 렌더 엔진 (${{ matrix.only }})
+    needs: render-songs
+    runs-on: macos-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {id: 1, only: "새 기본"}
+          - {id: 2, only: "렌더 hifisampler"}
+          - {id: 3, only: "렌더 WORLDLINE-R1.1"}
+          - {id: 4, only: "렌더 WORLDLINE-R2"}
+          - {id: 5, only: "렌더 CLASSIC worldline"}
+    env:
+      ACC_KEEP_RENDERS: ${{ github.workspace }}/keep  # 자연스러움 채점용 (이 기계에만, 올리지 않아요)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - run: python -m pip install -r requirements.txt -r requirements-extra.txt mir_eval
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            vocadito
+            csd
+            models
+          key: engines-render-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
+      - name: OpenUtau (Mac) + 렌더 엔진 패키지 (hnsep · pc-nsf-hifigan, OpenUtau 패키지 목록에서)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          devtools/openutau_harness/get_openutau.sh hnsep_240512 pc_nsf_hifigan_44.1k_hop512_128bin_2025.02
+          ls ~/Library/OpenUtau/Dependencies/*
+      - name: 테토 음원 받기 (공식 배포, 시험에만 쓰고 올리지 않아요)
+        run: |
+          curl -fL --retry 3 -o teto.zip https://kasaneteto.jp/assets/download/utau/TETO-OUset240323.zip
+          python devtools/install_voicebank.py teto.zip
+      - name: 테토 정답 노래 렌더 (accuracy.yml이 렌더 비교에 쓰는 일본어 4곡 · 한글 4곡, WORLDLINE-R)
+        run: |
+          export CSC=$(ls -d "$DOTNET_ROOT"/sdk/*/Roslyn/bincore/csc.dll | tail -1)
+          ou="$PWD/OpenUtau.app/Contents/MacOS"
+          for seed in 1 11 13 17; do
+            d="$PWD/out/ref$seed"; mkdir -p "$d"
+            python devtools/make_reference_song.py "$d/ref.ustx" "$d/truth.json" $seed --teto --lyrics "$d/lyrics.txt" > /dev/null
+            devtools/openutau_harness/render.sh "$ou" "$PWD/ourun" "$d/ref.ustx" "$d/ref.wav" > "$d/harness_ref.txt"
+          done
+          for seed in 10 12 2 4; do
+            d="$PWD/out/kref$seed"; mkdir -p "$d"
+            python devtools/make_reference_song.py "$d/ref.ustx" "$d/truth.json" $seed --teto --korean --lyrics "$d/lyrics.txt" > /dev/null
+            devtools/openutau_harness/render.sh "$ou" "$PWD/ourun" "$d/ref.ustx" "$d/ref.wav" > "$d/harness_ref.txt"
+          done
+      - name: 렌더 비교 (조교 → 테토로 렌더해 고치기 3번 → 원래 보컬과 비교)
+        run: |
+          export CSC=$(ls -d "$DOTNET_ROOT"/sdk/*/Roslyn/bincore/csc.dll | tail -1)
+          set -o pipefail
+          python -W ignore devtools/accuracy.py --refs out/ref* --refs-ko out/kref* --vocadito vocadito \
+            --render "$PWD/OpenUtau.app/Contents/MacOS" "$PWD/ourun" --render-songs 3,10,14,22 --render-refs 4 \
+            --csd csd --csd-n 12 --render-csd 4 --render-only \
+            --only "${{ matrix.only }}" --json "out/acc_r${{ matrix.id }}.json" | tee out/accuracy.txt
+          sed -n '/^|/,$p' out/accuracy.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: 자연스러움 AI 채점 (SingMOS-Pro · SingMOS v1 · UTMOS, 숫자만)
+        run: |
+          set -o pipefail
+          python -m pip install "torch==2.5.1" "torchaudio==2.5.1" "s3prl==0.4.18" librosa
+          python -W ignore devtools/mos.py keep --json "out/mos_r${{ matrix.id }}.json" | tee out/mos.txt
+          sed -n '/^### /,$p' out/mos.txt >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: render-r${{ matrix.id }}
+          path: |
+            out/acc_*.json
+            out/mos_*.json
+            out/accuracy.txt
+            out/mos.txt
+          retention-days: 14
+
+  render-merge:
+    name: 렌더 엔진 (합친 표)
+    needs: [render-songs, render]
+    if: ${{ always() && needs.render-songs.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: render-*
+          path: res
+          merge-multiple: true
+      - run: |
+          { python -W ignore devtools/accuracy.py --merge res/acc_*.json; python -W ignore devtools/mos.py --merge res/mos_*.json; } | tee merged.txt
+          cat merged.txt >> "$GITHUB_STEP_SUMMARY"
