@@ -22,8 +22,8 @@ defaults:
 env:
   TETOTUNE_MODELS: ${{ github.workspace }}/models
   MFA_ROOT_DIR: ${{ github.workspace }}/mfa_root
-  # 견줄 가사 맞추기 엔진 (브랜치 이름에 align2가 있으면 두 번째 묶음)
-  ENGINES: ${{ contains(github.ref_name, 'align2') && 'hfa,mfa,w2vko,w2vsyl,mms_star' || 'hfa,mfa,mfa_ft,mms' }}
+  # 견줄 가사 맞추기 엔진 (브랜치 이름에 align2 · align3이 있으면 다른 묶음)
+  ENGINES: ${{ contains(github.ref_name, 'align2') && 'hfa,mfa,w2vko,w2vsyl,mms_star' || (contains(github.ref_name, 'align3') && 'hfa,mfa,mfa_ft' || 'hfa,mfa,mfa_ft,mms') }}
 
 jobs:
   songs:
@@ -106,8 +106,10 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p out
+          # 모델 받는 진행률 줄(0.1%마다 한 줄)은 빼요: 기록이 길어지면 엔진 오류가 안 보여요
           python -W ignore devtools/align_bench.py --csd csd ${{ matrix.args }} --engines "$ENGINES" \
-            --json "out/align_${{ matrix.tag }}.json" | tee out/align.txt
+            --json "out/align_${{ matrix.tag }}.json" 2>&1 | grep --line-buffered -vE '^[[:space:]]*[0-9.]+%[[:space:]]*$' \
+            | tee out/align.txt
           { echo "## 가사 맞추기 엔진 · ${{ matrix.set }}"; echo; sed -n '/^### /,$p' out/align.txt; } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
