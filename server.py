@@ -269,6 +269,7 @@ def results():
 @app.get("/api/results/{name}/preview")
 def preview(name: str):
     folder = _result_folder(name)
+    _sync_external_edit(folder)
     prev = json.loads((folder / "preview.json").read_text())
     prev["history"] = edit.history_count(folder)
     try:  # 구간 다시 조교하기 창이 처음 조교한 설정에서 시작하게
@@ -276,6 +277,29 @@ def preview(name: str):
     except (OSError, ValueError):
         pass
     return prev
+
+
+# AutoTuner가 project.ustx를 쓸 때는 언제나 preview.json을 그 뒤에 쓴다. 그래서 project.ustx가 preview.json보다
+# 확실히 늦게 바뀌었으면 다른 앱(EasyUtau · OpenUtau)에서 고치고 저장한 것이다.
+EXTERNAL_EDIT_SLACK = 1.0
+
+
+def _sync_external_edit(folder):
+    """다른 앱에서 고친 project.ustx로 미리 보기 음표를 맞추고, 테토 미리 듣기는 "다시 불러 보기"로 표시한다."""
+    ustx, prev = folder / "project.ustx", folder / "preview.json"
+    try:
+        if ustx.stat().st_mtime <= prev.stat().st_mtime + EXTERNAL_EDIT_SLACK:
+            return
+    except OSError:
+        return
+    if not work_lock.acquire(blocking=False):
+        return  # 조교 중이면 다음에 (미리 보기는 기다리지 않는다)
+    try:
+        edit.refresh_preview(folder, stale=True)
+    except Exception:  # 읽을 수 없는 파일이면 예전 미리 보기를 그대로 보여 준다
+        traceback.print_exc()
+    finally:
+        work_lock.release()
 
 
 @app.post("/api/results/{name}/edit")

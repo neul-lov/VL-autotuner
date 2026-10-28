@@ -3,8 +3,9 @@ import SwiftUI
 /// Piano-roll style picture of a tuning: notes with lyrics, the original vocal's pitch (blue),
 /// the pitch Teto will sing (crimson) and the breaths (green). Scrolls sideways for long songs.
 ///
-/// Places that may be wrong are marked on top (orange: check, red: likely wrong). Click a note to edit it,
-/// drag across the roll to pick a section, click empty space to move the playhead there.
+/// Places that may be wrong are marked on top (orange: check, red: likely wrong). Click a note to pick it
+/// (double-click opens it in EasyUtau), drag across the roll to pick a section, click empty space to move
+/// the playhead there.
 struct PreviewView: View {
     let preview: Preview
     /// Before the last section re-tune: its pitch is drawn dashed in `compareRange`, to compare.
@@ -16,9 +17,12 @@ struct PreviewView: View {
     @Binding var focus: Double?
     /// Not observed here, so the roll isn't redrawn on every playhead tick (PlayheadLine is).
     let player: Player
+    /// Double-clicking a note: hand it to EasyUtau to fix by hand.
+    var openNote: ((Int) -> Void)?
     /// Horizontal zoom (points per second).
     @State private var zoom: Double = 70
     @State private var dragging = false
+    @State private var lastNoteTap = Date.distantPast
 
     var body: some View {
         GeometryReader { geo in
@@ -69,7 +73,7 @@ struct PreviewView: View {
         .padding(8)
     }
 
-    /// A click picks a note (or moves the playhead); a drag picks a section.
+    /// A click picks a note (two clicks open it in EasyUtau, or moves the playhead); a drag picks a section.
     private func drag(_ map: Mapping) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { v in
@@ -84,7 +88,13 @@ struct PreviewView: View {
                 guard !dragging else { return }
                 if let i = map.note(at: v.location) {
                     selection = nil
-                    selectedNote = selectedNote == i ? nil : i
+                    let now = Date()
+                    if selectedNote == i, now.timeIntervalSince(lastNoteTap) < 0.45 {
+                        openNote?(i)
+                    } else {
+                        selectedNote = i
+                    }
+                    lastNoteTap = now
                 } else {
                     selectedNote = nil
                     selection = nil

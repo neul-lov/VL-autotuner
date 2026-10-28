@@ -131,3 +131,39 @@ def test_render_endpoint_refreshes_teto_preview(client, monkeypatch):
         _time.sleep(0.02)
     assert s["status"] == "done" and "teto_stale" not in s["result"]
     assert (folder / "teto_preview.wav").read_bytes() == b"new" and not (folder / ".render").exists()
+
+
+def test_preview_follows_edits_from_other_apps(client):
+    """EasyUtau · OpenUtau에서 project.ustx를 고쳐 저장하면 미리 보기 음표가 따라가고 테토 미리 듣기는 예전 것으로 표시."""
+    import time as _time
+    import yaml
+    import server
+    folder = server.OUTPUT / "곡 바깥"
+    folder.mkdir(parents=True)
+    notes = [{"position": 480, "duration": 480, "tone": 60, "lyric": "あ"}]
+    ustx, prev = folder / "project.ustx", folder / "preview.json"
+
+    def write(lyric):
+        notes[0]["lyric"] = lyric
+        ustx.write_text(yaml.safe_dump({"tempos": [{"position": 0, "bpm": 120.0}],
+                                        "voice_parts": [{"notes": notes, "curves": []}]}, allow_unicode=True))
+    write("あ")
+    (folder / "report.json").write_text(json.dumps({"notes": 1, "breath_aliases": []}))
+    prev.write_text(json.dumps({"notes": [[0.5, 1.0, 60, "あ"]], "flags": []}))
+    (folder / "teto_preview.wav").write_bytes(b"old")
+    # AutoTuner가 쓴 그대로면 (preview.json이 나중) 건드리지 않는다
+    r = client.get(f"/api/results/{folder.name}/preview").json()
+    assert r["notes"][0][3] == "あ" and not r.get("teto_stale")
+    # 다른 앱이 저장: project.ustx가 preview.json보다 확실히 나중
+    old = _time.time() - 30
+    os.utime(prev, (old, old))
+    write("い")
+    r = client.get(f"/api/results/{folder.name}/preview").json()
+    assert r["notes"][0][3] == "い" and r["teto_stale"] is True
+    synced = prev.stat().st_mtime
+    assert client.get(f"/api/results/{folder.name}/preview").json()["notes"][0][3] == "い"
+    assert prev.stat().st_mtime == synced  # 한 번 맞춘 뒤에는 다시 쓰지 않는다
+    # 읽을 수 없는 파일이면 예전 미리 보기 그대로
+    os.utime(prev, (old, old))
+    ustx.write_text("voice_parts: [")
+    assert client.get(f"/api/results/{folder.name}/preview").json()["notes"][0][3] == "い"
