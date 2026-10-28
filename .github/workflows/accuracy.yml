@@ -103,6 +103,26 @@ jobs:
           python -c "from tetotune import f0models; print(f0models.ensure_rmvpe(print))" || echo "RMVPE를 받지 못했어요"
           python -c "from tetotune import align_fa; print(align_fa.ensure_model(print))" || echo "가사 맞추기 모델을 받지 못했어요"
           python -c "from tetotune import clean; print(clean.ensure('vocals', print))" || echo "보컬 다시 분리 모델을 받지 못했어요"
+          python -c "from tetotune import f0models; print(f0models.ensure_crepe(print))" || echo "CREPE를 받지 못했어요"
+          python - <<'PY' || echo "GAME 다른 크기를 받지 못했어요"
+          import shutil, tempfile, zipfile
+          from pathlib import Path
+          from tetotune import game
+          for name, url, sha in (
+                  ("game-small", "https://github.com/openvpi/GAME/releases/download/oudep/GAME-1.0.3-small.oudep",
+                   "0e02f685d35871057b2fe8be409f0ddfe149356774744fc95fe477adc3ee3c4f"),
+                  ("game-large", "https://github.com/openvpi/GAME/releases/download/v1.0.3/GAME-1.0.3-large-onnx.zip",
+                   "8a5480539fe7d995800dc0efe149b83a1cd4f4e4a36aa2a1f7665f1765dcac08")):
+              dest = game.models_home() / name
+              with tempfile.TemporaryDirectory() as tmp:
+                  z = Path(tmp) / "m.zip"
+                  game._download(url, z, sha)
+                  with zipfile.ZipFile(z) as zf:
+                      zf.extractall(Path(tmp) / "x")
+                  src = next(q.parent for q in (Path(tmp) / "x").rglob("config.json"))
+                  shutil.copytree(src, dest, dirs_exist_ok=True)
+              print(name, sorted(q.name for q in dest.iterdir()))
+          PY
           ls -la models/* || true
           cat models/hfa/VERSION || true
           python -c "import json; v=json.load(open('models/hfa/vocab.json')); print({k: (len(x) if k == 'vocab' else x) for k, x in v.items()}); print(sorted(v['vocab']))" || true
@@ -204,7 +224,7 @@ jobs:
   compare-mac-key:
     name: 정확도 + 테토 렌더 (${{ matrix.only }})
     needs: [prepare, preclean-merge]
-    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && !contains(github.ref_name, 'notes') }}
     runs-on: macos-latest
     timeout-minutes: 300
     strategy:
@@ -283,7 +303,7 @@ jobs:
   compare-mac:
     name: 정확도 + 테토 렌더 (${{ matrix.only }})
     needs: [prepare, preclean-merge]
-    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && !contains(github.ref_name, 'notes') }}
     runs-on: macos-latest
     timeout-minutes: 300
     strategy:
@@ -367,7 +387,7 @@ jobs:
       fail-fast: false
       matrix:
         include:  # 테토 정답 노래(렌더해야 만든다)로만 보이는 음표 · 가사 차이: 렌더 비교 없이 방식 넷씩
-          - {id: 7, only: "− 이웃 프레이즈 함께 맞추기,− 가사 맞추기 시간 보정 · 덜 버리기,− 가사 맞추기 모델"}
+          - {id: 7, only: "새 기본,+ CREPE 음 높이,GAME 큰 모델,GAME 작은 모델"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -437,11 +457,9 @@ jobs:
       matrix:
         include:  # 렌더 없이 보이는 것. 새 기본 · PR10 기본은 같은 리눅스에서 비교할 기준
           - {id: 1, only: "새 기본"}
-          - {id: 2, only: "PR10 기본"}
-          - {id: 3, only: "가사 맞추기 −15ms"}
-          - {id: 4, only: "− 이웃 프레이즈 함께 맞추기"}
-          - {id: 5, only: "− 가사 맞추기 시간 보정 · 덜 버리기"}
-          - {id: 6, only: "− 가사 맞추기 모델"}
+          - {id: 2, only: "+ CREPE 음 높이"}
+          - {id: 3, only: "GAME 큰 모델"}
+          - {id: 4, only: "GAME 작은 모델"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -481,7 +499,7 @@ jobs:
 
   f0:
     name: 음 높이 읽기 방법 (Harvest · RMVPE · SwiftF0 · 합치기, 렌더 없이)
-    if: github.event_name == 'workflow_dispatch' && inputs.extra  # 결과는 이미 나왔어요 (합치기가 가장 좋음)
+    if: (github.event_name == 'workflow_dispatch' && inputs.extra) || contains(github.ref_name, 'notes')
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -497,7 +515,9 @@ jobs:
           mkdir -p vocadito && unzip -q vocadito.zip -d vocadito && rm -rf vocadito/__MACOSX
       - name: 분리한 보컬 만들기 (40곡, 올리지 않아요)
         run: python -W ignore devtools/make_separated.py vocadito out/sep "$(seq -s, 1 40)"
-      - run: python -c "from tetotune import f0models; print(f0models.ensure_rmvpe(print))"
+      - run: |
+          python -c "from tetotune import f0models; print(f0models.ensure_rmvpe(print))"
+          python -c "from tetotune import f0models; print(f0models.ensure_crepe(print))"
       - name: 사람이 표시한 음 높이와 비교
         run: |
           set -o pipefail
