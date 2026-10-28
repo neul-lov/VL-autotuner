@@ -6,6 +6,7 @@
 ## 설치와 실행
 1. OpenUtau(Mac)와 테토 음원을 설치해 둬요. 음원이 OpenUtau 가수 폴더(`~/Library/OpenUtau/Singers`)에 있으면 저절로 찾아요
    (테토 음원이 여럿이면 기본 목소리를 먼저 골라요. 다른 음원은 앱 오른쪽 위 ⋯ 메뉴에서).
+   OpenUtau가 0.1.576 이상이면 테토를 더 자연스러운 신경망 렌더(hifisampler)로 불러요. 예전 판이면 예전처럼 WORLDLINE-R로 불러요.
 2. 앱 받기 (둘 중 하나)
    - **빌드된 앱**: 저장소의 Actions → 최근 빌드 → `AutoTuner-mac` 을 받아 풀고 `AutoTuner.app` 을 응용 프로그램 폴더로 옮겨요.
      Apple Silicon · 인텔 Mac 모두 돼요 (macOS 14 Sonoma 이상).
@@ -29,7 +30,9 @@
   OpenUtau는 켜질 때만 프로젝트를 받아서, 이미 켜져 있으면 Finder에서 파일을 보여 줘요 (OpenUtau의 파일 → 열기로 열어요).
 - **테토로 불러 보고 다듬기**(기본으로 켜짐): 조교가 끝나면 내 Mac의 OpenUtau로 테토가 실제로 부르게 하고, 원래 보컬과 비교해서
   크기 · 음 높이가 어긋난 곳을 세 번까지 고쳐요. 소리가 뚝 끊기던 곳이 많이 줄어요. OpenUtau가 응용 프로그램 폴더에 있어야 하고,
-  없으면 이 단계만 건너뛰어요. 앱은 OpenUtau를 `~/Library/Application Support/TetoTune/render-host`에 복사해서 쓰고, OpenUtau 자체는 건드리지 않아요.
+  없으면 이 단계만 건너뛰어요. 앱은 OpenUtau를 `~/Library/Application Support/TetoTune/render-host`에 복사해서 쓰고, OpenUtau 앱 자체는 건드리지 않아요.
+  신경망 렌더 모델 둘(보코더 pc-nsf-hifigan · 배음 나누기 hnsep, 110MB쯤)은 처음 조교할 때 한 번, OpenUtau 패키지 관리자가 설치하는 곳
+  (`~/Library/OpenUtau/Dependencies`)에 같은 모양으로 받아 둬요. 그래서 OpenUtau · EasyUtau에서 열어도 같은 소리로 불러요.
 - **결과 확인 · 고치기** (오른쪽 미리 보기에서)
   - ▶로 듣고, **원래 보컬 / 테토**를 같은 자리에서 바꿔 들어요. 반주가 있으면 같이 들을 수 있어요. 빈 곳을 누르면 거기부터 들어요.
   - **확인할 곳**: 틀렸을 만한 곳이 위에 표시돼요 (빨강: 틀렸을 가능성이 큼, 주황: 들어 보기). 목록에서 누르면 그 구간으로 가고 ▶로 그 구간만 들어요.
@@ -59,10 +62,12 @@ OpenUtau에서 사람이 "조교"할 때 만지는 것과, 이 앱이 각각을 
 | 비브라토 | 음표 비브라토 | 음표 비브라토는 끄고, 원래 보컬의 실제 떨림을 PITD에 넣어요 (세기 조절) |
 | 음정 보정 | 수동으로 선 고치기 | 길게 끄는 음 가운데에서만 3Hz 아래 느린 어긋남을 음표 음 쪽으로 당겨요. 시작 · 끝(꺾기)은 그대로 |
 | 셈여림 | DYN 곡선 | 원래 보컬 크기 윤곽(20ms 창, 자음에서 꺼지지 않게 다듬음)을 0.1dB 단위로. 셈여림 0.7(기본)에서 원래 크기 차이 그대로 |
-| 숨 섞인 · 힘 준 소리 | BREC · TENC (Worldline-R) | WORLD D4C 비주기성, 스펙트럼 기울기를 곡 안에서 표준화해서 |
+| 숨 섞인 · 힘 준 소리 | BREC · TENC (hifisampler · Worldline-R) | WORLD D4C 비주기성, 스펙트럼 기울기를 곡 안에서 표준화해서 |
 | 숨소리 | 숨 음표(息 · 吸 · br) | 노래 안 하는 곳에서 잡음처럼 퍼진 소리를 찾아 그 자리에 숨 음표를 넣고, OpenUtau 자동 음량까지 계산해서 원래 숨 크기에 맞춰요. 음원에 숨소리가 없으면 원래 보컬에서 숨만 잘라 트랙으로 넣어요 |
 
-렌더러는 WORLDLINE-R로 정해 둬요(PITD · DYN · BREC · TENC를 모두 읽어요). 다른 렌더러를 골라도 PITD · DYN은 그대로 써요.
+렌더러는 신경망 렌더 hifisampler로 정해 둬요 (OpenUtau 0.1.576부터 든 CLASSIC 렌더러의 리샘플러, 소리는 신경망 보코더 pc-nsf-hifigan이 만들어요).
+PITD · DYN · BREC · TENC를 모두 읽어요. OpenUtau가 예전 판이거나 모델을 받지 못하면, 또는 hifisampler로 한 번도 부르지 못하면
+WORLDLINE-R로 불러요 (그것도 네 곡선을 모두 읽어요). 다른 렌더러를 골라도 PITD · DYN은 그대로 써요.
 
 반주 파일이 같이 있으면 (StemMixer에서 불러올 때처럼) 보컬 + 반주(= 원래 곡)에서 보컬 분리 모델 Mel-Band RoFormer로 보컬을 한 번 더 뽑아서,
 음 높이 · 음표 · 가사 자리는 그 깨끗한 소리로 읽어요. 크기 · 숨 · 미리 듣기는 원래 보컬 그대로예요.
@@ -78,6 +83,8 @@ OpenUtau에서 사람이 "조교"할 때 만지는 것과, 이 앱이 각각을 
 - GAME: OpenUtau의 GAME(음표 가져오기)과 같은 모델 · 같은 순서(encoder → segmenter 8번 → bd2dur → estimator)로 돌려요.
   OpenUtau에 GAME을 설치해 두었으면 그것을, 없으면 처음 조교할 때 OpenUtau 패키지 목록에 있는 판(고정, SHA-256 확인)을 한 번 받아
   `~/Library/Application Support/TetoTune/models/game`에 둬요. 받지 못하면 예전 방법(Viterbi)으로 나눠요.
+- 렌더: OpenUtau 안에 든 hifisampler (openhachimi/hifisampler를 OpenUtau가 옮긴 것). 모델은 OpenUtau 패키지 목록(svs-index)에 있는 판을
+  고정하고 SHA-256으로 확인해요 (`tetotune/oudeps.py`).
 - OpenUtau의 피치 굽기(BakePitch, UtaFormatix에서 온 RDP 단순화), 숨 음표 넣기(AddBreathNote), 무작위 조교(RandomizeTuning).
 - 노래 채보 모델 SOME / GAME(OpenVPI)의 음표 나누기 방식, DiffSinger variance(숨 · 긴장도 곡선을 따로 예측하는 구조).
 - UTAU 플러그인 おま☆かせ(테토용 자동 조교)의 "음표 시작 · 끝 처리" 아이디어.
@@ -276,7 +283,8 @@ GAME은 돌릴 때마다 조금씩 다르게 나눠서(무작위 단계가 있�
 
 ## 아직 확인 못 한 것 · 한계
 - 실제 사용하는 Mac에 깔아 보지는 못했고, 같은 OpenUtau · 테토 음원으로 CI의 Mac에서 시험했어요.
-- AI 모델(GAME · RMVPE · HubertFA · 보컬 다시 분리 RoFormer, 합쳐서 1.5GB쯤)은 처음 조교할 때 받아요. 인터넷이 없으면 받지 못한 모델 없이 예전 방법으로 조교해요.
+- AI 모델(GAME · RMVPE · HubertFA · 보컬 다시 분리 RoFormer · 신경망 렌더, 합쳐서 1.6GB쯤)은 처음 조교할 때 받아요. 인터넷이 없으면 받지 못한 모델 없이 예전 방법으로 조교해요.
+- 신경망 렌더는 WORLDLINE-R보다 느려서, 테토로 불러 보고 다듬기가 1.5배쯤 오래 걸려요 (품질을 먼저 골랐어요).
 - 반주가 있으면 보컬을 다시 분리하느라 조교가 더 오래 걸려요 (품질을 먼저 골랐어요).
 - 가사는 테토 정답 노래 336음절 중 300개쯤 맞고, 사람이 부른 한국어 동요는 음절 시작이 50ms 안에 71% · 100ms 안에 90%예요. 틀린 곳은 OpenUtau에서 고치거나 음표 파일을 주세요.
 - 가사를 한 줄로 몰아 쓰면 음절 맞추기가 약해요. 숨 쉬는 곳마다 줄을 바꿔 주세요.
@@ -293,6 +301,8 @@ GAME은 돌릴 때마다 조금씩 다르게 나눠서(무작위 단계가 있�
   음표 나누기 GAME(OpenVPI, 코드 MIT, OpenUtau 패키지 목록의 판), 음 높이 읽기 RMVPE(RVC 프로젝트의 `rmvpe.onnx`, MIT),
   가사 맞추기 HubertFA(wolfgitpr, 코드 Apache-2.0; 모델 가중치는 따로 라이선스를 밝히지 않아서 앱에 넣지 않고 받아서만 써요).
   보컬 다시 분리 Mel-Band RoFormer(Kimberley Jensen, 가중치 MIT; audiojs의 ONNX 변환, MIT).
+  신경망 렌더 모델은 OpenUtau 패키지로 공식 배포처에서 받아요: 보코더 pc-nsf-hifigan(OpenVPI, **CC BY-NC-SA 4.0, 비영리로만**),
+  배음 · 잡음 나누기 hnsep(yxlllc/vocal-remover, MIT).
   SwiftF0(MIT)는 pip로 설치해요. HubertFA 디코더를 옮긴 코드의 고지문은 [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)에 있어요.
 - 빌드된 앱에는 pyworld(MIT)와 그 안의 WORLD(수정 BSD)가 들어 있어요. 고지문은 [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)에 있고, 앱 안에도 같이 넣어요.
 - 시험용 보컬 `devtools/testdata/*.flac`과 정확도 비교 CI가 받는 Vocadito는 CC BY 4.0이에요. 만든 사람과 출처는 [devtools/testdata/README.md](devtools/testdata/README.md)에 있어요.
