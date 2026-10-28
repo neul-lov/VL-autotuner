@@ -139,9 +139,9 @@ def extract(y, sr, method="auto"):
                 used = "rmvpe"
         except Exception:
             f0 = None
-    if f0 is None and method in ("rmvpe2", "swift"):  # 시험용: 모델 하나만
+    if f0 is None and method in ("rmvpe2", "swift", "crepe"):  # 시험용: 모델 하나만
         from . import f0models
-        fz, names = f0models.extract(y16, n, None, use=("rmvpe",) if method == "rmvpe2" else ("swift",))
+        fz, names = f0models.extract(y16, n, None, use={"rmvpe2": ("rmvpe",)}.get(method, (method,)))
         if fz is not None:
             return np.pad(fz, (0, max(0, n - len(fz))))[:n], method
     if f0 is None:

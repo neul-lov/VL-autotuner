@@ -27,7 +27,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from tetotune import align_fa, clean, features, game, notes, oupitch, pitch  # noqa: E402
+from tetotune import align_fa, clean, f0models, features, game, notes, oupitch, pitch  # noqa: E402
 from tetotune import refine as refine_mod  # noqa: E402
 from tetotune import tune as tune_mod  # noqa: E402
 from tetotune.tune import Options, tune  # noqa: E402
@@ -68,6 +68,10 @@ ALT = {
     "렌더 hifisampler": [(tune_mod, "RENDERER", "CLASSIC"), (tune_mod, "RESAMPLER", "hifisampler")],
     "렌더 WORLDLINE-R2": [(tune_mod, "RENDERER", "WORLDLINE-R2")],
     "렌더 CLASSIC worldline": [(tune_mod, "RENDERER", "CLASSIC"), (tune_mod, "RESAMPLER", "worldline")],
+    # 음 높이 읽기에 CREPE full도 (넷 합치기), 음표 나누기 GAME 큰 · 작은 모델 (같은 1.0.3, 받아 둔 폴더가 있을 때)
+    "+ CREPE 음 높이": [(f0models, "USE", ("rmvpe", "crepe", "swift", "harvest"))],
+    "GAME 큰 모델": [(game, "FOLDER", str(game.models_home() / "game-large"))],
+    "GAME 작은 모델": [(game, "FOLDER", str(game.models_home() / "game-small"))],
     # 빨리 견주기(quick, CSD 12곡 음절 시작 50ms 안, PR10 기본 0.706)에서 본 것 — 손으로 다시 보려면 "새 기본 & align_fa.X=값":
     # 함께 맞추기 15 · 30 · 45초 0.758 · 0.777 · 0.768, 시간 보정 −5 · −15 · −25ms (15초 함께) 0.743 · 0.758 · 0.739
     # (테토 정답 노래는 −5ms가 조금 낫다), 여러 번 돌려 가운데(TTA 3 · 5) 0.748 · 0.743 (보정 · 덜 버리기만 0.750),
@@ -87,7 +91,8 @@ def variants():
     return out
 
 
-MODS = {"align_fa": align_fa, "clean": clean, "notes": notes, "oupitch": oupitch, "refine": refine_mod, "tune": tune_mod}
+MODS = {"align_fa": align_fa, "clean": clean, "f0models": f0models, "game": game, "notes": notes, "oupitch": oupitch,
+        "refine": refine_mod, "tune": tune_mod}
 
 
 def with_flags(vs, name):
@@ -120,11 +125,12 @@ def _key(*args):
     return h.hexdigest()
 
 
-def _memo(fn):
+def _memo(fn, setting=lambda: None):
+    """같은 입력(+ setting()이 돌려주는 스위치 값)이면 다시 계산하지 않는다."""
     cache = {}
 
     def wrapped(*args, **kw):
-        k = _key(*args, *sorted(kw.items()))
+        k = _key(setting(), *args, *sorted(kw.items()))
         if k not in cache:
             cache[k] = fn(*args, **kw)
         v = cache[k]
@@ -136,9 +142,9 @@ def _memo(fn):
     return wrapped
 
 
-pitch.extract = _memo(pitch.extract)
+pitch.extract = _memo(pitch.extract, lambda: (f0models.USE, f0models.WEIGHTS.get("crepe")))
 _transcribe_once = game.transcribe
-game.transcribe = _memo(game.transcribe)
+game.transcribe = _memo(game.transcribe, lambda: str(game.model_dir()))
 features.analyze = _memo(features.analyze)
 
 
