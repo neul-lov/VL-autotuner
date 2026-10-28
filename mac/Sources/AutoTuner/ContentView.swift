@@ -654,7 +654,23 @@ private struct OptionsSection: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("테토 렌더").font(.system(size: 12, weight: .semibold))
+                Segmented(selection: $model.options.renderer,
+                          items: [("auto", "신경망 (hifisampler)"), ("worldline", "WORLDLINE-R")])
+                Text(rendererDetail)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
+    }
+
+    private var rendererDetail: String {
+        if model.options.renderer == "worldline" {
+            return "예전 렌더러예요. 음표 끝에서 짧게 튀는 곳이 조금 적지만 덜 자연스럽게 들려요."
+        }
+        return "더 자연스럽게 불러요 (OpenUtau 0.1.576 이상). 처음 한 번 모델(110MB)을 받고, 예전 OpenUtau면 WORLDLINE-R로 불러요."
     }
 
     private var refineDetail: String {
