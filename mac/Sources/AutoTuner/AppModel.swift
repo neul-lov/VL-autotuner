@@ -222,6 +222,15 @@ final class AppModel: ObservableObject {
             results = list
             if selected == nil, let first = list.first { select(first) }
         }
+        await syncSelectedPreview()
+    }
+
+    /// EasyUtau · OpenUtau에서 고치고 돌아왔을 때: 서버가 바뀐 project.ustx로 맞춘 미리 보기를 다시 받는다
+    /// (음표가 바뀌었으면 "테토로 다시 불러 보기"가 나온다).
+    private func syncSelectedPreview() async {
+        guard let item = selected, resultJob == nil, !loadingPreview, preview != nil,
+              let p = try? await backend.preview(item.id), selected?.id == item.id, resultJob == nil else { return }
+        if p != preview { withAnimation(.easeOut(duration: 0.2)) { preview = p } }
     }
 
     // MARK: Inputs
@@ -446,6 +455,38 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// EasyUtau (음표를 손으로 고치는 앱)가 깔려 있나.
+    static var easyUtauApp: URL? {
+        guard let url = URL(string: "easyutau://open") else { return nil }
+        return NSWorkspace.shared.urlForApplication(toOpen: url)
+    }
+
+    /// 지금 결과를 EasyUtau에서 연다 (seconds를 주면 그 자리의 섹터를 골라서).
+    /// EasyUtau는 OpenUtau와 같은 project.ustx를 그대로 열고 고친다.
+    func openInEasyUtau(_ item: ResultItem, at seconds: Double? = nil) {
+        guard let app = Self.easyUtauApp else {
+            show("EasyUtau가 없어요. 받아서 응용 프로그램 폴더에 넣어 주세요", success: false)
+            NSWorkspace.shared.open(URL(string: "https://github.com/neul-lov/EasyUtau")!)
+            return
+        }
+        var comps = URLComponents()
+        comps.scheme = "easyutau"
+        comps.host = "open"
+        comps.queryItems = [URLQueryItem(name: "path", value: item.ustx)]
+        if let seconds {
+            comps.queryItems?.append(URLQueryItem(name: "time", value: String(format: "%.3f", max(0, seconds))))
+        }
+        guard let url = comps.url else { return }
+        player.pause()
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        NSWorkspace.shared.open([url], withApplicationAt: app, configuration: config) { _, error in
+            Task { @MainActor in
+                if error != nil { self.show("EasyUtau를 열지 못했어요", success: false) }
+            }
+        }
+    }
+
     /// OpenUtau's prefs.json keeps RecoveryPath while an autosaved, unsaved project is waiting to be recovered.
     static func openUtauHasRecovery() -> Bool {
         let prefs = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/OpenUtau/prefs.json")
@@ -502,28 +543,6 @@ final class AppModel: ObservableObject {
             show(message + " · OpenUtau에서는 project.ustx를 다시 열어 주세요")
         } else {
             show(message)
-        }
-    }
-
-    /// One of the note edits in tetotune/edit.py on the selected note.
-    func edit(_ op: String, text: String? = nil, time: Double? = nil, done: String = "고쳤어요") {
-        guard let item = selected, let index = selectedNote, !editing, resultJob == nil else { return }
-        editing = true
-        Task {
-            defer { editing = false }
-            do {
-                let p = try await backend.edit(item.id, op: op, index: index, text: text, time: time)
-                guard selected?.id == item.id else { return }
-                withAnimation(.easeOut(duration: 0.15)) {
-                    preview = p
-                    if index >= p.notes.count { selectedNote = p.notes.isEmpty ? nil : p.notes.count - 1 }
-                }
-                edited(done)
-            } catch let error as BackendError {
-                show(error.message, success: false)
-            } catch {
-                show("엔진과 연결이 끊겼어요", success: false)
-            }
         }
     }
 
