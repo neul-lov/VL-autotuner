@@ -66,6 +66,18 @@ def _excerpt_notes_ustx(p, hit, offset, path, transpose):
     Path(path).write_text(yaml.safe_dump(proj, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
 
+def same_renderer(p, ustx):
+    """구간 프로젝트도 곡 프로젝트의 테토 트랙과 같은 렌더러로 (다듬기가 실제로 부를 소리로 재게).
+    예전 판에서 만든 곡(WORLDLINE-R)이나 OpenUtau · EasyUtau에서 렌더러를 바꾼 곡도 그대로 따른다."""
+    rs = (p.data.get("tracks") or [{}])[0].get("renderer_settings")
+    proj = yaml.safe_load(Path(ustx).read_text(encoding="utf-8"))
+    track = (proj.get("tracks") or [{}])[0]
+    if not rs or not track.get("renderer_settings"):  # DiffSinger 등: 가수의 기본 렌더러 그대로
+        return
+    track["renderer_settings"] = dict(rs)
+    Path(ustx).write_text(yaml.safe_dump(proj, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+
 def _lyrics_of(p, hit):
     sung = p.sung()
     lines = []
@@ -160,6 +172,7 @@ def retune(folder, start, end, options=None, lyrics_text=None, renote=False, pro
         progress(0.1, "구간 다시 조교하는 중")
         tune(wav, out, text, str(notes_file) if notes_file else None, None, o,
              progress=lambda v, s: progress(0.1 + 0.4 * v, s), title="구간", context=report.get("context"))
+        same_renderer(p, out / "project.ustx")
         warning = None
         if o.refine != "off":  # 못 다듬어도 다시 조교한 곡선은 쓴다
             from . import refine

@@ -50,6 +50,7 @@ class Options:
     breath_volume: float = 1.0
     pitch_method: str = "auto"   # auto (로컬 AI 둘 + Harvest 합치기, 모델이 없으면 Harvest) · fusion · harvest · rmvpe
     refine: str = "auto"         # auto (OpenUtau가 있으면 테토로 불러 보고 곡선을 다듬는다) · off
+    renderer: str = "auto"       # auto (신경망 렌더 hifisampler, 쓸 수 없으면 WORLDLINE-R) · worldline (늘 WORLDLINE-R)
     singer: str = ""             # 음원 폴더 경로 (비우면 테토를 찾는다)
     default_lyric: str = "ら"
 
@@ -506,7 +507,7 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
         waves.append(("숨소리 (원래 보컬)", "breaths.wav", len(y) / sr * 1000, False, -2))
     name = title or Path(vocal).stem
     _write_ustx(out / "project.ustx", name, bpm, qnotes, pdata, curves, waves, singer_id, phonemizer,
-                info.get("classic", True))
+                info.get("classic", True), o.renderer)
 
     preview = {
         "hop": HOP, "bpm": bpm, "shift": shift,
@@ -580,12 +581,13 @@ def hifisampler_ready():
     return not oudeps.missing() and openutau.has_hifisampler()
 
 
-def prepare_renderer(progress=lambda s: None):
+def prepare_renderer(progress=lambda s: None, choice="auto"):
     """앱 · 명령줄이 조교하기 전에: 사용자의 OpenUtau가 hifisampler를 갖고 있으면 그 모델 둘을 처음 한 번 받는다.
-    → 예전 렌더러(FALLBACK_RENDERER)로 부르게 될 때 알릴 말 또는 None (OpenUtau가 없으면 None)."""
+    choice: Options.renderer. → 예전 렌더러(FALLBACK_RENDERER)로 부르게 될 때 알릴 말 또는 None
+    (OpenUtau가 없거나 WORLDLINE-R을 골랐으면 None)."""
     from . import openutau, oudeps
 
-    if RENDERER != "CLASSIC" or RESAMPLER != "hifisampler" or openutau.app_dir() is None:
+    if choice == "worldline" or RENDERER != "CLASSIC" or RESAMPLER != "hifisampler" or openutau.app_dir() is None:
         return None
     if not openutau.has_hifisampler():
         return f"OpenUtau를 0.1.576 이상으로 올리면 더 자연스러운 신경망 렌더(hifisampler)로 불러요 (지금은 {FALLBACK_RENDERER})"
@@ -597,9 +599,10 @@ def prepare_renderer(progress=lambda s: None):
     return None
 
 
-def renderer_settings():
-    """UTAU 음원 트랙의 renderer_settings. hifisampler를 쓸 수 없으면 FALLBACK_RENDERER로."""
-    if RENDERER == "CLASSIC" and RESAMPLER == "hifisampler" and not hifisampler_ready():
+def renderer_settings(choice="auto"):
+    """UTAU 음원 트랙의 renderer_settings. choice: Options.renderer ("worldline"이면 늘 FALLBACK_RENDERER).
+    hifisampler를 쓸 수 없으면 FALLBACK_RENDERER로."""
+    if choice == "worldline" or (RENDERER == "CLASSIC" and RESAMPLER == "hifisampler" and not hifisampler_ready()):
         return {"renderer": FALLBACK_RENDERER}
     out = {"renderer": RENDERER}
     if RENDERER == "CLASSIC" and RESAMPLER:
@@ -607,8 +610,9 @@ def renderer_settings():
     return out
 
 
-def _write_ustx(path, name, bpm, qnotes, pdata, curves, waves, singer, phonemizer, classic=True):
-    """qnotes: _quantize 결과. pdata: 음표마다 피치 점 (oupitch.pitch_data, None이면 예전 방식)."""
+def _write_ustx(path, name, bpm, qnotes, pdata, curves, waves, singer, phonemizer, classic=True, renderer="auto"):
+    """qnotes: _quantize 결과. pdata: 음표마다 피치 점 (oupitch.pitch_data, None이면 예전 방식).
+    renderer: Options.renderer."""
     import yaml
 
     vnotes = []
@@ -629,7 +633,7 @@ def _write_ustx(path, name, bpm, qnotes, pdata, curves, waves, singer, phonemize
     end = max(n["position"] + n["duration"] for n in vnotes)
     track = {"singer": singer or "", "phonemizer": phonemizer}
     if classic:  # UTAU 음원만 RENDERER. DiffSinger · ENUNU 등은 비워서 OpenUtau가 그 가수의 기본 렌더러를 고르게
-        track["renderer_settings"] = renderer_settings()
+        track["renderer_settings"] = renderer_settings(renderer)
     tracks = [{**track, "track_name": "테토 (자동 조교)", "track_color": "Red", "mute": False, "solo": False,
                "volume": 0, "pan": 0}]
     wave_parts = []

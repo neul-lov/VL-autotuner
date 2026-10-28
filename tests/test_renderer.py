@@ -80,6 +80,8 @@ def test_renderer_settings_fall_back(tmp_path, monkeypatch, deps):
     assert tune.renderer_settings() == {"renderer": "CLASSIC", "resampler": "hifisampler"}
     monkeypatch.setattr(openutau, "has_hifisampler", lambda: False)  # 예전 OpenUtau
     assert tune.renderer_settings() == {"renderer": tune.FALLBACK_RENDERER}
+    monkeypatch.setattr(openutau, "has_hifisampler", lambda: True)
+    assert tune.renderer_settings("worldline") == {"renderer": tune.FALLBACK_RENDERER}  # 앱에서 예전 렌더러를 골랐다
     monkeypatch.setattr(tune, "RENDERER", "WORLDLINE-R1.1")
     monkeypatch.setattr(tune, "RESAMPLER", None)
     assert tune.renderer_settings() == {"renderer": "WORLDLINE-R1.1"}
@@ -108,6 +110,27 @@ def test_prepare_renderer_messages(tmp_path, monkeypatch, deps):
     assert "받지 못해서" in tune.prepare_renderer()
     monkeypatch.setattr(oudeps, "ensure", lambda progress: [])
     assert tune.prepare_renderer() is None
+    monkeypatch.setattr(oudeps, "ensure", lambda progress: (_ for _ in ()).throw(AssertionError("받으면 안 돼요")))
+    assert tune.prepare_renderer(choice="worldline") is None  # WORLDLINE-R을 골랐으면 모델을 받지 않는다
+
+
+def test_region_retune_sings_with_the_song_renderer(tmp_path):
+    from tetotune import edit, retune
+
+    song, clip = tmp_path / "song", tmp_path / "clip"
+    for d in (song, clip):
+        d.mkdir()
+    proj = {"name": "t", "tempos": [{"position": 0, "bpm": 120}], "voice_parts": [{"notes": []}],
+            "tracks": [{"singer": "teto", "renderer_settings": {"renderer": "WORLDLINE-R"}}]}
+    (song / "project.ustx").write_text(yaml.safe_dump(proj, allow_unicode=True), encoding="utf-8")
+    _result(clip, {"renderer": "CLASSIC", "resampler": "hifisampler"})
+    retune.same_renderer(edit.Project(song), clip / "project.ustx")  # 예전 판에서 만든 곡: 구간도 WORLDLINE-R로
+    assert _track(clip) == {"renderer": "WORLDLINE-R"}
+    proj["tracks"][0].pop("renderer_settings")  # DiffSinger 같은 가수: 건드리지 않는다
+    (song / "project.ustx").write_text(yaml.safe_dump(proj, allow_unicode=True), encoding="utf-8")
+    _result(clip, {"renderer": "CLASSIC", "resampler": "hifisampler"})
+    retune.same_renderer(edit.Project(song), clip / "project.ustx")
+    assert _track(clip) == {"renderer": "CLASSIC", "resampler": "hifisampler"}
 
 
 def _result(folder, renderer):

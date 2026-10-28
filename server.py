@@ -28,7 +28,7 @@ LIMITS = {
     "dynamics": (0.0, 2.0), "breathiness": (0.0, 2.0), "tension": (0.0, 2.0), "breath_volume": (0.0, 3.0),
 }
 CHOICES = {"breaths": ("auto", "voicebank", "original", "off"), "pitch_method": ("auto", "harvest", "rmvpe", "fusion"),
-           "refine": ("auto", "off")}
+           "refine": ("auto", "off"), "renderer": ("auto", "worldline")}
 MAX_JOBS = 50  # 끝난 작업 기록은 이만큼만 (그리고 JOB_TTL초가 지나면 지운다)
 JOB_TTL = 3600
 MAX_ACTIVE = 4  # 돌고 있거나 차례를 기다리는 작업 (조교 · 구간 다시 조교 · 렌더) 수의 상한: 넘으면 새 요청을 거절한다
@@ -205,7 +205,7 @@ def _run(job_id, vocal, song, lyrics, notes, backing, opts):
                     f0models.ensure_rmvpe(lambda s: job.update(step=s, progress=0.01))
                 except Exception as e:
                     print(f"RMVPE 모델을 받지 못했어요: {e}", flush=True)
-            hifi_note = tune_mod.prepare_renderer(lambda s: job.update(step=s, progress=0.01))
+            hifi_note = tune_mod.prepare_renderer(lambda s: job.update(step=s, progress=0.01), opts.renderer)
             polish = opts.refine != "off" and openutau.available()
             scale = 0.6 if polish else 1.0  # 다듬기가 남은 시간의 대부분
             res = tune(vocal, out, lyrics or "", notes or None, backing or None, opts,
