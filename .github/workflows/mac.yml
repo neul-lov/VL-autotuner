@@ -240,10 +240,15 @@ jobs:
           python -m tetotune "$d/ref_ref.wav" out/polish7 --lyrics "$d/lyrics.txt" > out/polish7.log
           grep "다듬기" out/polish7.log | tail -3
           python - <<'PY'
-          import json
+          import json, yaml
           r = json.load(open("out/polish7/report.json"))
           print("다듬기:", json.dumps(r.get("refine"), ensure_ascii=False))
           assert r.get("teto_preview") == "teto_preview.wav", r.get("warnings")
+          # 앱처럼 신경망 렌더 모델을 받아서 hifisampler로 불렀는지 (예전 렌더러로 물러나지 않고)
+          rs = yaml.safe_load(open("out/polish7/project.ustx", encoding="utf-8"))["tracks"][0]["renderer_settings"]
+          print("렌더 설정:", rs, "경고:", r.get("warnings"))
+          assert rs == {"renderer": "CLASSIC", "resampler": "hifisampler"}, rs
+          assert not any("hifisampler" in w for w in r.get("warnings") or []), r.get("warnings")
           p = json.load(open("out/polish7/preview.json"))
           print("확인할 곳:", len(p["flags"]), p["flags"][:5])
           PY

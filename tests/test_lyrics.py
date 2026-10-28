@@ -7,6 +7,7 @@ import soundfile as sf
 import yaml
 
 from tetotune import audio, lyrics, voicebank
+from tetotune import tune as tune_mod
 from tetotune.tune import Options, tune
 
 SR = 44100
@@ -111,7 +112,7 @@ def test_korean_note_lyrics_use_ko_to_ja_and_renderer(tmp_path, monkeypatch):
     res = tune(str(vocal), tmp_path / "a", "", str(notes), options=Options(transpose="0", breaths="off"))
     assert res.phonemizer == voicebank.KO_TO_JA
     track = yaml.safe_load((tmp_path / "a" / "project.ustx").read_text(encoding="utf-8"))["tracks"][0]
-    assert track["renderer_settings"] == {"renderer": "WORLDLINE-R"}
+    assert track["renderer_settings"] == tune_mod.renderer_settings()  # hifisampler 또는 (쓸 수 없으면) WORLDLINE-R
 
     # DiffSinger 같은 가수: 렌더러는 OpenUtau가 고르게 비워 둔다
     info = {"phonemizer": "X", "breath_in": None, "breath_out": None, "japanese": False, "name": "ds", "classic": False}

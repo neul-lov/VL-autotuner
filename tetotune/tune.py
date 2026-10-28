@@ -28,8 +28,12 @@ GAP_NOTE = 0.05  # 초. 음표 안 빈 곳이 이보다 길면 가운데는 음�
 JITTER_HZ = 12.0  # 음 가운데 PITD에서 이보다 빠른 떨림을 뺀다 (Harvest 프레임 잡음이 거친 소리로 났다). 0 = 끔
 CORRECT_GATE = 40.0  # 센트. 음표와 이만큼 넘게 다르면 바로잡는 힘을 줄여 2배에서 0 (틀린 음표로 끌고 가지 않게). 0 = 늘 같게
 OU_EXACT = True  # PITD를 OpenUtau가 음표로 만드는 음 높이(oupitch.py) 그대로를 기준으로. False = 예전 (초 단위 계단: 경계마다 튐)
-RENDERER = "WORLDLINE-R"  # UTAU 음원을 부를 OpenUtau 렌더러 (WORLDLINE-R · WORLDLINE-R1.1 · CLASSIC)
-RESAMPLER = None  # CLASSIC일 때 리샘플러 (OpenUtau 안에 든 worldline · hifisampler). None = OpenUtau 설정
+# UTAU 음원을 부를 OpenUtau 렌더러 (WORLDLINE-R · WORLDLINE-R1.1 · CLASSIC)와 CLASSIC일 때 리샘플러 (OpenUtau 안에 든
+# worldline · hifisampler, None = OpenUtau 설정). hifisampler = 신경망 보코더(pc-nsf-hifigan)로 부르는 리샘플러:
+# 실제 테토 렌더 비교에서 자연스러움 AI 점수가 WORLDLINE-R보다 모든 곡 묶음에서 높았다 (README "렌더 엔진")
+RENDERER = "CLASSIC"
+RESAMPLER = "hifisampler"
+FALLBACK_RENDERER = "WORLDLINE-R"  # hifisampler를 쓸 수 없을 때 (OpenUtau가 0.1.576보다 예전이거나 모델을 못 받았을 때)
 
 
 @dataclass
@@ -569,6 +573,40 @@ def _breath_track(y, sr, breaths, gain):
     return out
 
 
+def hifisampler_ready():
+    """hifisampler로 부를 수 있는지: 사용자의 OpenUtau에 들어 있고(0.1.576부터) 모델 둘을 받아 두었을 때 (oudeps.py)."""
+    from . import openutau, oudeps
+
+    return not oudeps.missing() and openutau.has_hifisampler()
+
+
+def prepare_renderer(progress=lambda s: None):
+    """앱 · 명령줄이 조교하기 전에: 사용자의 OpenUtau가 hifisampler를 갖고 있으면 그 모델 둘을 처음 한 번 받는다.
+    → 예전 렌더러(FALLBACK_RENDERER)로 부르게 될 때 알릴 말 또는 None (OpenUtau가 없으면 None)."""
+    from . import openutau, oudeps
+
+    if RENDERER != "CLASSIC" or RESAMPLER != "hifisampler" or openutau.app_dir() is None:
+        return None
+    if not openutau.has_hifisampler():
+        return f"OpenUtau를 0.1.576 이상으로 올리면 더 자연스러운 신경망 렌더(hifisampler)로 불러요 (지금은 {FALLBACK_RENDERER})"
+    try:
+        oudeps.ensure(progress)
+    except Exception as e:
+        print(f"신경망 렌더 모델을 받지 못했어요: {e}", flush=True)
+        return f"신경망 렌더(hifisampler) 모델을 받지 못해서 {FALLBACK_RENDERER}로 불렀어요 ({e})"
+    return None
+
+
+def renderer_settings():
+    """UTAU 음원 트랙의 renderer_settings. hifisampler를 쓸 수 없으면 FALLBACK_RENDERER로."""
+    if RENDERER == "CLASSIC" and RESAMPLER == "hifisampler" and not hifisampler_ready():
+        return {"renderer": FALLBACK_RENDERER}
+    out = {"renderer": RENDERER}
+    if RENDERER == "CLASSIC" and RESAMPLER:
+        out["resampler"] = RESAMPLER
+    return out
+
+
 def _write_ustx(path, name, bpm, qnotes, pdata, curves, waves, singer, phonemizer, classic=True):
     """qnotes: _quantize 결과. pdata: 음표마다 피치 점 (oupitch.pitch_data, None이면 예전 방식)."""
     import yaml
@@ -591,9 +629,7 @@ def _write_ustx(path, name, bpm, qnotes, pdata, curves, waves, singer, phonemize
     end = max(n["position"] + n["duration"] for n in vnotes)
     track = {"singer": singer or "", "phonemizer": phonemizer}
     if classic:  # UTAU 음원만 RENDERER. DiffSinger · ENUNU 등은 비워서 OpenUtau가 그 가수의 기본 렌더러를 고르게
-        track["renderer_settings"] = {"renderer": RENDERER}
-        if RENDERER == "CLASSIC" and RESAMPLER:
-            track["renderer_settings"]["resampler"] = RESAMPLER
+        track["renderer_settings"] = renderer_settings()
     tracks = [{**track, "track_name": "테토 (자동 조교)", "track_color": "Red", "mute": False, "solo": False,
                "volume": 0, "pan": 0}]
     wave_parts = []
