@@ -61,7 +61,8 @@ def score_files(files, names):
     for name in names:
         repo, model, arg = PREDICTORS[name]
         try:
-            pred = torch.hub.load(repo, model, trust_repo=True)
+            # skip_validation: 저장소 확인에 GitHub API를 부르지 않는다 (CI Mac에서 이름 없는 API 한도에 걸려 403)
+            pred = torch.hub.load(repo, model, trust_repo=True, skip_validation=True)
             pred.eval()
         except Exception as e:
             print(f"{name}: 불러오지 못함 ({str(e)[:300]})", flush=True)
