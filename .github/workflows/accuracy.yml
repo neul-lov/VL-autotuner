@@ -207,12 +207,14 @@ jobs:
     if: ${{ !cancelled() && needs.prepare.result == 'success' }}
     runs-on: macos-latest
     timeout-minutes: 300
+    env:
+      ACC_KEEP_RENDERS: ${{ github.workspace }}/keep  # 자연스러움 채점용 (이 기계에만, 올리지 않아요)
     strategy:
       fail-fast: false
       matrix:
         include:  # 새 방식 vs 예전 방식: Mac 자리를 먼저 받게 따로 둔다
           - {id: 1, only: "새 기본"}
-          - {id: 2, only: "PR10 기본"}
+          - {id: 2, only: "예전 기본 (WORLDLINE-R)"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -241,6 +243,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: devtools/openutau_harness/get_openutau.sh
+      - name: 신경망 렌더 모델 받기 (앱이 처음 조교할 때와 같은 판 · 같은 곳, pc-nsf-hifigan · hnsep)
+        run: |
+          python -m tetotune.oudeps
+          TETOTUNE_OPENUTAU="$PWD/OpenUtau.app" python -c "from tetotune import tune; print('새 기본 렌더 설정:', tune.renderer_settings())"
       - name: 테토 음원 받기 (공식 배포, 시험에만 쓰고 올리지 않아요)
         run: |
           curl -fL --retry 3 -o teto.zip https://kasaneteto.jp/assets/download/utau/TETO-OUset240323.zip
@@ -263,6 +269,7 @@ jobs:
       - name: 방식별 비교
         run: |
           export CSC=$(ls -d "$DOTNET_ROOT"/sdk/*/Roslyn/bincore/csc.dll | tail -1)
+          export TETOTUNE_OPENUTAU="$PWD/OpenUtau.app"  # 앱처럼: 이 OpenUtau에 hifisampler가 있는지 보고 렌더러를 고른다
           set -o pipefail
           python -W ignore devtools/accuracy.py --refs out/ref* --refs-ko out/kref* --vocadito vocadito --separated out/sep \
             --render "$PWD/OpenUtau.app/Contents/MacOS" "$PWD/ourun" --render-songs 3,10,14,22 --render-refs 4 \
@@ -270,13 +277,21 @@ jobs:
             --csd csd --csd-n 12 --csd-sep out/csdsep --render-csd 4 \
             --only "${{ matrix.only }}" --json "out/acc_m${{ matrix.id }}.json" | tee out/accuracy.txt
           sed -n '/^|/,$p' out/accuracy.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: 자연스러움 AI 채점 (SingMOS-Pro · SingMOS v1 · UTMOS, 숫자만)
+        run: |
+          set -o pipefail
+          python -m pip install "torch==2.5.1" "torchaudio==2.5.1" "s3prl==0.4.18" librosa
+          python -W ignore devtools/mos.py keep --json "out/mos_m${{ matrix.id }}.json" | tee out/mos.txt
+          sed -n '/^### /,$p' out/mos.txt >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: accuracy-m${{ matrix.id }}
           path: |
             out/acc_*.json
+            out/mos_*.json
             out/accuracy.txt
+            out/mos.txt
           retention-days: 14
 
 
@@ -286,12 +301,14 @@ jobs:
     if: ${{ !cancelled() && needs.prepare.result == 'success' }}
     runs-on: macos-latest
     timeout-minutes: 300
+    env:
+      ACC_KEEP_RENDERS: ${{ github.workspace }}/keep  # 자연스러움 채점용 (이 기계에만, 올리지 않아요)
     strategy:
       fail-fast: false
       max-parallel: 1  # Mac은 한 번에 5대: 새 방식 vs 예전 방식 둘 · 음표만 보는 둘 다음
       matrix:
         include:  # 렌더해야 차이가 보이는 것 (devtools/accuracy.py variants)
-          - {id: 3, only: "가사 맞추기 −15ms"}
+          - {id: 3, only: "hifisampler − 숨 · 힘 곡선"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -320,6 +337,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: devtools/openutau_harness/get_openutau.sh
+      - name: 신경망 렌더 모델 받기 (앱이 처음 조교할 때와 같은 판 · 같은 곳, pc-nsf-hifigan · hnsep)
+        run: |
+          python -m tetotune.oudeps
+          TETOTUNE_OPENUTAU="$PWD/OpenUtau.app" python -c "from tetotune import tune; print('새 기본 렌더 설정:', tune.renderer_settings())"
       - name: 테토 음원 받기 (공식 배포, 시험에만 쓰고 올리지 않아요)
         run: |
           curl -fL --retry 3 -o teto.zip https://kasaneteto.jp/assets/download/utau/TETO-OUset240323.zip
@@ -342,6 +363,7 @@ jobs:
       - name: 방식별 비교
         run: |
           export CSC=$(ls -d "$DOTNET_ROOT"/sdk/*/Roslyn/bincore/csc.dll | tail -1)
+          export TETOTUNE_OPENUTAU="$PWD/OpenUtau.app"  # 앱처럼: 이 OpenUtau에 hifisampler가 있는지 보고 렌더러를 고른다
           set -o pipefail
           python -W ignore devtools/accuracy.py --refs out/ref* --refs-ko out/kref* --vocadito vocadito --separated out/sep \
             --render "$PWD/OpenUtau.app/Contents/MacOS" "$PWD/ourun" --render-songs 3,10,14,22 --render-refs 4 \
@@ -349,18 +371,27 @@ jobs:
             --csd csd --csd-n 12 --csd-sep out/csdsep --render-csd 4 \
             --only "${{ matrix.only }}" --json "out/acc_m${{ matrix.id }}.json" | tee out/accuracy.txt
           sed -n '/^|/,$p' out/accuracy.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: 자연스러움 AI 채점 (SingMOS-Pro · SingMOS v1 · UTMOS, 숫자만)
+        run: |
+          set -o pipefail
+          python -m pip install "torch==2.5.1" "torchaudio==2.5.1" "s3prl==0.4.18" librosa
+          python -W ignore devtools/mos.py keep --json "out/mos_m${{ matrix.id }}.json" | tee out/mos.txt
+          sed -n '/^### /,$p' out/mos.txt >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: accuracy-m${{ matrix.id }}
           path: |
             out/acc_*.json
+            out/mos_*.json
             out/accuracy.txt
+            out/mos.txt
           retention-days: 14
 
   compare-mac-notes:
     name: 테토 정답 음표 · 가사 (${{ matrix.only }})
     needs: prepare
+    if: github.event_name == 'workflow_dispatch' && inputs.extra  # 이번(렌더러)은 음표 · 가사를 바꾸지 않아요
     runs-on: macos-latest
     timeout-minutes: 180
     strategy:
@@ -435,13 +466,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:  # 렌더 없이 보이는 것. 새 기본 · PR10 기본은 같은 리눅스에서 비교할 기준
+        include:  # 렌더 없이 보이는 것 (이번에 바꾼 렌더러와는 상관없어서 새 기본만)
           - {id: 1, only: "새 기본"}
-          - {id: 2, only: "PR10 기본"}
-          - {id: 3, only: "가사 맞추기 −15ms"}
-          - {id: 4, only: "− 이웃 프레이즈 함께 맞추기"}
-          - {id: 5, only: "− 가사 맞추기 시간 보정 · 덜 버리기"}
-          - {id: 6, only: "− 가사 맞추기 모델"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -549,7 +575,9 @@ jobs:
           path: res
           merge-multiple: true
       - run: |
-          python -W ignore devtools/accuracy.py --merge res/acc_*.json | tee merged.txt
+          { python -W ignore devtools/accuracy.py --merge res/acc_*.json
+            if ls res/mos_*.json > /dev/null 2>&1; then python -W ignore devtools/mos.py --merge res/mos_*.json; fi
+          } | tee merged.txt
           cat merged.txt >> "$GITHUB_STEP_SUMMARY"
 
   diagnose:

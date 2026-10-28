@@ -177,7 +177,7 @@ jobs:
       matrix:
         include:
           - {id: 1, only: "새 기본"}
-          - {id: 2, only: "렌더 hifisampler"}
+          - {id: 2, only: "예전 기본 (WORLDLINE-R)"}
           - {id: 3, only: "렌더 WORLDLINE-R1.1"}
           - {id: 4, only: "렌더 WORLDLINE-R2"}
           - {id: 5, only: "렌더 CLASSIC worldline"}
@@ -227,6 +227,7 @@ jobs:
       - name: 렌더 비교 (조교 → 테토로 렌더해 고치기 3번 → 원래 보컬과 비교)
         run: |
           export CSC=$(ls -d "$DOTNET_ROOT"/sdk/*/Roslyn/bincore/csc.dll | tail -1)
+          export TETOTUNE_OPENUTAU="$PWD/OpenUtau.app"  # 앱처럼: 이 OpenUtau에 hifisampler가 있는지 보고 렌더러를 고른다
           set -o pipefail
           python -W ignore devtools/accuracy.py --refs out/ref* --refs-ko out/kref* --vocadito vocadito \
             --render "$PWD/OpenUtau.app/Contents/MacOS" "$PWD/ourun" --render-songs 3,10,14,22 --render-refs 4 \

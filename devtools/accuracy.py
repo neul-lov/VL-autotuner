@@ -55,6 +55,7 @@ OFF = {
                                 (align_fa, "GAP_EXTEND", False)],
 }
 PR10 = OFF["이웃 프레이즈 함께 맞추기"] + OFF["가사 맞추기 시간 보정 · 덜 버리기"]
+OLD_RENDER = [(tune_mod, "RENDERER", "WORLDLINE-R"), (tune_mod, "RESAMPLER", None)]  # PR12까지 (main) 렌더러
 FUSION = [(None, "pitch_method", "fusion")]
 # 기본값을 바꾸면 어떨지 (새 기본에 더해서)
 ALT = {
@@ -62,12 +63,13 @@ ALT = {
     "+ 다듬기 크기 한도": [(refine_mod, "DYN_TOTAL", 6.0), (refine_mod, "DYN_VOICED", True)],
     # 사람 노래 음절 시작은 더 맞지만 (CSD 0.764 → 0.777, 분리 0.743 → 0.769) 테토 렌더가 나빠진다 (README)
     "가사 맞추기 −15ms": [(align_fa, "OFFSET", -0.015)],
-    # 렌더 엔진 (OpenUtau 0.1.576 안에 든 것): WORLDLINE-R1.1은 hnsep(배음 · 잡음 나누기 AI) 특징 + 5ms 프레임,
-    # hifisampler는 CLASSIC + 신경망 보코더(pc-nsf-hifigan), WORLDLINE-R2는 WORLD 특징 → 같은 보코더 (메뉴에는 없다)
-    "렌더 WORLDLINE-R1.1": [(tune_mod, "RENDERER", "WORLDLINE-R1.1")],
-    "렌더 hifisampler": [(tune_mod, "RENDERER", "CLASSIC"), (tune_mod, "RESAMPLER", "hifisampler")],
-    "렌더 WORLDLINE-R2": [(tune_mod, "RENDERER", "WORLDLINE-R2")],
+    # 렌더 엔진 (OpenUtau 0.1.576 안에 든 것): 새 기본은 hifisampler (CLASSIC + 신경망 보코더 pc-nsf-hifigan).
+    # WORLDLINE-R1.1은 hnsep(배음 · 잡음 나누기 AI) 특징 + 5ms 프레임, WORLDLINE-R2는 WORLD 특징 → 같은 보코더 (메뉴에는 없다)
+    "렌더 WORLDLINE-R1.1": [(tune_mod, "RENDERER", "WORLDLINE-R1.1"), (tune_mod, "RESAMPLER", None)],
+    "렌더 WORLDLINE-R2": [(tune_mod, "RENDERER", "WORLDLINE-R2"), (tune_mod, "RESAMPLER", None)],
     "렌더 CLASSIC worldline": [(tune_mod, "RENDERER", "CLASSIC"), (tune_mod, "RESAMPLER", "worldline")],
+    # hifisampler는 숨 섞임(BREC) · 힘(TENC) 곡선이 있으면 hnsep으로 배음 · 잡음을 나눠 섞는다: 곡선 없이 부르면 어떤지
+    "hifisampler − 숨 · 힘 곡선": [(None, "breathiness", 0.0), (None, "tension", 0.0)],
     # 음 높이 읽기에 CREPE full도 (넷 합치기), 음표 나누기 GAME 큰 · 작은 모델 (같은 1.0.3, 받아 둔 폴더가 있을 때)
     "+ CREPE 음 높이": [(f0models, "USE", ("rmvpe", "crepe", "swift", "harvest"))],
     "GAME 큰 모델": [(game, "FOLDER", str(game.models_home() / "game-large"))],
@@ -81,8 +83,8 @@ ALT = {
 
 def variants():
     """이름 → [(모듈, 이름, 값)]. 첫 번째가 지금 기본값. (None, 옵션 이름, 값)은 조교 설정을 바꾼다."""
-    out = {"새 기본": FUSION, "PR10 기본": FUSION + PR10, "PR6 기본": [p for v in OFF.values() for p in v],
-           "− 음 높이 합치기 (Harvest)": []}
+    out = {"새 기본": FUSION, "예전 기본 (WORLDLINE-R)": FUSION + OLD_RENDER, "PR10 기본": FUSION + PR10 + OLD_RENDER,
+           "PR6 기본": [p for v in OFF.values() for p in v] + OLD_RENDER, "− 음 높이 합치기 (Harvest)": []}
     for k, v in OFF.items():
         out[f"− {k}"] = FUSION + v
     for k, v in ALT.items():

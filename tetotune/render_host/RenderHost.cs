@@ -141,6 +141,7 @@ static class RenderHost {
             var ph = Get(track, "Phonemizer");
             var rs = Get(track, "RendererSettings");
             Console.WriteLine("phonemizer=" + (ph == null ? "null" : ph.GetType().Name) + " renderer=" + Get(rs, "renderer"));
+            Console.WriteLine("resampler=" + (Get(rs, "resampler") ?? "null"));
         } catch (Exception) { }
         var voicePart = T("OpenUtau.Core.Ustx.UVoicePart");
         var part = ((IEnumerable)Get(project, "parts")).Cast<object>().First(p => voicePart.IsInstanceOfType(p));

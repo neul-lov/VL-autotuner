@@ -19,6 +19,7 @@ from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import JSONResponse
 
 from tetotune import __version__, align_fa, clean, edit, f0models, game, openutau, pitch, refine, retune, stemmixer, voicebank
+from tetotune import tune as tune_mod
 from tetotune.tune import Options, tune
 
 # 설정 값마다 허용 범위 (숫자) 또는 고를 수 있는 값 (글자)
@@ -204,10 +205,13 @@ def _run(job_id, vocal, song, lyrics, notes, backing, opts):
                     f0models.ensure_rmvpe(lambda s: job.update(step=s, progress=0.01))
                 except Exception as e:
                     print(f"RMVPE 모델을 받지 못했어요: {e}", flush=True)
+            hifi_note = tune_mod.prepare_renderer(lambda s: job.update(step=s, progress=0.01))
             polish = opts.refine != "off" and openutau.available()
             scale = 0.6 if polish else 1.0  # 다듬기가 남은 시간의 대부분
             res = tune(vocal, out, lyrics or "", notes or None, backing or None, opts,
                        progress=lambda p, s: job.update(step=s, progress=round(p * scale, 3)), title=title)
+            if hifi_note:
+                res.warnings.append(hifi_note)
             if polish:
                 w = refine.for_result(out, lambda p, s: job.update(step=s, progress=round(scale + (1 - scale) * p, 3)))
                 if w:
