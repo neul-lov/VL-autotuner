@@ -28,6 +28,8 @@ GAP_NOTE = 0.05  # 초. 음표 안 빈 곳이 이보다 길면 가운데는 음�
 JITTER_HZ = 12.0  # 음 가운데 PITD에서 이보다 빠른 떨림을 뺀다 (Harvest 프레임 잡음이 거친 소리로 났다). 0 = 끔
 CORRECT_GATE = 40.0  # 센트. 음표와 이만큼 넘게 다르면 바로잡는 힘을 줄여 2배에서 0 (틀린 음표로 끌고 가지 않게). 0 = 늘 같게
 OU_EXACT = True  # PITD를 OpenUtau가 음표로 만드는 음 높이(oupitch.py) 그대로를 기준으로. False = 예전 (초 단위 계단: 경계마다 튐)
+RENDERER = "WORLDLINE-R"  # UTAU 음원을 부를 OpenUtau 렌더러 (WORLDLINE-R · WORLDLINE-R1.1 · CLASSIC)
+RESAMPLER = None  # CLASSIC일 때 리샘플러 (OpenUtau 안에 든 worldline · hifisampler). None = OpenUtau 설정
 
 
 @dataclass
@@ -588,8 +590,10 @@ def _write_ustx(path, name, bpm, qnotes, pdata, curves, waves, singer, phonemize
         raise ValueError("음표가 너무 짧아서 프로젝트를 만들지 못했어요 (빠르기를 확인해 주세요)")
     end = max(n["position"] + n["duration"] for n in vnotes)
     track = {"singer": singer or "", "phonemizer": phonemizer}
-    if classic:  # UTAU 음원만 WORLDLINE-R. DiffSinger · ENUNU 등은 비워서 OpenUtau가 그 가수의 기본 렌더러를 고르게
-        track["renderer_settings"] = {"renderer": "WORLDLINE-R"}
+    if classic:  # UTAU 음원만 RENDERER. DiffSinger · ENUNU 등은 비워서 OpenUtau가 그 가수의 기본 렌더러를 고르게
+        track["renderer_settings"] = {"renderer": RENDERER}
+        if RENDERER == "CLASSIC" and RESAMPLER:
+            track["renderer_settings"]["resampler"] = RESAMPLER
     tracks = [{**track, "track_name": "테토 (자동 조교)", "track_color": "Red", "mute": False, "solo": False,
                "volume": 0, "pan": 0}]
     wave_parts = []
