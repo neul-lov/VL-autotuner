@@ -3,6 +3,8 @@
 - mfa: Montreal Forced Aligner (MFA_CMD, 없으면 PATH의 mfa 명령, 한국어 korean_mfa 음향 모델). 음절 하나를 낱말
   하나로 주고 발음은 ko_g2p.phrase (연음 · 비음화 … 노래할 때 소리 나는 대로)로 사전을 만든다
 - mms: torchaudio MMS_FA (wav2vec2 CTC, 1100여 말). 음절마다 로마자(uroman, 없으면 국어 로마자 표기)로 맞춘다
+  (mms_star: 앞뒤에 아무 소리 토큰)
+- w2vko: 한국어 음소 wav2vec2 CTC (slplab, 말소리 108시간), w2vsyl: 한글 음절 CTC (kresnik, WhisperX 한국어 모델)
 """
 import json
 import os
@@ -180,6 +182,7 @@ def romanize(syl):
 
 class MMS:
     name = "mms"
+    star = False
 
     def __init__(self):
         import torch
@@ -187,7 +190,7 @@ class MMS:
 
         self.torch = torch
         b = torchaudio.pipelines.MMS_FA
-        self.model = b.get_model(with_star=False).eval()
+        self.model = b.get_model(with_star=self.star).eval()
         self.tok, self.aligner = b.get_tokenizer(), b.get_aligner()
         print(f"  mms: torchaudio {torchaudio.__version__}, 로마자 예: 사랑 → {romanize('사')}{romanize('랑')}", flush=True)
 
@@ -201,7 +204,13 @@ class MMS:
         wav = torch.from_numpy(np.ascontiguousarray(y, dtype=np.float32)).unsqueeze(0)
         with torch.inference_mode():
             em, _ = self.model(wav)
-        spans = self.aligner(em[0], self.tok(words))
+        toks = self.tok(words)
+        if self.star:  # 앞뒤에 <star> 낱말
+            star = self.tok(["*"])[0]
+            toks = [star] + toks + [star]
+        spans = self.aligner(em[0], toks)
+        if self.star:
+            spans = spans[1:-1]
         fs = wav.size(1) / em.size(1) / 16000
         out = []
         for w, sp in zip(words, spans):
@@ -211,7 +220,106 @@ class MMS:
         return out
 
 
+class MMSStar(MMS):
+    """MMS_FA + 앞뒤 <star> (조각 앞뒤의 숨 · 반주 · 잡음을 아무 소리로 받아 준다, ctc-forced-aligner처럼)."""
+    name = "mms_star"
+    star = True
+
+
+# ---------------------------------------------------------------- 한국어 wav2vec2 CTC (Hugging Face transformers)
+# slplab/wav2vec2-xls-r-300m_phone-mfa_korean: 한국어 음소 40개 (A EO EU …, 이중 모음은 iA · oA처럼 한 토큰, 받침 k p t)
+_W2V_CONS = {"k": "G", "ɡ": "G", "k͈": "GG", "kʰ": "Kh", "t": "D", "d": "D", "t͈": "DD", "tʰ": "Th", "p": "B", "b": "B",
+             "p͈": "BB", "pʰ": "Ph", "tɕ": "J", "dʑ": "J", "tɕ͈": "JJ", "tɕʰ": "CHh", "sʰ": "S", "ɕʰ": "S", "s͈": "SS",
+             "ɕ͈": "SS", "h": "H", "ɦ": "H", "ç": "H", "m": "M", "n": "N", "ɲ": "N", "ŋ": "NG", "ɾ": "R", "ɭ": "L",
+             "k̚": "k", "t̚": "t", "p̚": "p"}
+_W2V_VOW = {"ɐ": "A", "ɛ": "E", "e": "E", "ʌ": "EO", "o": "O", "u": "U", "ɨ": "EU", "i": "I"}
+_W2V_GLIDE = {("j", "ɐ"): "iA", ("j", "ɛ"): "iE", ("j", "e"): "iE", ("j", "ʌ"): "iEO", ("j", "o"): "iO", ("j", "u"): "iU",
+              ("w", "ɐ"): "oA", ("w", "ɛ"): "oE", ("w", "e"): "oE", ("w", "ʌ"): "uEO", ("w", "i"): "uI", ("ɥ", "i"): "uI",
+              ("ɰ", "i"): "euI"}
+_W2V_IVOW = {"ɐ": "iA", "ɛ": "iE", "e": "iE", "ʌ": "iEO", "o": "iO", "u": "iU"}  # ㄴ + 반모음 j (ko_g2p는 ɲ으로 반모음을 뺀다)
+
+
+def w2v_phones(ph):
+    """ko_g2p 음소 목록 → slplab 토큰 목록 + 모음 토큰 자리."""
+    out, vi, k = [], None, 0
+    while k < len(ph):
+        p = ph[k]
+        if p in ko_g2p.GLIDES and k + 1 < len(ph) and (p, ph[k + 1]) in _W2V_GLIDE:
+            vi = len(out) if vi is None else vi
+            out.append(_W2V_GLIDE[(p, ph[k + 1])])
+            k += 2
+            continue
+        if p in _W2V_VOW:
+            vi = len(out) if vi is None else vi
+            out.append(_W2V_IVOW[p] if k and ph[k - 1] == "ɲ" and p in _W2V_IVOW else _W2V_VOW[p])
+        elif p in _W2V_CONS:
+            out.append(_W2V_CONS[p])
+        k += 1
+    return out, (vi or 0)
+
+
+class W2VKo:
+    """한국어로 배운 wav2vec2 CTC로 강제 정렬 (torchaudio.functional.forced_align). 말소리로 배웠다."""
+    name = "w2vko"
+    repo = "slplab/wav2vec2-xls-r-300m_phone-mfa_korean"
+
+    def __init__(self):
+        import torch
+        from transformers import AutoModelForCTC, AutoProcessor
+
+        self.torch = torch
+        self.proc = AutoProcessor.from_pretrained(self.repo)
+        self.model = AutoModelForCTC.from_pretrained(self.repo).eval()
+        self.vocab = self.proc.tokenizer.get_vocab()
+        self.blank = self.proc.tokenizer.pad_token_id
+        print(f"  {self.name}: {self.repo}, 토큰 {len(self.vocab)}개, 빈칸 {self.blank}", flush=True)
+
+    def prepare(self, items):
+        pass
+
+    def tokens(self, syls):
+        """음절마다 (토큰 번호 목록, 모음 토큰 자리)."""
+        out = []
+        for ph in ko_g2p.phrase(syls):
+            toks, vi = w2v_phones(ph or ["ɐ"])
+            out.append(([self.vocab[t] for t in toks], vi))
+        return out
+
+    def align(self, item):
+        import torchaudio.functional as taf
+
+        torch = self.torch
+        y, sr = ab.clip(item, 16000)
+        feats = self.proc(y, sampling_rate=16000, return_tensors="pt")
+        with torch.inference_mode():
+            logits = self.model(feats.input_values).logits
+        lp = torch.log_softmax(logits, dim=-1)
+        per = self.tokens(item["syls"])
+        flat = [t for toks, _ in per for t in toks]
+        if lp.size(1) < len(flat):
+            return None
+        ali, sc = taf.forced_align(lp, torch.tensor([flat], dtype=torch.int32), blank=self.blank)
+        spans = taf.merge_tokens(ali[0], sc[0].exp(), blank=self.blank)  # 토큰마다 (시작, 끝) 프레임
+        fs = len(y) / lp.size(1) / 16000
+        out, k = [], 0
+        for toks, vi in per:
+            sp = spans[k:k + len(toks)]
+            k += len(toks)
+            out.append((item["a"] + sp[0].start * fs, item["a"] + sp[min(vi, len(sp) - 1)].start * fs))
+        return out
+
+
+class W2VSyl(W2VKo):
+    """한글 음절 토큰 CTC (WhisperX가 한국어 맞추기에 쓰는 모델). 음절 하나가 토큰 하나라 모음 시작 = 음절 시작."""
+    name = "w2vsyl"
+    repo = "kresnik/wav2vec2-large-xlsr-korean"
+
+    def tokens(self, syls):
+        unk = self.proc.tokenizer.unk_token_id
+        return [([self.vocab.get(s, unk)], 0) for s in syls]
+
+
 def register(bench):
     global ab
     ab = bench
-    bench.ENGINES.update({"mfa": MFA, "mfa_ft": MFAFine, "mms": MMS})
+    bench.ENGINES.update({"mfa": MFA, "mfa_ft": MFAFine, "mms": MMS, "mms_star": MMSStar, "w2vko": W2VKo, "w2vsyl": W2VSyl})
