@@ -100,9 +100,10 @@ class MFA:
             print(f"  mfa: 사전에 없는 음소 {sorted(missing)}", flush=True)
         (tmp / "dict.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
         jobs = str(max(1, (os.cpu_count() or 2)))
+        # --no_tokenization: 낱말은 이미 음절마다 나눠 줬다 (korean_mfa는 따로 python-mecab-ko 낱말 나누기를 찾는다)
         cmd = self.exe + ["align", str(corpus), str(tmp / "dict.txt"), self.acoustic, str(out), "--clean", "--single_speaker",
                "--beam", os.environ.get("MFA_BEAM", "100"), "--retry_beam", os.environ.get("MFA_RETRY_BEAM", "400"),
-               "-j", jobs, "--output_format", "json"] + self.extra
+               "-j", jobs, "--output_format", "json", "--no_tokenization"] + self.extra
         r = subprocess.run(cmd, capture_output=True, text=True)
         outs = list(out.rglob("*.json")) + list(out.rglob("*.TextGrid")) if out.exists() else []
         print(f"  mfa align: 끝남 {r.returncode}, 결과 파일 {len(outs)}개", flush=True)

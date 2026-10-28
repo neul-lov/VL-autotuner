@@ -23,7 +23,7 @@ env:
   TETOTUNE_MODELS: ${{ github.workspace }}/models
   MFA_ROOT_DIR: ${{ github.workspace }}/mfa_root
   # 견줄 가사 맞추기 엔진 (브랜치 이름에 align2 · align3이 있으면 다른 묶음)
-  ENGINES: ${{ contains(github.ref_name, 'align2') && 'hfa,mfa,w2vko,w2vsyl,mms_star' || (contains(github.ref_name, 'align3') && 'hfa,mfa,mfa_ft' || 'hfa,mfa,mfa_ft,mms') }}
+  ENGINES: ${{ contains(github.ref_name, 'align2') && 'hfa,mfa,w2vko,w2vsyl,mms_star' || (contains(github.ref_name, 'align3') && 'hfa,mfa,mfa_ft,w2vko,w2vsyl,mms' || 'hfa,mfa,mfa_ft,mms') }}
 
 jobs:
   songs:

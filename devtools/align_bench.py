@@ -9,7 +9,7 @@
   hfa   지금 쓰는 HubertFA (일본어 노래 모델, 한글은 일본어 음소로), 모음 시작 + align_fa.OFFSET
   mfa   Montreal Forced Aligner 한국어 모델 (말소리로 배운 HMM, korean_mfa). PATH에 mfa가 있어야 한다
   mms   torchaudio MMS_FA (여러 말 wav2vec2 CTC, 한글은 uroman으로 로마자)
-합치기: 엔진이 셋 이상이면 음절마다 가운데 값, 둘이면 평균도 같이 잰다.
+합치기: 엔진이 셋 이상이면 음절마다 가운데 값, 둘이면 평균도 같이 잰다. 엔진마다 치우침(다른 곡들에서 잰 것)을 빼고 합친 것도 잰다.
 
 사용: python align_bench.py --csd csd [--csd-n 0] [--sep out/csdsep] --engines hfa,mfa,mms [--json out/align.json]
 """
@@ -181,6 +181,77 @@ def print_table(rows):
         print(f"| {r['label']} | " + " | ".join(cells) + " |", flush=True)
 
 
+def calibrate(items, preds):
+    """엔진마다 정답에 더 가까운 쪽(음절 시작 · 모음 시작)을 고르고, 치우침을 그 곡을 뺀 다른 곡들에서 재서 뺀다.
+    (CTC 모델은 소리보다 늦게 토큰을 내서 모음 시작이 늘 늦다.) → {엔진: 조각마다 [보정한 시각] 또는 None}, {엔진: 고른 쪽}"""
+    songs = sorted({it["song"] for it in items})
+    out, side = {}, {}
+    for e, p in preds.items():
+        errs = {0: [], 1: []}
+        for it, q in zip(items, p):
+            if q is not None:
+                for (a, v), t in zip(q, it["truth"]):
+                    errs[0].append((it["song"], a - t))
+                    errs[1].append((it["song"], v - t))
+        if not errs[0]:
+            continue
+        k = max((0, 1), key=lambda j: np.mean([abs(x) <= 0.05 for _, x in errs[j]]))
+        side[e] = "음절 시작" if k == 0 else "모음 시작"
+        bias = {}
+        for sg in songs:
+            rest = [x for s2, x in errs[k] if s2 != sg]
+            bias[sg] = float(np.median(rest)) if rest else 0.0
+        out[e] = [None if q is None else [x[k] - bias[it["song"]] for x in q] for it, q in zip(items, p)]
+    return out, side
+
+
+def fusion_rows(items, preds):
+    """보정한 엔진들을 합치는 방법들 (정답은 치우침 재기에만, 다른 곡 것만 쓴다) → 표 줄들."""
+    cal, side = calibrate(items, preds)
+    names = [e for e in preds if e in cal]
+    rows = []
+    for e in names:
+        rows.append(score(items, [None if q is None else [(x, x) for x in q] for q in cal[e]], f"{e} ({side[e]}, 치우침 보정)"))
+    if len(names) < 2:
+        return rows
+    hits = {r["label"].split(" ")[0]: r["hit50"] for r in rows}
+    order = sorted(names, key=lambda e: -hits[e])
+
+    def fused(use, how):
+        res = []
+        for k in range(len(items)):
+            got = [cal[e][k] for e in use if cal[e][k] is not None]
+            if not got:
+                res.append(None)
+                continue
+            st = np.array(got, dtype=float)
+            if how == "median":
+                val = np.median(st, axis=0)
+            else:  # 가장 좋은 엔진, 다른 엔진 둘 이상이 서로 30ms 안에서 같은 곳을 가리키고 그 엔진과 40ms 넘게 다르면 그쪽
+                lead = cal[use[0]][k]
+                val = np.array(lead if lead is not None else np.median(st, axis=0), dtype=float)
+                others = [cal[e][k] for e in use[1:] if cal[e][k] is not None]
+                if lead is not None and len(others) >= 2:
+                    ot = np.array(others, dtype=float)
+                    for j in range(st.shape[1]):
+                        col = np.sort(ot[:, j])
+                        best = None
+                        for a in range(len(col)):
+                            for b in range(a + 1, len(col)):
+                                if col[b] - col[a] <= 0.03 and (best is None or col[b] - col[a] < best[1] - best[0]):
+                                    best = (col[a], col[b])
+                        if best is not None and abs((best[0] + best[1]) / 2 - val[j]) > 0.04:
+                            val[j] = (best[0] + best[1]) / 2
+            res.append([(x, x) for x in val])
+        return res
+    rows.append(score(items, fused(order, "median"), "보정 가운데 값 (" + "+".join(order) + ")"))
+    if len(order) >= 4:
+        rows.append(score(items, fused(order[:3], "median"), "보정 가운데 값 (" + "+".join(order[:3]) + ")"))
+    if len(order) >= 3:
+        rows.append(score(items, fused(order, "vote"), f"{order[0]}, 다른 둘이 같은 곳이면 그쪽 (보정)"))
+    return rows
+
+
 def report(items, preds):
     """엔진마다 + 합치기 + 가장 가까운 것 고르기 (상한) → 표 줄들."""
     names = list(preds)
@@ -201,6 +272,7 @@ def report(items, preds):
                 continue
             best.append([min((g[s] for g in got), key=lambda p: abs(p[1] - t)) for s, t in enumerate(it["truth"])])
         rows.append(score(items, best, "가장 가까운 것 고르기 (상한)"))
+        rows += fusion_rows(items, preds)
     return rows
 
 
