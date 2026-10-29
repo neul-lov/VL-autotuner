@@ -10,8 +10,8 @@ SingingVocoders(openvpi, 학습 코드)를 --sv 폴더에 받아 두고 그 코�
 
 사용:
   python vocoder_ft.py prep --sv SingingVocoders --voicebank 테토폴더 --data 작업폴더 --pretrained 미세조정용.ckpt
-  python vocoder_ft.py bench --sv SingingVocoders --data 작업폴더            (CPU · MPS 한 걸음 시간)
-  python vocoder_ft.py train --sv SingingVocoders --data 작업폴더 [--device cpu --until 유닉스초]
+  python vocoder_ft.py bench --sv SingingVocoders --data 작업폴더 --out 고른것.txt  (MPS 배치 10 · 6 · 4, 안 되면 CPU)
+  python vocoder_ft.py train --sv SingingVocoders --data 작업폴더 [--device mps --batch 6 --until 유닉스초]
   python vocoder_ft.py export --sv SingingVocoders --ckpt 학습결과.ckpt --out 이름.onnx
   python vocoder_ft.py check a.onnx b.onnx --data 작업폴더 [--require-snr 40] (같은 입력에 두 ONNX가 얼마나 같은지)
   python vocoder_ft.py copysyn 이름=a.onnx 이름=b.onnx --data 작업폴더 [--json out.json]
@@ -108,8 +108,11 @@ def prep(args):
     progress("보코더 실험", f"준비: 테토 녹음 {n}개 {secs / 3600:.2f}시간, 배울 것 {len(lines)} · 검증 {len(valid)}")
 
 
-def bench(args):
-    """한 걸음(배치 하나: 판별기 · 생성기 한 번씩, pc 증강 포함)과 비슷한 계산을 CPU와 MPS에서 재 본다."""
+def bench_one(args):
+    """bench가 부르는 것 (따로 띄운 프로세스에서): 장치 하나 · 배치 하나로 한 걸음(판별기 · 생성기 한 번씩,
+    pc 증강으로 생성기 세 번 더)과 비슷한 계산을 재서 JSON 한 줄로 찍는다. 메모리가 모자라면 실패한다."""
+    import math
+
     import torch
 
     enter(args.sv)
@@ -118,44 +121,76 @@ def bench(args):
 
     cfg = read_full_config(Path("configs/ft_hifigan.yaml"))
     h = AttrDict({**cfg["model_args"], "sampling_rate": 44100, "num_mels": 128, "hop_size": 512})
-    devices = (["mps"] if torch.backends.mps.is_available() else []) + ["cpu"]
-    print(f"torch {torch.__version__}, 스레드 {torch.get_num_threads()}, MPS {torch.backends.mps.is_available()}", flush=True)
-    best = None
-    for dev in devices:
-        if best and best[0] == "mps":  # CPU는 MPS보다 8배쯤 느렸다 (70초 vs 8.5초): 재느라 5분 쓰지 않는다
+    dev, b, frames = args.device, args.batch or 10, 32
+    k = max(1, math.ceil(b * float(cfg.get("pc_aug_rate", 0.4))))
+    if dev == "mps" and hasattr(torch.mps, "recommended_max_memory"):
+        print(f"MPS 권장 메모리 {torch.mps.recommended_max_memory() / 2 ** 30:.1f}GB", flush=True)
+    g = Generator(h).to(dev)
+    msd, mpd = MultiScaleDiscriminator().to(dev), MultiPeriodDiscriminator(periods=h.discriminator_periods).to(dev)
+    mpd.requires_grad_(False)  # 학습처럼 MPD는 고정
+    d = [msd, mpd]
+    og, od = torch.optim.AdamW(g.parameters(), 1e-5), torch.optim.AdamW(msd.parameters(), 1e-5)
+    mel = torch.randn(b, 128, frames, device=dev)
+    f0 = 200 + 300 * torch.rand(b, frames, device=dev)
+    real = torch.randn(b, 1, frames * 512, device=dev) * 0.1
+    times = []
+    for _ in range(4):
+        t = time.time()
+        fake = torch.cat([g(mel, f0), g(mel[:k], f0[:k] * 1.2), g(mel[:k], f0[:k]), g(mel[:k], f0[:k] * 0.9)])
+        lo = sum(o.mean() for D in d for o in D(fake.detach())[0]) - sum(o.mean() for D in d for o in D(real)[0])
+        od.zero_grad()
+        lo.backward()
+        od.step()
+        lg = -sum(o.mean() for D in d for o in D(fake)[0]) + (fake[:b] - real).abs().mean() * 45
+        og.zero_grad()
+        lg.backward()
+        og.step()
+        if dev == "mps":
+            torch.mps.synchronize()
+        times.append(time.time() - t)
+    print(json.dumps({"device": dev, "batch": b, "sec": sorted(times[1:])[len(times[1:]) // 2],
+                      "first_sec": round(times[0], 1)}), flush=True)
+    sys.stdout.flush()
+    os._exit(0)
+
+
+def bench(args):
+    """맥 GPU(MPS)로 배치 10 · 6 · 4를 하나씩 따로 띄운 프로세스에서 재서 (메모리가 모자라면 그 배치는 못 쓴다),
+    1초에 배우는 녹음 조각이 가장 많은 것을 고른다. MPS가 다 안 되면 CPU 배치 4.
+    CI 맥마다 메모리가 달라서: 7GB 기계에서는 배치 10이 GPU 메모리(7.9GB까지)를 넘었고, CPU로는 한 걸음 150~270초였다."""
+    import subprocess
+
+    import torch
+
+    print(f"torch {torch.__version__}, 스레드 {torch.get_num_threads()}, MPS {torch.backends.mps.is_available()}, "
+          f"메모리 {os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES') / 2 ** 30:.1f}GB", flush=True)
+    plans = ([("mps", 10), ("mps", 6), ("mps", 4)] if torch.backends.mps.is_available() else []) + [("cpu", 4)]
+    ok = []
+    for dev, b in plans:
+        if dev == "cpu" and ok:  # MPS가 되면 CPU는 재지 않는다 (훨씬 느리다)
             break
+        cmd = [sys.executable, os.path.abspath(__file__), "bench1", "--sv", str(args.sv), "--device", dev, "--batch", str(b)]
         try:
-            g = Generator(h).to(dev)
-            d = torch.nn.ModuleList([MultiScaleDiscriminator(), MultiPeriodDiscriminator(periods=h.discriminator_periods)]).to(dev)
-            og, od = torch.optim.AdamW(g.parameters(), 1e-5), torch.optim.AdamW(d.parameters(), 1e-5)
-            b, frames = args.batch, 32
-            mel = torch.randn(b, 128, frames, device=dev)
-            f0 = 200 + 300 * torch.rand(b, frames, device=dev)
-            real = torch.randn(b, 1, frames * 512, device=dev) * 0.1
-            times = []
-            for k in range(4):
-                t = time.time()
-                fake = torch.cat([g(mel, f0), g(mel[:4], f0[:4] * 1.2), g(mel[:4], f0[:4]), g(mel[:4], f0[:4] * 0.9)])
-                lo = sum(o.mean() for D in d for o in D(fake.detach())[0]) - sum(o.mean() for D in d for o in D(real)[0])
-                od.zero_grad()
-                lo.backward()
-                od.step()
-                lg = -sum(o.mean() for D in d for o in D(fake)[0]) + (fake[:b] - real).abs().mean() * 45
-                og.zero_grad()
-                lg.backward()
-                og.step()
-                if dev == "mps":
-                    torch.mps.synchronize()
-                times.append(time.time() - t)
-            s = sorted(times[1:])[len(times[1:]) // 2]
-            print(f"{dev}: 한 걸음 {s:.2f}초 (배치 {b})", flush=True)
-            if best is None or s < best[1]:
-                best = (dev, s)
-        except Exception as e:  # MPS가 있다고 나와도 가상 기계에서는 안 될 수 있다
-            print(f"{dev}: 못 씀 ({type(e).__name__}: {str(e)[:200]})", flush=True)
-    print(f"고른 장치: {best[0]}", flush=True)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        except subprocess.TimeoutExpired:
+            print(f"{dev} 배치 {b}: 10분 안에 네 걸음을 못 함 (메모리가 모자라 디스크로 넘치는 듯)", flush=True)
+            continue
+        line = next((x for x in r.stdout.splitlines()[::-1] if x.startswith("{")), None)
+        if r.returncode or not line:
+            err = [x for x in (r.stderr + r.stdout).splitlines() if "Error" in x] or (r.stderr + r.stdout).splitlines()
+            print(f"{dev} 배치 {b}: 못 씀 ({(err[-1] if err else r.returncode)!s:.200})", flush=True)
+            continue
+        res = json.loads(line)
+        print(f"{dev} 배치 {b}: 한 걸음 {res['sec']:.2f}초 (처음 {res['first_sec']}초), 1초에 조각 {b / res['sec']:.2f}개", flush=True)
+        ok.append((b / res["sec"], dev, b, res["sec"]))
+    if not ok:
+        raise SystemExit("MPS · CPU 어느 쪽으로도 한 걸음을 못 했어요")
+    _, dev, b, sec = max(ok)
+    print(f"고른 장치: {dev} 배치 {b}", flush=True)
+    progress("보코더 실험", f"고른 장치 {dev} 배치 {b}: 한 걸음 {sec:.1f}초 ("
+             + ", ".join(f"{d} {bb}: {s:.1f}초" for _, d, bb, s in sorted(ok, key=lambda x: -x[2])) + ")")
     if args.out:
-        Path(args.out).write_text(best[0], encoding="utf-8")
+        Path(args.out).write_text(f"{dev} {b}\n", encoding="utf-8")
 
 
 def train(args):
@@ -163,12 +198,16 @@ def train(args):
     import lightning.pytorch as pl
     from lightning.pytorch.callbacks import Callback, ProgressBar
 
-    if args.device:  # bench가 고른 장치로 설정을 다시 쓴다
+    if args.device or args.batch:  # bench가 고른 장치 · 배치로 설정을 다시 쓴다
         import yaml
 
         cfg = yaml.safe_load(Path(CONFIG).read_text(encoding="utf-8"))
-        cfg["pl_trainer_accelerator"] = args.device
+        if args.device:
+            cfg["pl_trainer_accelerator"] = args.device
+        if args.batch:
+            cfg["batch_size"] = args.batch
         Path(CONFIG).write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        print("장치 · 배치:", cfg["pl_trainer_accelerator"], cfg["batch_size"], flush=True)
     left = int(args.until - time.time()) if args.until else None
     if left is not None and left < 300:
         raise SystemExit(f"배울 시간이 모자라요 ({left}초)")
@@ -225,6 +264,10 @@ def train(args):
         def on_train_end(self, trainer, pl_module):  # 시간 한도로 멈춰도 마지막 것을 남긴다
             trainer.save_checkpoint(str(work / "final.ckpt"))
             print(f"배운 걸음 {self.n} ({time.time() - self.t:.0f}초) → {work / 'final.ckpt'}", flush=True)
+            progress("보코더 실험", f"학습 끝: {self.n}걸음, 한 걸음 {(time.time() - self.t) / max(1, self.n):.1f}초"
+                     + (f", 검증 손실 {self.val[0]:.4f}→{self.val[-1]:.4f}" if self.val else ""))
+            sys.stderr.flush()
+            os._exit(0)  # 저장했으면 바로 끝낸다: 학습 뒤 정리(데이터로더 일꾼 · 공유 메모리)에서 한 시간 넘게 멈춘 적이 있다
 
     class Trainer(pl.Trainer):  # train.py가 만드는 Trainer에 시간 한도 · 기록만 더한다 (isinstance가 되게 물려받아서)
         def __init__(self, *a, **k):
@@ -399,14 +442,14 @@ def copysyn(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["prep", "bench", "train", "export", "check", "copysyn"])
+    ap.add_argument("cmd", choices=["prep", "bench", "bench1", "train", "export", "check", "copysyn"])
     ap.add_argument("onnx", nargs="*")
     ap.add_argument("--sv")
     ap.add_argument("--voicebank")
     ap.add_argument("--data")
     ap.add_argument("--pretrained")
     ap.add_argument("--device", default="")
-    ap.add_argument("--batch", type=int, default=10)
+    ap.add_argument("--batch", type=int, help="prep: 설정에 쓸 배치 (기본 10), train: 바꿀 배치")
     ap.add_argument("--val", type=int, default=200, help="몇 걸음마다 검증 · 저장")
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--train-mpd", action="store_true", help="MPD도 배운다 (기본은 README 권장대로 고정)")
@@ -419,9 +462,10 @@ def main():
     if args.cmd == "copysyn" and args.onnx and "=" not in args.onnx[0]:
         ap.error("copysyn은 이름=경로.onnx 로")
     args.cwd = os.getcwd()
-    if args.cmd == "prep" and not args.device:
-        args.device = "cpu"
-    {"prep": prep, "bench": bench, "train": train, "export": export, "check": check, "copysyn": copysyn}[args.cmd](args)
+    if args.cmd == "prep":
+        args.device, args.batch = args.device or "cpu", args.batch or 10
+    {"prep": prep, "bench": bench, "bench1": bench_one, "train": train, "export": export, "check": check,
+     "copysyn": copysyn}[args.cmd](args)
 
 
 if __name__ == "__main__":

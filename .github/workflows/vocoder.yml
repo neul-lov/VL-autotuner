@@ -190,15 +190,24 @@ jobs:
           python -W ignore devtools/vocoder_ab.py run "$W/projects" --render "$PWD/OpenUtau.app/Contents/MacOS" "$PWD/ourun" \
             --label "원래 보코더" --json "$R/ab_base.json" --keep "$W/keep"
           echo "AB_END=$(date +%s)" >> "$GITHUB_ENV"
-      - name: 한 걸음 시간 재기 (CPU · MPS)
-        run: python devtools/vocoder_ft.py bench --sv "$W/sv" --data "$W/data" --out "$W/device.txt"
+      - name: 한 걸음 시간 재기 (MPS 배치 10 · 6 · 4 중 메모리에 맞고 가장 빠른 것, 안 되면 CPU)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          pkill -f torch_shm_manager || true  # 앞 단계에서 남은 파이썬 일꾼 (메모리를 덜 쓰게)
+          pkill -f "multiprocessing" || true
+          ps -axo pid,rss,etime,comm -m | head -8 || true
+          vm_stat | head -6 || true
+          python devtools/vocoder_ft.py bench --sv "$W/sv" --data "$W/data" --out "$W/device.txt"
       - name: 테토 보코더 배우기 (남은 시간에서 다시 렌더 · 채점 시간을 빼고)
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          if [ -n "$SMOKE" ]; then until=$(( $(date +%s) + 480 )); else until=$(( T0 + 355 * 60 - (AB_END - AB_START) - 30 * 60 )); fi
+          if [ -n "$SMOKE" ]; then until=$(( $(date +%s) + 480 )); else until=$(( T0 + 355 * 60 - (AB_END - AB_START) - 40 * 60 )); fi
           echo "다시 렌더 $(( (AB_END - AB_START) / 60 ))분, 배우기는 $(( (until - $(date +%s)) / 60 ))분"
-          python -W ignore devtools/vocoder_ft.py train --sv "$W/sv" --data "$W/data" --device "$(cat "$W/device.txt")" --until "$until"
+          read -r dev batch < "$W/device.txt" || true
+          test -n "$dev" && test -n "$batch"
+          python -W ignore devtools/vocoder_ft.py train --sv "$W/sv" --data "$W/data" --device "$dev" --batch "$batch" --until "$until"
           ls -l "$W/sv/experiments/teto_ft/final.ckpt"
       - name: 테토 보코더 내보내기 · 바꿔 끼우기 (OpenUtau가 쓰는 자리에, 렌더 캐시 비우고)
         run: |
