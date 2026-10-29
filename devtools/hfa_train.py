@@ -22,6 +22,11 @@ CONFIG = "configs/fa_ko.yaml"
 NAME = "ko_fa"
 
 
+def note(title, msg):
+    """GitHub Actions 주석으로도 (작업이 도는 동안 진행을 볼 수 있게, 단계마다 10개까지만 보인다)."""
+    print(f"::notice title={title}::{msg}" if os.environ.get("GITHUB_ACTIONS") else f"{title}: {msg}", flush=True)
+
+
 def enter(hfa):
     """HubertFA 코드는 자기 폴더를 기준으로 경로를 쓴다 (configs/ · dictionaries/ · dependencies/ · ckpt/)."""
     hfa = Path(hfa).resolve()
@@ -75,7 +80,7 @@ def binarize(args):
 
     t = time.time()
     ForcedAlignmentBinarizer(CONFIG).process()
-    print(f"미리 계산 {time.time() - t:.0f}초", flush=True)
+    note("미리 계산", f"{time.time() - t:.0f}초")
 
 
 def train(args):
@@ -97,21 +102,27 @@ def train(args):
         print(f"학습 시간 한도 {left / 3600:.2f}시간", flush=True)
     from lightning.pytorch.callbacks import Callback
 
-    class Log(Callback):  # CI 기록에 50걸음마다 한 줄 (진행 막대 대신)
+    class Log(Callback):  # CI 기록에 50걸음마다 한 줄 (진행 막대 대신), 주석은 처음과 30분마다
         def __init__(self):
-            self.t = time.time()
+            self.t = self.noted = time.time()
+            self.last = {}
 
         def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
             s = trainer.global_step
             if s % 50 == 0:
                 m = trainer.callback_metrics
                 loss = m.get("train/total_loss")
-                print(f"걸음 {s} · {time.time() - self.t:.0f}초 · 손실 {float(loss):.4f}" if loss is not None else
-                      f"걸음 {s} · {time.time() - self.t:.0f}초", flush=True)
+                line = (f"걸음 {s} · {time.time() - self.t:.0f}초 · 손실 {float(loss):.4f}" if loss is not None else
+                        f"걸음 {s} · {time.time() - self.t:.0f}초")
+                print(line, flush=True)
+                if s == 50 or time.time() - self.noted > 1800:
+                    self.noted = time.time()
+                    note("학습", f"{line} · 채점 {json.dumps(self.last)}")
 
         def on_validation_end(self, trainer, pl_module):
             m = {k: round(float(v), 4) for k, v in trainer.callback_metrics.items()
                  if k.startswith(("unseen_evaluate/", "valid_evaluate/total", "valid/total"))}
+            self.last = {k.split("/")[-1] if k.startswith("unseen") else k: v for k, v in m.items()}
             print(f"걸음 {trainer.global_step} 채점 {json.dumps(m)}", flush=True)
 
     from networks.task.forced_alignment_task import LitForcedAlignmentTask
@@ -127,7 +138,7 @@ def train(args):
     hfa_train.StepProgressBar = Log  # train.py가 넣는 진행 막대 대신 (진행 막대를 껐다)
     t = time.time()
     hfa_train.ForcedAlignmentTrainer(CONFIG).train()
-    print(f"학습 {time.time() - t:.0f}초", flush=True)
+    note("학습 끝", f"{time.time() - t:.0f}초")
 
 
 def pick_ckpt(hfa, which):
