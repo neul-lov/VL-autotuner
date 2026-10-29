@@ -275,7 +275,9 @@ def main():
     inv = sorted(p for p in phones if p != "SP")
     (out / "ko_phones.txt").write_text("".join(f"{p}\t{p}\n" for p in inv), encoding="utf-8")
     hours = {s: round(v["kept_sec"] / 3600, 2) for s, v in stats.items()}
-    print(f"노래 {len(keys)}곡 (채점용 {len(eval_keys)}곡), 파일 학습 {len(rows['train'])} · 채점 {len(rows['eval'])}")
+    msg = f"노래 {len(keys)}곡 (채점용 {len(eval_keys)}곡), 파일 학습 {len(rows['train'])} · 채점 {len(rows['eval'])}, " \
+          f"{sum(v['kept_sec'] for v in stats.values()) / 3600:.2f}시간 (전체 {sum(v['sec'] for v in stats.values()) / 3600:.2f})"
+    print(f"::notice title=GTSinger 바꾸기::{msg}" if os.environ.get("GITHUB_ACTIONS") else msg, flush=True)
     print("묶음마다 (파일 수, 쓴 파일, 시간):")
     for s, v in sorted(stats.items()):
         print(f"  {s}: {v['files']}개 · {v['kept']}개 · {v['kept_sec'] / 3600:.2f}시간 (전체 {v['sec'] / 3600:.2f})")
