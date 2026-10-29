@@ -10,6 +10,8 @@ import urllib.request
 
 
 def post(context, text, state="pending"):
+    # 셸이 깨뜨린 글자(맥 bash 3.2: "$n곡")가 와도 알림 때문에 작업이 멈추지 않게
+    context, text = (x.encode("utf-8", "surrogateescape").decode("utf-8", "replace") for x in (context, text))
     print(f"[{context}] {text}", flush=True)
     token, repo, sha = (os.environ.get(k) for k in ("GITHUB_TOKEN", "GITHUB_REPOSITORY", "GITHUB_SHA"))
     if not (token and repo and sha):
