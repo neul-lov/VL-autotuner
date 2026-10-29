@@ -84,7 +84,9 @@ jobs:
       - name: GTSinger 한국어 받기 (CC BY-NC-SA 4.0, 이 기계에만)
         if: ${{ !inputs.from_ckpt }}
         run: |
-          python devtools/hf_fetch.py "$GTSINGER" "$W/gts" --type dataset --include "Korean/*.wav" --include "Korean/*.json"
+          # 말소리(Paired_Speech_Group)는 배우지 않아서 받지 않는다 (로그인 없이 받는 요청 수를 아낀다)
+          python devtools/hf_fetch.py "$GTSINGER" "$W/gts" --type dataset --path Korean \
+            --include "Korean/*.wav" --include "Korean/*.json" --exclude "*/Paired_Speech_Group/*"
           du -sh "$W/gts"; df -h "$W"
       - name: 학습 파일로 바꾸기 (앱 발음과 같은 음소로, 숫자만 찍어요)
         if: ${{ !inputs.from_ckpt }}
