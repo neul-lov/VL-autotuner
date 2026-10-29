@@ -110,22 +110,50 @@ def _consts(m):
     return out
 
 
-def _sigs(nodes, consts):
-    """상수 이름 → (처음 쓰는 노드 종류, 모양, 같은 둘 중 몇 번째). 같은 코드로 내보낸 두 그래프에서 짝을 찾는다
-    (입력 자리는 보지 않는다: torch 판에 따라 Mul(x, w) · Mul(w, x)가 다를 수 있어서)."""
-    out, count = {}, Counter()
-    for n in nodes:
-        for x in n.input:
-            if x in consts and x not in out:
-                key = (n.op_type, tuple(consts[x].dims))
-                out[x] = key + (count[key],)
-                count[key] += 1
-    return out
+def _match(ours, theirs, co, ct):
+    """같은 계산인 두 그래프를 출력에서 거슬러 올라가며 노드끼리 짝짓는다 (노드 순서가 달라도 된다).
+    → (우리 상수 이름 → 그쪽 상수 이름, 짝지은 노드 수, 안 맞는 곳 [설명])."""
+    from onnx import helper
+
+    po = {o: n for n in ours.graph.node for o in n.output}
+    pt = {o: n for n in theirs.graph.node for o in n.output}
+    pairs, bad, seen, nodes = {}, [], set(), 0
+    stack = [(o, o) for o in OUTS]
+    while stack:
+        a, b = stack.pop()
+        if not a or (a, b) in seen:
+            continue
+        seen.add((a, b))
+        if a in co or b in ct:
+            if a in co and b in ct:
+                if pairs.setdefault(a, b) != b:
+                    bad.append(f"상수 {a}가 둘과 짝: {pairs[a]} · {b}")
+            else:
+                bad.append(f"한쪽만 상수: {a} ↔ {b} ({pt[b].op_type if b in pt else '-'})")
+            continue
+        na, nb = po.get(a), pt.get(b)
+        if na is None:  # 우리 그래프 입력 (그쪽은 인코더 출력)
+            continue
+        if nb is None or na.op_type != nb.op_type or len(na.input) != len(nb.input) or \
+                list(na.output).index(a) != list(nb.output).index(b):
+            bad.append(f"노드가 다름: {na.op_type} ↔ {nb.op_type if nb else '-'} ({a} ↔ {b})")
+            continue
+        nodes += 1
+        aa = {x.name: helper.get_attribute_value(x) for x in na.attribute}
+        ab = {x.name: helper.get_attribute_value(x) for x in nb.attribute}
+        if na.op_type != "Constant" and aa != ab:
+            bad.append(f"{na.op_type} 속성이 다름: {aa} ↔ {ab}")
+        ia, ib = list(na.input), list(nb.input)
+        if na.op_type in ("Add", "Mul") and len(ia) == 2 and \
+                [x in co for x in ia] == [x in ct for x in ib][::-1] != [x in ct for x in ib]:
+            ib = ib[::-1]  # 상수가 앞 · 뒤 다른 자리에 (torch 판에 따라)
+        stack += list(zip(ia, ib))
+    return pairs, nodes, bad
 
 
 def official(args):
     """지금 앱의 가사 맞추기 모델(HubertFA v0.0.7, ONNX로만 공개)에서 FA 무게를 꺼내 HubertFA 모델 모양으로 저장한다.
-    같은 모양 모델에 무게마다 다른 값을 넣어 똑같이 내보낸 ONNX와 짝지어 (이름, 없으면 쓰는 노드 순서) 어느 상수가
+    같은 모양 모델에 무게마다 다른 값을 넣어 똑같이 내보낸 ONNX와 출력에서부터 노드끼리 짝지어 어느 상수가
     어느 무게인지 찾고, 꺼낸 무게로 PyTorch에서 돌린 값이 지금 모델 ONNX와 같은지 확인한다 (다르면 멈춘다)."""
     src = Path(args.src).resolve()
     out = Path(args.out) if Path(args.out).is_absolute() else Path(args.cwd) / args.out
@@ -200,13 +228,15 @@ def official(args):
     assert ok
     os.remove(tmp)
     co = _consts(ours)
-    so, sb = _sigs(list(ours.graph.node), co), _sigs(fa, cb)
-    by_sig = {s: x for x, s in sb.items()}
+    pairs, matched, bad = _match(ours, big, co, cb)
+    print(f"노드 {matched}개 짝지음, 상수 {len(pairs)}개, 안 맞는 곳 {len(bad)}개", flush=True)
+    for x in bad[:15]:
+        print("  " + x[:300], flush=True)
 
     def h(a):
         return hashlib.sha1(np.ascontiguousarray(a, dtype=np.float32).tobytes()).hexdigest()
 
-    ours_hash = {}
+    ours_hash, used = {}, set()
     for x, t in co.items():
         a = numpy_helper.to_array(t)
         if a.dtype.kind == "f":
@@ -216,27 +246,28 @@ def official(args):
         if not k.startswith(PARTS):
             continue
         a = p.numpy()
-        named = "predict/fa." + k
-        if named in sb:  # 지금 모델에 무게 이름이 남아 있으면 그것 (Conv · 정규화는 모양 그대로, 2차원은 뒤집혔을 수도)
-            b = numpy_helper.to_array(cb[named])
-            if b.size != a.size:
-                missing.append(k)
-                continue
-            b = b.T if a.ndim == 2 and b.shape != a.shape and b.shape == a.T.shape else b
-            how["이름"] += 1
-        else:  # 같은 모양 모델 ONNX에서 값으로 찾고, 쓰는 노드 순서로 지금 모델의 상수와 짝짓는다
-            x, tr = ours_hash.get(h(a)), False
-            if x is None and a.ndim == 2:
-                x, tr = ours_hash.get(h(a.T)), True
-            y = by_sig.get(so.get(x)) if x else None
-            if y is None or tuple(cb[y].dims) != tuple(co[x].dims):
-                missing.append(k)
-                continue
-            b = numpy_helper.to_array(cb[y])
-            b = b.T if tr else b
-            how["순서"] += 1
-        new[k] = torch.from_numpy(np.ascontiguousarray(b).reshape(a.shape).astype(np.float32))
-    print(f"무게 {len(new)}개 짝 찾음 ({dict(how)}), 못 찾음 {missing}", flush=True)
+        x, tr = ours_hash.get(h(a)), False
+        if x is None and a.ndim == 2:
+            x, tr = ours_hash.get(h(a.T)), True
+        y = pairs.get(x) if x else None
+        if y is None or tuple(cb[y].dims) != tuple(co[x].dims):
+            missing.append(k)
+            continue
+        used.add(x)
+        b = numpy_helper.to_array(cb[y])
+        new[k] = torch.from_numpy(np.ascontiguousarray(b.T if tr else b).reshape(a.shape).astype(np.float32))
+        how["이름 같음" if y == "predict/" + x else "이름 다름"] += 1
+    # 무게가 아닌 상수 (모양 · 축 · eps …)는 두 그래프에서 같아야 같은 구조다
+    diff = []
+    for x, y in pairs.items():
+        if x in used:
+            continue
+        u, v = numpy_helper.to_array(co[x]), numpy_helper.to_array(cb[y])
+        if u.shape != v.shape or not np.allclose(u, v, rtol=1e-5, atol=1e-7):
+            diff.append(f"{x} {list(u.shape)} {u.ravel()[:6].tolist()} ↔ {y} {list(v.shape)} {v.ravel()[:6].tolist()}")
+    print(f"무게 {len(new)}개 짝 찾음 ({dict(how)}), 못 찾음 {missing}, 값이 다른 상수 {len(diff)}개", flush=True)
+    for x in diff[:15]:
+        print("  " + x[:300], flush=True)
     model.load_state_dict(new, strict=False)
 
     # 지금 모델을 소리 하나로 돌려 FA가 받는 값(인코더 출력)과 FA 출력을 같이 꺼내 PyTorch 결과와 견준다
@@ -258,6 +289,26 @@ def official(args):
     res = dict(zip([o.name for o in sess.get_outputs()], sess.run(None, {"waveform": wav[None, :]})))
     units = next(res[x] for x in ext if res[x].ndim == 3 and res[x].shape[1] == ch)
     curves = next(res[x] for x in ext if res[x].ndim == 3 and res[x].shape[1] == 1)
+    # 짝이 맞는지 따로 본다: 같은 모양 ONNX의 상수를 짝지은 지금 모델 값으로 바꿔 돌리면 지금 모델과 같아야 한다
+    swapped = onnx.ModelProto()
+    swapped.CopyFrom(ours)
+    for i in swapped.graph.initializer:
+        if i.name in pairs:
+            i.CopyFrom(numpy_helper.from_array(numpy_helper.to_array(cb[pairs[i.name]]), i.name))
+    for nd in swapped.graph.node:
+        if nd.op_type == "Constant" and nd.output[0] in pairs:
+            for at in nd.attribute:
+                if at.name == "value":
+                    at.t.CopyFrom(numpy_helper.from_array(numpy_helper.to_array(cb[pairs[nd.output[0]]])))
+    try:
+        r2 = ort.InferenceSession(swapped.SerializeToString(), opts, providers=["CPUExecutionProvider"]).run(
+            None, {"input_feature": units.astype(np.float32), "curves": curves.astype(np.float32)})
+        for name, a in zip(OUTS, r2):
+            ref = res[name]
+            d = float(np.abs(a - ref).max()) / max(1.0, float(np.abs(ref).max()))
+            print(f"(상수만 바꾼 같은 모양 ONNX) {name}: 가장 큰 차이 {d:.2e}", flush=True)
+    except Exception as e:
+        print(f"상수만 바꾼 ONNX를 못 돌림: {type(e).__name__}: {str(e)[:300]}", flush=True)
     with torch.no_grad():
         mine = model(torch.from_numpy(units).float(), torch.from_numpy(curves).float())
     worst = 0.0
