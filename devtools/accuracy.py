@@ -466,8 +466,8 @@ def csd_songs(root, count=0):
         if sum(map(_hangul, syl)) < len(syl) / 2:  # 발음 기호
             lab, rate = csd_align(text, syl)
             if lab is None or rate < 0.9:
-                print(f"CSD {wav.stem}: 가사 {len(text)}음절 · 음표 {len(rows)}개를 맞추지 못해서 뺌 (모음 {rate:.2f}), "
-                      f"처음 {syl[:6]} {''.join(text[:12])}", flush=True)
+                print(f"CSD {wav.stem}: 가사 {len(text)}음절 · 음표 {len(rows)}개를 맞추지 못해서 뺌 (모음 {rate:.2f})",
+                      flush=True)  # 가사는 찍지 않는다 (CC BY-NC-SA)
                 continue
             for r, x in zip(rows, lab):
                 r[3] = x
