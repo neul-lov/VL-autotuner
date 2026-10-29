@@ -118,10 +118,12 @@ def bench(args):
 
     cfg = read_full_config(Path("configs/ft_hifigan.yaml"))
     h = AttrDict({**cfg["model_args"], "sampling_rate": 44100, "num_mels": 128, "hop_size": 512})
-    devices = ["cpu"] + (["mps"] if torch.backends.mps.is_available() else [])
+    devices = (["mps"] if torch.backends.mps.is_available() else []) + ["cpu"]
     print(f"torch {torch.__version__}, 스레드 {torch.get_num_threads()}, MPS {torch.backends.mps.is_available()}", flush=True)
     best = None
     for dev in devices:
+        if best and best[0] == "mps":  # CPU는 MPS보다 8배쯤 느렸다 (70초 vs 8.5초): 재느라 5분 쓰지 않는다
+            break
         try:
             g = Generator(h).to(dev)
             d = torch.nn.ModuleList([MultiScaleDiscriminator(), MultiPeriodDiscriminator(periods=h.discriminator_periods)]).to(dev)
@@ -171,6 +173,15 @@ def train(args):
     if left is not None and left < 300:
         raise SystemExit(f"배울 시간이 모자라요 ({left}초)")
     work = Path("experiments") / NAME
+    import torch
+
+    _load = torch.load
+
+    def load_cpu(*a, **k):  # 미세 조정 시작점은 CUDA에서 저장돼 있어서 (맥에는 CUDA가 없다) CPU로 먼저 읽는다
+        k.setdefault("map_location", "cpu")
+        return _load(*a, **k)
+
+    torch.load = load_cpu
     from training.base_task_gan import GanBaseTask
 
     load = GanBaseTask.load_finetune_ckpt
