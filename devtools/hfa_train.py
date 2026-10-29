@@ -114,6 +114,14 @@ def train(args):
                  if k.startswith(("unseen_evaluate/", "valid_evaluate/total", "valid/total"))}
             print(f"걸음 {trainer.global_step} 채점 {json.dumps(m)}", flush=True)
 
+    from networks.task.forced_alignment_task import LitForcedAlignmentTask
+
+    forward = LitForcedAlignmentTask.forward
+
+    def forward32(self, x, curves):  # 미리 계산한 특징은 float16 (HubertFA 기본 bf16-mixed용). CPU 32비트로 배우니 맞춘다
+        return forward(self, x.float(), curves.float())
+
+    LitForcedAlignmentTask.forward = forward32
     import train as hfa_train
 
     hfa_train.StepProgressBar = Log  # train.py가 넣는 진행 막대 대신 (진행 막대를 껐다)

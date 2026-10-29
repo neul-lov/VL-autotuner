@@ -1,6 +1,7 @@
 """GTSinger 한국어 (사람이 고친 음소 시각) → HubertFA 학습 파일 (wavs/ + transcriptions.csv).
 
-GTSinger는 MFA korean_mfa 음소(IPA)로 표시돼 있고 이음(kʷ · mʲ · c · ɸʷ · 긴 모음 …)까지 나눠 적었다.
+GTSinger는 IPA 음소로 표시돼 있는데 같은 모음을 여러 글자로 적었다 (ㅏ: a · ɐ · ɑ, ㅡ: ɯ · ɨ, 긴 모음 ː, /i/처럼 빗금).
+모음은 앱 모음 여덟으로 모아서 센다 (VOWEL_MAP).
 앱이 맞출 때 쓰는 발음(tetotune.ko_phones: 노래할 때 소리 나는 대로)과 같은 음소로 바꿔서 배운다.
 - 모음(ɐ ɛ e ʌ o u ɨ i)은 GTSinger 시각 그대로 (앱이 쓰는 것은 모음 시작이라 여기를 바꾸지 않는다)
 - 모음과 모음 사이(앞 음절 받침 + 뒤 음절 첫소리 · 반모음)는 앱 발음의 음소를 GTSinger의 그 구간에 넣는다:
@@ -25,12 +26,17 @@ sys.path.insert(0, str(ROOT))
 from tetotune import ko_phones as kp  # noqa: E402
 
 SIL = {"<SP>", "<AP>", "_NONE", "breathe", "breath", "sil", "silence", "", "SP", "AP"}
+ODD = Counter()  # 음절과 모음 수가 다른 낱말에 나온 GTSinger 음소
 MIN_PH = 0.02  # 초. 구간이 이보다 짧으면 앞 모음 끝에서 빌린다
 MAX_LEN = 45.0  # 초. HubertFA가 이보다 긴 파일은 버린다
 
 
+VOWEL_MAP = {"a": "ɐ", "ɑ": "ɐ", "ɯ": "ɨ", "æ": "ɛ", "ø": "e", "ɔ": "o", "ʊ": "u"}  # GTSinger 표기 → 앱 모음
+
+
 def vowel(ph):
-    p = ph.replace("ː", "")
+    p = ph.strip("/").replace("ː", "")
+    p = VOWEL_MAP.get(p, p)
     return p if p in kp.VOWELS else None
 
 
@@ -56,6 +62,7 @@ def phrase_segments(words, why):
                 k += 1
         if sum(1 for p, _, _ in ph if vowel(p)) != len(chars):
             why["음절과 모음 수가 다름"] += 1
+            ODD.update(p for p, _, _ in ph)  # 어떤 표기 때문인지 (낱말 · 가사는 찍지 않고 음소 이름만 센다)
             return None
         syls += chars
         theirs += ph
@@ -278,6 +285,7 @@ def main():
     print("바꾸기 기록:", dict(why.most_common()))
     print("앱 발음 음소 (수):", dict(phones.most_common()))
     print("GTSinger 음소 (수):", dict(theirs.most_common()))
+    print("음절과 모음 수가 다른 낱말의 음소 (수):", dict(ODD.most_common(40)))
     if args.json:
         Path(args.json).write_text(json.dumps({"hours": hours, "why": why, "phones": phones, "theirs": theirs,
                                                "files": {k: len(v) for k, v in rows.items()}}, ensure_ascii=False,
