@@ -89,6 +89,7 @@ jobs:
     env:
       W: ${{ github.workspace }}/teto_only  # 테토 녹음 특징 · 배운 보코더 · 테토 렌더 (이 기계에만, 끝날 때 지워요)
       R: ${{ github.workspace }}/results    # 올리는 숫자만
+      PYTORCH_ENABLE_MPS_FALLBACK: "1"  # Mac GPU(MPS)에 없는 연산은 CPU로
     steps:
       - name: 시작 시각 · 기계
         run: |
@@ -215,8 +216,8 @@ jobs:
           python - <<'PY'
           import json, os
           rows = [r for v in json.load(open(os.environ["R"] + "/ab_teto.json")).values() for s in v.values() for r in s]
-          same = [r["snr_vs_preview_db"] for r in rows if r["snr_vs_preview_db"] >= 60]
-          print(f"고치기 렌더와 거의 같은 곡 {len(same)}/{len(rows)}")
+          same = [r["snr_vs_base_db"] for r in rows if r.get("snr_vs_base_db", 99) >= 60]
+          print(f"원래 보코더 렌더와 거의 같은 곡 {len(same)}/{len(rows)}")
           if len(same) == len(rows):
               raise SystemExit("테토 보코더로 바꿔 끼웠는데 렌더가 그대로예요 (보코더를 안 읽었어요)")
           PY

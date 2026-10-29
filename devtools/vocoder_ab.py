@@ -60,6 +60,9 @@ def run(args):
         y, _ = audio.load(wav)
         prev, _ = audio.load(folder / "teto_preview.wav")
         c["snr_vs_preview_db"] = snr_db(prev, y)
+        base = Path(args.keep or "", args.base, key, song).with_suffix(".wav")
+        if args.keep and args.label != args.base and base.exists():  # 원래 보코더로 다시 렌더한 것과 (바꿔 끼운 게 먹혔는지)
+            c["snr_vs_base_db"] = snr_db(audio.load(base)[0], y)
         if args.keep:
             dst = Path(args.keep, args.label, key, song).with_suffix(".wav")
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -70,6 +73,8 @@ def run(args):
                 shutil.copy(meta["truth"] or folder / "guide_vocals.wav", orig)
         shutil.rmtree(folder / "_r", ignore_errors=True)
         row = {"song": song, **{k: c.get(k) for k in KEYS}, "snr_vs_preview_db": c["snr_vs_preview_db"]}
+        if "snr_vs_base_db" in c:
+            row["snr_vs_base_db"] = c["snr_vs_base_db"]
         if "by_f0" in c:
             row["by_f0"] = c["by_f0"]
         res.setdefault(key, []).append(row)
