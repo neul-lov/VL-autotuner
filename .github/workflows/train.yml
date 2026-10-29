@@ -1,8 +1,9 @@
 name: AI 모델 학습
 
 # 앱이 쓰는 AI 모델을 이 앱에 맞게 더 배워 봐요 (GPU 없이 CPU로, 숫자로만 견줘요. 소리는 재생하지 않아요).
-# 한국어 가사 맞추기: GTSinger 한국어(사람이 고친 음소 시각, CC BY-NC-SA 4.0)로 HubertFA를 새로 배워서
+# 한국어 가사 맞추기: GTSinger 한국어(사람이 고친 음소 시각, CC BY-NC-SA 4.0)로 HubertFA를 배워서
 # 지금 모델(일본어 노래로 배운 것, 한글은 일본어 음소로)과 CSD 한국 동요(사람 노래)로 견줘요.
+# 처음부터 배우면 지금 모델보다 못해서 (CSD 모음 시작 50ms 안 0.70 vs 0.81), 지금 모델 무게에서 시작해 이어 배워요.
 # GTSinger · CSD의 소리 · 가사는 이 기계에만 두고 올리지 않아요 (숫자 · 음소 이름만 찍어요).
 # 배운 모델 · 미리 계산한 특징은 이 저장소 Actions 캐시에만 둬요 (정확도 비교가 받아 써요).
 on:
@@ -39,8 +40,9 @@ env:
   TETOTUNE_MODELS: ${{ github.workspace }}/models
   TQDM_MININTERVAL: "60"  # 진행 막대는 1분에 한 줄
   BATCH: "100"  # 초. 한 걸음에 배우는 소리 길이 합 (HubertFA 기본 200, CPU라 줄여요)
-  STEPS: "8000"  # 학습률이 줄어드는 기준 걸음 (시간 한도에 먼저 닿으면 거기까지)
-  VAL: "500"  # 걸음마다 채점 · 저장
+  STEPS: "6000"  # 이만큼 배운다 (시간 한도에 먼저 닿으면 거기까지)
+  VAL: "250"  # 걸음마다 채점 · 저장 (이어 배우면 일찍 가장 좋아질 수 있어서 자주)
+  LR: "0.0001"  # 이어 배우기 학습률 (HubertFA 기본 0.0003은 처음부터 배울 때)
 
 jobs:
   fa-ko:
@@ -73,6 +75,11 @@ jobs:
           python devtools/hf_fetch.py "$HUBERT" hfa/dependencies/chinese-hubert-base --type model \
             --include "*.json" --include "*.bin" --include "*.md"
           ls -la hfa/dependencies/chinese-hubert-base
+      - name: 지금 가사 맞추기 모델 받기 (앱이 받는 것과 같은 판)
+        run: python -c "from tetotune import align_fa; d = align_fa.ensure_model(print); print(d); assert d"
+      - name: 지금 모델 무게 꺼내기 (이어 배우기 시작점, PyTorch로 돌린 값이 ONNX와 같은지 확인)
+        if: ${{ !inputs.from_ckpt }}
+        run: python devtools/hfa_train.py official --hfa hfa --src "$TETOTUNE_MODELS/hfa" --out "$W/official_fa.pt"
       - name: 학습한 것 캐시에서 (손으로 돌릴 때 from_ckpt)
         if: ${{ inputs.from_ckpt }}
         uses: actions/cache/restore@v4
@@ -102,11 +109,11 @@ jobs:
             --batch "$BATCH" --steps "$STEPS" --val "$VAL"
           du -sh "$W/binary_ko"; df -h "$W"
           echo "미리 계산까지 $(( ($(date +%s) - T0) / 60 ))분"
-      - name: 학습 (CPU, 이 작업 시간 안에서)
+      - name: 학습 (CPU, 이 작업 시간 안에서, 지금 모델 무게에서 시작)
         if: ${{ !inputs.from_ckpt }}
         run: |
-          # 내보내기 · 견주기 · 캐시 저장에 1시간쯤 남긴다
-          python devtools/hfa_train.py train --hfa hfa --until $(( T0 + 290 * 60 ))
+          # 내보내기 · 견주기(엔진 다섯) · 캐시 저장에 1시간 넘게 남긴다
+          python devtools/hfa_train.py train --hfa hfa --until $(( T0 + 280 * 60 )) --init "$W/official_fa.pt" --lr "$LR"
           ls -la hfa/ckpt hfa/ckpt/ko_fa
       - name: 배운 것 캐시에 (다시 내보내기 · 견주기용, 올리지 않아요)
         if: ${{ !inputs.from_ckpt }}
@@ -114,8 +121,9 @@ jobs:
         with:
           path: hfa/ckpt
           key: hfa-ko-ckpt-${{ github.run_id }}-${{ github.run_attempt }}
-      - name: ONNX로 내보내기 (가장 좋게 채점된 것 · 마지막 것)
+      - name: ONNX로 내보내기 (배우기 전 · 가장 좋게 채점된 것 · 마지막 것)
         run: |
+          if [ -f hfa/ckpt/ko_fa/init.ckpt ]; then python devtools/hfa_train.py export --hfa hfa --out models/hfa_ko/init --ckpt init; fi
           python devtools/hfa_train.py export --hfa hfa --out models/hfa_ko/best --ckpt best
           python devtools/hfa_train.py export --hfa hfa --out models/hfa_ko/last --ckpt last
           ls -la models/hfa_ko/*
@@ -124,13 +132,13 @@ jobs:
           curl -fL --retry 3 -o CSD.zip "https://zenodo.org/records/4916302/files/CSD.zip?download=1"
           python -c "import hashlib,sys; h=hashlib.md5(open('CSD.zip','rb').read()).hexdigest(); print(h); sys.exit(h != '74d121dd8706fded26a15526a379f7a2')"
           mkdir -p csd && unzip -q CSD.zip "*korean/wav/*a.wav" "*korean/csv/*" "*korean/lyric/*" -d csd && rm CSD.zip
-      - name: 지금 가사 맞추기 모델 받기 (앱이 받는 것과 같은 판)
-        run: python -c "from tetotune import align_fa; d = align_fa.ensure_model(print); print(d); assert d"
       - name: 견주기 (CSD 50곡, 지금 모델 · 새 모델, 숫자만)
         run: |
+          # init: 지금 모델 무게 그대로 (마지막 층만 한국어 음소로 옮김), +g: 반모음 시작을 모음 시작으로
           set -o pipefail
+          E=hfa; if [ -d models/hfa_ko/init ]; then E=$E,hfako_init; fi
           HFA_KO_DIR=models/hfa_ko python -W ignore devtools/align_bench.py --csd csd --joint 30 \
-            --engines hfa,hfako_best,hfako_last --json out/align_ko.json 2>&1 | tee out/align.txt
+            --engines "$E,hfako_best,hfako_best+g,hfako_last" --json out/align_ko.json 2>&1 | tee out/align.txt
           { echo "## 한국어 가사 맞추기 모델 · CSD 깨끗한 보컬 (30초씩 묶어서, 앱과 같게)"; echo; sed -n '/^### /,$p' out/align.txt; } >> "$GITHUB_STEP_SUMMARY"
       - name: 새 모델 캐시에 (정확도 비교 · 앱 시험용, 올리지 않아요)
         uses: actions/cache/save@v4

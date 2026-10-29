@@ -8,6 +8,7 @@
 엔진 (--engines, 쉼표로):
   hfa   지금 쓰는 HubertFA (일본어 노래 모델, 한글은 일본어 음소로), 모음 시작 + align_fa.OFFSET
   hfako_<이름>  GTSinger 한국어로 배운 HubertFA (폴더 $HFA_KO_DIR/<이름>, hfa_train.py export), 모음 시작 + $HFA_KO_OFFSET초
+                hfako_<이름>+g: 반모음(ㅑ ㅘ …)이 있으면 반모음 시작을 모음 시작으로 (GTSinger는 반모음을 길게 적었다)
   mfa   Montreal Forced Aligner 한국어 모델 (말소리로 배운 HMM, korean_mfa). PATH에 mfa가 있어야 한다
   mms   torchaudio MMS_FA (여러 말 wav2vec2 CTC, 한글은 uroman으로 로마자)
 합치기: 엔진이 셋 이상이면 음절마다 가운데 값, 둘이면 평균도 같이 잰다. 엔진마다 치우침(다른 곡들에서 잰 것)을 빼고 합친 것도 잰다.
@@ -25,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "devtools"))
 import accuracy as acc  # noqa: E402
-from tetotune import align_fa, audio  # noqa: E402
+from tetotune import align_fa, audio, ko_phones  # noqa: E402
 
 GAP = 0.25  # 초. 정답에서 이보다 긴 틈은 프레이즈 사이 (accuracy.csd_lyrics와 같게)
 
@@ -103,13 +104,15 @@ class HFA:
 class HFAko(HFA):
     """GTSinger 한국어로 배운 가사 맞추기 모델 (한글을 한국어 음소 그대로)."""
 
-    def __init__(self, sub):
+    def __init__(self, sub, glide=False):
         import os
 
         folder = Path(os.environ.get("HFA_KO_DIR", "models/hfa_ko")) / sub
         if not (folder / "model.onnx").exists():
             raise RuntimeError(f"한국어 모델 없음: {folder}")
         self.al = align_fa.Aligner(folder)
+        if glide:
+            self.al.vowels = ko_phones.VOWELS | ko_phones.GLIDES
         self.offset = float(os.environ.get("HFA_KO_OFFSET", "0"))
 
     def align(self, item):
@@ -125,7 +128,8 @@ ENGINES = {"hfa": HFA}
 
 def engine(name):
     if name.startswith("hfako_"):
-        return HFAko(name[len("hfako_"):])
+        sub = name[len("hfako_"):]
+        return HFAko(sub.removesuffix("+g"), glide=sub.endswith("+g"))
     if name not in ENGINES:
         # 다른 엔진은 따로 파일로 (무거운 라이브러리를 엔진을 쓸 때만 불러온다)
         import align_engines
