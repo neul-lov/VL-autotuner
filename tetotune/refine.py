@@ -243,9 +243,23 @@ def for_result(folder, progress=lambda p, s: None):
     if not openutau.available() or not report.get("singer"):
         return None
     work = folder / ".render"
+    ustx = folder / "project.ustx"
     warning = None
     try:
-        out = refine(folder, lambda u: openutau.render(u, work), progress=progress)
+        try:
+            out = refine(folder, lambda u: openutau.render(u, work), progress=progress)
+        except Exception as e:
+            # 신경망 렌더(hifisampler)로 한 번도 부르지 못했으면 예전 렌더러로 바꿔 다시 (그것도 안 되면 되돌린다)
+            before = ustx.read_text(encoding="utf-8")
+            if not use_fallback_renderer(ustx):
+                raise
+            try:
+                out = refine(folder, lambda u: openutau.render(u, work), progress=progress)
+            except Exception:
+                ustx.write_text(before, encoding="utf-8")
+                raise e from None
+            warning = f"신경망 렌더(hifisampler)로 부르지 못해서 {_fallback()}로 불렀어요: {e}"
+            report.setdefault("warnings", []).append(warning)
         report["refine"] = out
         report["teto_preview"] = out["preview"]
     except Exception as e:  # 처음 조교한 결과는 그대로 남는다
@@ -255,3 +269,21 @@ def for_result(folder, progress=lambda p, s: None):
         shutil.rmtree(work, ignore_errors=True)
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
     return warning
+
+
+def _fallback():
+    from . import tune
+
+    return tune.FALLBACK_RENDERER
+
+
+def use_fallback_renderer(ustx):
+    """조교한 테토 트랙이 hifisampler로 부르게 되어 있으면 FALLBACK_RENDERER로 바꿔 쓴다 → 바꿨는지."""
+    proj = yaml.safe_load(Path(ustx).read_text(encoding="utf-8"))
+    track = (proj.get("tracks") or [{}])[0]
+    rs = track.get("renderer_settings") or {}
+    if rs.get("resampler") != "hifisampler":
+        return False
+    track["renderer_settings"] = {"renderer": _fallback()}
+    Path(ustx).write_text(yaml.safe_dump(proj, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    return True

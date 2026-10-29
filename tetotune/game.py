@@ -42,12 +42,17 @@ def _complete(d):
     return (d / "config.json").exists() and all((d / f).exists() for f in FILES)
 
 
+FOLDER = None  # 시험용: 이 폴더의 GAME 모델을 쓴다 (devtools/accuracy.py가 다른 크기를 견줄 때)
+
+
 def model_dir():
     """쓸 GAME 모델 폴더: OpenUtau 의존성 폴더(OpenUtau → 의존성 설치) → 앱이 받아 둔 것. onnxruntime이 없거나 모델이 없으면 None."""
     import importlib.util
 
     if importlib.util.find_spec("onnxruntime") is None:
         return None
+    if FOLDER:
+        return Path(FOLDER) if _complete(Path(FOLDER)) else None
     for home in (Path.home() / "Library" / "OpenUtau", Path.home() / ".local" / "share" / "OpenUtau"):
         if _complete(home / "Dependencies" / "game"):
             return home / "Dependencies" / "game"

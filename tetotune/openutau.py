@@ -41,6 +41,15 @@ def app_dir():
     return None
 
 
+def has_hifisampler():
+    """사용자의 OpenUtau에 hifisampler(신경망 보코더로 부르는 리샘플러, 0.1.576부터)가 들어 있는지."""
+    d = app_dir()
+    try:
+        return d is not None and b"HifisamplerResampler" in (d / "OpenUtau.Core.dll").read_bytes()
+    except OSError:
+        return False
+
+
 def support_dir():
     if os.environ.get("TETOTUNE_RENDER_WORK"):
         return Path(os.environ["TETOTUNE_RENDER_WORK"])

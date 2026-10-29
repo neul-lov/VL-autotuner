@@ -21,9 +21,11 @@ struct TuneOptions: Codable, Equatable {
     var defaultLyric: String = "ら"
     /// "auto": after tuning, sing it with Teto in OpenUtau and fix the places that come out off (needs OpenUtau); "off".
     var refine: String = "auto"
+    /// "auto": the neural renderer (hifisampler, OpenUtau 0.1.576+; WORLDLINE-R when it can't be used); "worldline": always WORLDLINE-R.
+    var renderer: String = "auto"
 
     enum CodingKeys: String, CodingKey {
-        case bpm, transpose, vibrato, correct, dynamics, breathiness, tension, breaths, singer, refine
+        case bpm, transpose, vibrato, correct, dynamics, breathiness, tension, breaths, singer, refine, renderer
         case pitchFollow = "pitch_follow"
         case breathVolume = "breath_volume"
         case pitchMethod = "pitch_method"
@@ -50,6 +52,7 @@ struct TuneOptions: Codable, Equatable {
         singer = (try? c.decode(String.self, forKey: .singer)) ?? d.singer
         defaultLyric = (try? c.decode(String.self, forKey: .defaultLyric)) ?? d.defaultLyric
         refine = (try? c.decode(String.self, forKey: .refine)) ?? d.refine
+        renderer = (try? c.decode(String.self, forKey: .renderer)) ?? d.renderer
     }
 }
 

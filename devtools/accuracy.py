@@ -16,6 +16,7 @@ import csv
 import difflib
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -26,7 +27,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from tetotune import align_fa, clean, features, game, notes, oupitch, pitch  # noqa: E402
+from tetotune import align_fa, clean, f0models, features, game, notes, oupitch, pitch  # noqa: E402
 from tetotune import refine as refine_mod  # noqa: E402
 from tetotune import tune as tune_mod  # noqa: E402
 from tetotune.tune import Options, tune  # noqa: E402
@@ -54,6 +55,7 @@ OFF = {
                                 (align_fa, "GAP_EXTEND", False)],
 }
 PR10 = OFF["이웃 프레이즈 함께 맞추기"] + OFF["가사 맞추기 시간 보정 · 덜 버리기"]
+OLD_RENDER = [(tune_mod, "RENDERER", "WORLDLINE-R"), (tune_mod, "RESAMPLER", None)]  # PR12까지 (main) 렌더러
 FUSION = [(None, "pitch_method", "fusion")]
 # 기본값을 바꾸면 어떨지 (새 기본에 더해서)
 ALT = {
@@ -61,6 +63,17 @@ ALT = {
     "+ 다듬기 크기 한도": [(refine_mod, "DYN_TOTAL", 6.0), (refine_mod, "DYN_VOICED", True)],
     # 사람 노래 음절 시작은 더 맞지만 (CSD 0.764 → 0.777, 분리 0.743 → 0.769) 테토 렌더가 나빠진다 (README)
     "가사 맞추기 −15ms": [(align_fa, "OFFSET", -0.015)],
+    # 렌더 엔진 (OpenUtau 0.1.576 안에 든 것): 새 기본은 hifisampler (CLASSIC + 신경망 보코더 pc-nsf-hifigan).
+    # WORLDLINE-R1.1은 hnsep(배음 · 잡음 나누기 AI) 특징 + 5ms 프레임, WORLDLINE-R2는 WORLD 특징 → 같은 보코더 (메뉴에는 없다)
+    "렌더 WORLDLINE-R1.1": [(tune_mod, "RENDERER", "WORLDLINE-R1.1"), (tune_mod, "RESAMPLER", None)],
+    "렌더 WORLDLINE-R2": [(tune_mod, "RENDERER", "WORLDLINE-R2"), (tune_mod, "RESAMPLER", None)],
+    "렌더 CLASSIC worldline": [(tune_mod, "RENDERER", "CLASSIC"), (tune_mod, "RESAMPLER", "worldline")],
+    # hifisampler는 숨 섞임(BREC) · 힘(TENC) 곡선이 있으면 hnsep으로 배음 · 잡음을 나눠 섞는다: 곡선 없이 부르면 어떤지
+    "hifisampler − 숨 · 힘 곡선": [(None, "breathiness", 0.0), (None, "tension", 0.0)],
+    # 음 높이 읽기에 CREPE full도 (넷 합치기), 음표 나누기 GAME 큰 · 작은 모델 (같은 1.0.3, 받아 둔 폴더가 있을 때)
+    "+ CREPE 음 높이": [(f0models, "USE", ("rmvpe", "crepe", "swift", "harvest"))],
+    "GAME 큰 모델": [(game, "FOLDER", str(game.models_home() / "game-large"))],
+    "GAME 작은 모델": [(game, "FOLDER", str(game.models_home() / "game-small"))],
     # 빨리 견주기(quick, CSD 12곡 음절 시작 50ms 안, PR10 기본 0.706)에서 본 것 — 손으로 다시 보려면 "새 기본 & align_fa.X=값":
     # 함께 맞추기 15 · 30 · 45초 0.758 · 0.777 · 0.768, 시간 보정 −5 · −15 · −25ms (15초 함께) 0.743 · 0.758 · 0.739
     # (테토 정답 노래는 −5ms가 조금 낫다), 여러 번 돌려 가운데(TTA 3 · 5) 0.748 · 0.743 (보정 · 덜 버리기만 0.750),
@@ -70,8 +83,8 @@ ALT = {
 
 def variants():
     """이름 → [(모듈, 이름, 값)]. 첫 번째가 지금 기본값. (None, 옵션 이름, 값)은 조교 설정을 바꾼다."""
-    out = {"새 기본": FUSION, "PR10 기본": FUSION + PR10, "PR6 기본": [p for v in OFF.values() for p in v],
-           "− 음 높이 합치기 (Harvest)": []}
+    out = {"새 기본": FUSION, "예전 기본 (WORLDLINE-R)": FUSION + OLD_RENDER, "PR10 기본": FUSION + PR10 + OLD_RENDER,
+           "PR6 기본": [p for v in OFF.values() for p in v] + OLD_RENDER, "− 음 높이 합치기 (Harvest)": []}
     for k, v in OFF.items():
         out[f"− {k}"] = FUSION + v
     for k, v in ALT.items():
@@ -80,7 +93,8 @@ def variants():
     return out
 
 
-MODS = {"align_fa": align_fa, "clean": clean, "notes": notes, "oupitch": oupitch, "refine": refine_mod, "tune": tune_mod}
+MODS = {"align_fa": align_fa, "clean": clean, "f0models": f0models, "game": game, "notes": notes, "oupitch": oupitch,
+        "refine": refine_mod, "tune": tune_mod}
 
 
 def with_flags(vs, name):
@@ -113,11 +127,12 @@ def _key(*args):
     return h.hexdigest()
 
 
-def _memo(fn):
+def _memo(fn, setting=lambda: None):
+    """같은 입력(+ setting()이 돌려주는 스위치 값)이면 다시 계산하지 않는다."""
     cache = {}
 
     def wrapped(*args, **kw):
-        k = _key(*args, *sorted(kw.items()))
+        k = _key(setting(), *args, *sorted(kw.items()))
         if k not in cache:
             cache[k] = fn(*args, **kw)
         v = cache[k]
@@ -129,9 +144,9 @@ def _memo(fn):
     return wrapped
 
 
-pitch.extract = _memo(pitch.extract)
+pitch.extract = _memo(pitch.extract, lambda: (f0models.USE, f0models.WEIGHTS.get("crepe")))
 _transcribe_once = game.transcribe
-game.transcribe = _memo(game.transcribe)
+game.transcribe = _memo(game.transcribe, lambda: str(game.model_dir()))
 features.analyze = _memo(features.analyze)
 
 
@@ -629,7 +644,17 @@ def _mean(cs, k):
     return float(np.mean(v)) if v else float("nan")
 
 
-def render_set(name, items, patches, args):
+KEEP = os.environ.get("ACC_KEEP_RENDERS")  # 있으면 렌더 · 원래 보컬을 <여기>/<방식>/<모음>/<곡>.wav로 남긴다 (mos.py, 올리지 않음)
+
+
+def _keep(src, *parts):
+    dst = Path(KEEP, *parts).with_suffix(".wav")
+    if Path(src).exists() and not dst.exists():
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(src, dst)
+
+
+def render_set(name, items, patches, args, key=""):
     """items: [(이름, 보컬, 가사, 비교할 정답 보컬 또는 None[, 사람이 표시한 음 높이 csv])] → 곡마다 비교 결과.
     음 높이 csv가 있으면 그것을 기준으로 잰 결과도 c["by_f0"]에 (Harvest 기준은 Harvest 곡선이 유리하다)."""
     out = []
@@ -645,6 +670,9 @@ def render_set(name, items, patches, args):
                     c = compare_wav(folder, folder / "teto_preview.wav", truth)
                     if f0_truth:
                         c["by_f0"] = compare_wav(folder, folder / "teto_preview.wav", truth, f0_truth[0])
+                    if KEEP:
+                        _keep(folder / "teto_preview.wav", name, key, label)
+                        _keep(wav, "원래 보컬", key, label)
                 else:
                     c = render_compare(Path(args.render[0]), Path(args.render[1]), folder, truth)
             except (RuntimeError, subprocess.CalledProcessError) as e:
@@ -682,6 +710,7 @@ def main():
     ap.add_argument("--only", help="쉼표로 나눈 방식 이름만")
     ap.add_argument("--json", help="결과를 이 파일에 (여러 잡 결과를 합칠 때)")
     ap.add_argument("--tag", default="", help="결과 방식 이름 뒤에 붙일 말 (다른 기계에서 돈 같은 방식과 나눠 볼 때)")
+    ap.add_argument("--render-only", action="store_true", help="음표 · 가사 · 음 높이 표는 건너뛰고 렌더 비교만 (렌더 엔진 견주기)")
     args = ap.parse_args()
     refs = [Path(p) for p in args.refs if (Path(p) / "truth.json").exists()]
     krefs = [Path(p) for p in args.refs_ko if (Path(p) / "truth.json").exists()]
@@ -719,22 +748,23 @@ def main():
         row = {}
         try:
             FA_LOG.clear()
-            if refs:
-                row.update(eval_refs(refs, patches, name))
-                fa_summary(f"{name} 테토 정답")
-            if krefs:
-                row.update({"k" + k: v for k, v in eval_refs(krefs, patches, name).items()})
-                fa_summary(f"{name} 한글 정답")
-            if songs:
-                row.update(eval_vocadito(songs, patches))
-            if sep:
-                row.update({"s" + k: v for k, v in eval_vocadito([(k, w, f0, nts) for k, w, f0, nts, _ in sep], patches).items()})
-            if csd:
-                row.update(eval_csd(csd, patches))
-                fa_summary(f"{name} CSD")
-            if csd_sep:
-                row.update({"s" + k: v for k, v in eval_csd([(n, w, r) for n, w, r, _ in csd_sep], patches).items()})
-                fa_summary(f"{name} 분리 CSD")
+            if not args.render_only:
+                if refs:
+                    row.update(eval_refs(refs, patches, name))
+                    fa_summary(f"{name} 테토 정답")
+                if krefs:
+                    row.update({"k" + k: v for k, v in eval_refs(krefs, patches, name).items()})
+                    fa_summary(f"{name} 한글 정답")
+                if songs:
+                    row.update(eval_vocadito(songs, patches))
+                if sep:
+                    row.update({"s" + k: v for k, v in eval_vocadito([(k, w, f0, nts) for k, w, f0, nts, _ in sep], patches).items()})
+                if csd:
+                    row.update(eval_csd(csd, patches))
+                    fa_summary(f"{name} CSD")
+                if csd_sep:
+                    row.update({"s" + k: v for k, v in eval_csd([(n, w, r) for n, w, r, _ in csd_sep], patches).items()})
+                    fa_summary(f"{name} 분리 CSD")
         except RuntimeError as e:
             print(name, "건너뜀:", e, flush=True)
             continue
@@ -754,7 +784,7 @@ def main():
             }
             for key, items in sets.items():
                 if items:
-                    rend[key] = render_set(name, items, patches, args)
+                    rend[key] = render_set(name, items, patches, args, key)
                     by_f0 = [c.pop("by_f0") for c in rend[key] if "by_f0" in c]
                     if by_f0:
                         rend[key + "_f0"] = by_f0
