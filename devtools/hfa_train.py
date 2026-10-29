@@ -217,8 +217,8 @@ def official(args):
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = str(out.parent / "same_shape_fa.onnx")
     n = 1000  # onnx_exporter와 같은 길이로 (UNet이 길이에 따라 다르게 내보내지지 않게)
-    with torch.no_grad():
-        torch.onnx.export(FA(model), (torch.randn(1, ch, n), torch.randn(1, 1, n)), tmp,
+    with torch.no_grad():  # .eval(): 내보내기는 끝날 때 감싼 모듈의 원래 모드로 되돌리는데, 새 모듈은 학습 모드라 Dropout이 켜진다
+        torch.onnx.export(FA(model).eval(), (torch.randn(1, ch, n), torch.randn(1, 1, n)), tmp,
                           input_names=["input_feature", "curves"], output_names=OUTS,
                           dynamic_axes={"input_feature": {2: "n_samples"}, "curves": {2: "n_samples"},
                                         "ph_frame_logits": {2: "n_samples"}, "ph_edge_logits": {1: "n_samples"},
