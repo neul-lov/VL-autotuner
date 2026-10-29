@@ -1,0 +1,146 @@
+name: AI 모델 학습
+
+# 앱이 쓰는 AI 모델을 이 앱에 맞게 더 배워 봐요 (GPU 없이 CPU로, 숫자로만 견줘요. 소리는 재생하지 않아요).
+# 한국어 가사 맞추기: GTSinger 한국어(사람이 고친 음소 시각, CC BY-NC-SA 4.0)로 HubertFA를 새로 배워서
+# 지금 모델(일본어 노래로 배운 것, 한글은 일본어 음소로)과 CSD 한국 동요(사람 노래)로 견줘요.
+# GTSinger · CSD의 소리 · 가사는 이 기계에만 두고 올리지 않아요 (숫자 · 음소 이름만 찍어요).
+# 배운 모델 · 미리 계산한 특징은 이 저장소 Actions 캐시에만 둬요 (정확도 비교가 받아 써요).
+on:
+  push:
+    branches: ["claude/train*"]
+    paths:  # 학습에 쓰는 것이 바뀔 때만 (앱 코드만 고친 것은 다시 배우지 않아요)
+      - ".github/workflows/train.yml"
+      - "devtools/gtsinger_hfa.py"
+      - "devtools/hfa_train.py"
+      - "devtools/hf_fetch.py"
+      - "tetotune/ko_phones.py"
+  workflow_dispatch:
+    inputs:
+      from_ckpt:
+        description: "학습은 건너뛰고 같은 브랜치에서 마지막으로 배운 것을 내보내 견주기만"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  HFA_COMMIT: b3f086966946255a05b0ccb69c865c8e3e806e0a  # 2026-03-19
+  GTSINGER: AaronZ345/GTSinger
+  HUBERT: TencentGameMate/chinese-hubert-base
+  TETOTUNE_MODELS: ${{ github.workspace }}/models
+  TQDM_MININTERVAL: "60"  # 진행 막대는 1분에 한 줄
+  BATCH: "100"  # 초. 한 걸음에 배우는 소리 길이 합 (HubertFA 기본 200, CPU라 줄여요)
+  STEPS: "8000"  # 학습률이 줄어드는 기준 걸음 (시간 한도에 먼저 닿으면 거기까지)
+  VAL: "500"  # 걸음마다 채점 · 저장
+
+jobs:
+  fa-ko:
+    name: 한국어 가사 맞추기 모델 학습 · 견주기 (GTSinger, CPU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - name: 시작 시각 · 기계
+        run: |
+          echo "T0=$(date +%s)" >> "$GITHUB_ENV"
+          nproc; free -g; df -h / /mnt || true
+          W=/mnt/work
+          sudo mkdir -p "$W" && sudo chown "$(id -u):$(id -g)" "$W" || { W="$RUNNER_TEMP/work"; mkdir -p "$W"; }
+          echo "W=$W" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: 학습 도구 설치 (CPU torch, HubertFA 판 고정)
+        run: |
+          git clone -q https://github.com/wolfgitpr/HubertFA hfa
+          git -C hfa checkout -q "$HFA_COMMIT"
+          git -C hfa log -1 --format="HubertFA %H %cs"
+          python -m pip install -q "torch==2.5.1" "torchaudio==2.5.1" --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -q -r hfa/requirements.txt "onnx==1.17.0" "onnxsim==0.4.36" "huggingface_hub>=0.25,<1" \
+            -r requirements.txt -r requirements-extra.txt
+          python -c "import torch, lightning, transformers, numpy; print(torch.__version__, lightning.__version__, transformers.__version__, numpy.__version__, torch.get_num_threads())"
+      - name: 인코더 chinese-hubert-base 받기 (HubertFA가 쓰는 것)
+        run: |
+          python devtools/hf_fetch.py "$HUBERT" hfa/dependencies/chinese-hubert-base --type model \
+            --include "*.json" --include "*.bin" --include "*.md"
+          ls -la hfa/dependencies/chinese-hubert-base
+      - name: 학습한 것 캐시에서 (손으로 돌릴 때 from_ckpt)
+        if: ${{ inputs.from_ckpt }}
+        uses: actions/cache/restore@v4
+        with:
+          path: hfa/ckpt
+          key: hfa-ko-ckpt-none
+          restore-keys: hfa-ko-ckpt-
+          fail-on-cache-miss: true
+      - name: GTSinger 한국어 받기 (CC BY-NC-SA 4.0, 이 기계에만)
+        if: ${{ !inputs.from_ckpt }}
+        run: |
+          python devtools/hf_fetch.py "$GTSINGER" "$W/gts" --type dataset --include "Korean/*.wav" --include "Korean/*.json"
+          du -sh "$W/gts"; df -h "$W"
+      - name: 학습 파일로 바꾸기 (앱 발음과 같은 음소로, 숫자만 찍어요)
+        if: ${{ !inputs.from_ckpt }}
+        run: |
+          mkdir -p out
+          python devtools/gtsinger_hfa.py "$W/gts/Korean" "$W/hfa_data" --json out/gtsinger.json
+          head -c 300 "$W/hfa_data/train/transcriptions.csv" | head -1
+          wc -l "$W"/hfa_data/*/transcriptions.csv
+      - name: 미리 계산 (HuBERT 특징 · CPU)
+        if: ${{ !inputs.from_ckpt }}
+        run: |
+          python devtools/hfa_train.py binarize --hfa hfa --data "$W/hfa_data" --binary "$W/binary_ko" \
+            --batch "$BATCH" --steps "$STEPS" --val "$VAL"
+          du -sh "$W/binary_ko"; df -h "$W"
+          echo "미리 계산까지 $(( ($(date +%s) - T0) / 60 ))분"
+      - name: 학습 (CPU, 이 작업 시간 안에서)
+        if: ${{ !inputs.from_ckpt }}
+        run: |
+          # 내보내기 · 견주기 · 캐시 저장에 1시간쯤 남긴다
+          python devtools/hfa_train.py train --hfa hfa --until $(( T0 + 290 * 60 ))
+          ls -la hfa/ckpt hfa/ckpt/ko_fa
+      - name: 배운 것 캐시에 (다시 내보내기 · 견주기용, 올리지 않아요)
+        if: ${{ !inputs.from_ckpt }}
+        uses: actions/cache/save@v4
+        with:
+          path: hfa/ckpt
+          key: hfa-ko-ckpt-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: ONNX로 내보내기 (가장 좋게 채점된 것 · 마지막 것)
+        run: |
+          python devtools/hfa_train.py export --hfa hfa --out models/hfa_ko/best --ckpt best
+          python devtools/hfa_train.py export --hfa hfa --out models/hfa_ko/last --ckpt last
+          ls -la models/hfa_ko/*
+      - name: CSD 받기 (사람이 부른 한국 동요 + 음절마다 시작 정답, CC BY-NC-SA 4.0, 숫자만 써요)
+        run: |
+          curl -fL --retry 3 -o CSD.zip "https://zenodo.org/records/4916302/files/CSD.zip?download=1"
+          python -c "import hashlib,sys; h=hashlib.md5(open('CSD.zip','rb').read()).hexdigest(); print(h); sys.exit(h != '74d121dd8706fded26a15526a379f7a2')"
+          mkdir -p csd && unzip -q CSD.zip "*korean/wav/*a.wav" "*korean/csv/*" "*korean/lyric/*" -d csd && rm CSD.zip
+      - name: 지금 가사 맞추기 모델 받기 (앱이 받는 것과 같은 판)
+        run: python -c "from tetotune import align_fa; d = align_fa.ensure_model(print); print(d); assert d"
+      - name: 견주기 (CSD 50곡, 지금 모델 · 새 모델, 숫자만)
+        run: |
+          set -o pipefail
+          HFA_KO_DIR=models/hfa_ko python -W ignore devtools/align_bench.py --csd csd --joint 30 \
+            --engines hfa,hfako_best,hfako_last --json out/align_ko.json 2>&1 | tee out/align.txt
+          { echo "## 한국어 가사 맞추기 모델 · CSD 깨끗한 보컬 (30초씩 묶어서, 앱과 같게)"; echo; sed -n '/^### /,$p' out/align.txt; } >> "$GITHUB_STEP_SUMMARY"
+      - name: 새 모델 캐시에 (정확도 비교 · 앱 시험용, 올리지 않아요)
+        uses: actions/cache/save@v4
+        with:
+          path: models/hfa_ko
+          key: hfa-ko-model-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: train-fa-ko
+          path: |
+            out/gtsinger.json
+            out/align_ko.json
+            out/align.txt
+          retention-days: 14

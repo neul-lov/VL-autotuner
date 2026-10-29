@@ -3,6 +3,7 @@ import numpy as np
 import pytest
 
 from tetotune import align_fa as fa
+from tetotune import ko_phones as ko
 from tetotune import notes as nt
 
 # HubertFA v0.0.7 일본어 음소 (vocab.json의 ja/…)
@@ -57,7 +58,50 @@ def _aligner(prefix="ja/"):
     al.ids = {p: 0 for p in ("", "<SP>", "AP", "CL", "EP", "GS", "SP", "cl", "pau")}
     al.ids.update({prefix + p: i + 1 for i, p in enumerate(lex)})
     al.prefix, al.dict, al.sil = prefix, {}, 0
+    al.lang, al.vowels = "ja", fa.VOWELS
     return al
+
+
+def _ko_aligner(phones):
+    """GTSinger로 배운 한국어 모델처럼 (vocab.json 음소 ko/…, 사전 ko)."""
+    al = fa.Aligner.__new__(fa.Aligner)
+    al.ids = {"SP": 0, "AP": 0, "<SP>": 0}
+    al.ids.update({"ko/" + q: i + 1 for i, q in enumerate(sorted(phones))})
+    al.prefix, al.dict, al.sil, al.lang, al.vowels = "ko/", {}, 0, "ko", ko.VOWELS
+    return al
+
+
+# ko_phones가 낼 수 있는 음소 모두
+KO_ALL = (set(ko.CHO) | set(ko.VOICED.values()) | set(ko.TENSE.values()) | set(ko.ASPIRATE.values())
+          | {p for j in ko.JUNG for p in j} | {x[0] for x in ko.JONG if x and x[0]} | {"ɦ", "ç", "ɕʰ", "ɕ͈", "ɲ", "ɭ"}) - {""}
+
+
+def test_korean_model_uses_sung_pronunciation_of_the_whole_phrase():
+    """한국어 모델: 연음 · 비음화 …를 이어 부르는 음절들로 정해 한국어 음소 그대로 준다 (먹어 → 머거)."""
+    al = _ko_aligner(KO_ALL)
+    seq, word = al.sequence(["먹", "어"])
+    assert seq == ["SP", "ko/m", "ko/ʌ", "SP", "ko/ɡ", "ko/ʌ", "SP"]
+    assert word == [-1, 0, 0, -1, 1, 1, -1]
+    assert al.sequence(["국", "물"])[0] == ["SP", "ko/k", "ko/u", "ko/ŋ", "SP", "ko/m", "ko/u", "ko/ɭ", "SP"]
+    assert al.sequence(["か"]) is None  # 가나는 한국어 모델로 맞추지 않는다 (일본어 모델이 맡는다)
+    assert al.sequence([]) is None
+
+
+def test_korean_model_falls_back_to_near_phone_and_finds_vowel_onset():
+    al = _ko_aligner(KO_ALL - {"ɡ"})
+    assert al.sequence(["먹", "어"])[0] == ["SP", "ko/m", "ko/ʌ", "SP", "ko/k", "ko/ʌ", "SP"]
+    assert _ko_aligner(KO_ALL - {"ɡ", "k"}).sequence(["먹", "어"]) is None
+    times = fa._syllable_times([(0.0, 0.1, 1), (0.1, 0.3, 2), (0.3, 0.35, 4), (0.35, 0.6, 5)],
+                               ["SP", "ko/m", "ko/ʌ", "SP", "ko/ɡ", "ko/ʌ", "SP"], [-1, 0, 0, -1, 1, 1, -1], 2,
+                               "ko/", ko.VOWELS)
+    assert times == [(0.0, 0.1, 0.3), (0.3, 0.35, 0.6)]  # 모음 시작 = ʌ 시작
+
+
+def test_every_hangul_phrase_has_korean_model_phones():
+    al = _ko_aligner(KO_ALL)
+    syls = [chr(c) for c in range(0xAC00, 0xD7A4)]
+    for k in range(0, len(syls), 7):
+        assert al.sequence(syls[k:k + 7]), syls[k:k + 7]
 
 
 @pytest.mark.parametrize("syl,prev,phones", [

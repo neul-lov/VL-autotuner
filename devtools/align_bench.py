@@ -7,6 +7,7 @@
 
 엔진 (--engines, 쉼표로):
   hfa   지금 쓰는 HubertFA (일본어 노래 모델, 한글은 일본어 음소로), 모음 시작 + align_fa.OFFSET
+  hfako_<이름>  GTSinger 한국어로 배운 HubertFA (폴더 $HFA_KO_DIR/<이름>, hfa_train.py export), 모음 시작 + $HFA_KO_OFFSET초
   mfa   Montreal Forced Aligner 한국어 모델 (말소리로 배운 HMM, korean_mfa). PATH에 mfa가 있어야 한다
   mms   torchaudio MMS_FA (여러 말 wav2vec2 CTC, 한글은 uroman으로 로마자)
 합치기: 엔진이 셋 이상이면 음절마다 가운데 값, 둘이면 평균도 같이 잰다. 엔진마다 치우침(다른 곡들에서 잰 것)을 빼고 합친 것도 잰다.
@@ -99,10 +100,32 @@ class HFA:
         return [(item["a"] + s, item["a"] + v + align_fa.OFFSET) for s, v, _ in times]
 
 
+class HFAko(HFA):
+    """GTSinger 한국어로 배운 가사 맞추기 모델 (한글을 한국어 음소 그대로)."""
+
+    def __init__(self, sub):
+        import os
+
+        folder = Path(os.environ.get("HFA_KO_DIR", "models/hfa_ko")) / sub
+        if not (folder / "model.onnx").exists():
+            raise RuntimeError(f"한국어 모델 없음: {folder}")
+        self.al = align_fa.Aligner(folder)
+        self.offset = float(os.environ.get("HFA_KO_OFFSET", "0"))
+
+    def align(self, item):
+        y, sr = clip(item)
+        times, conf = self.al.align(y, sr, item["syls"])
+        if times is None:
+            return None
+        return [(item["a"] + s, item["a"] + v + self.offset) for s, v, _ in times]
+
+
 ENGINES = {"hfa": HFA}
 
 
 def engine(name):
+    if name.startswith("hfako_"):
+        return HFAko(name[len("hfako_"):])
     if name not in ENGINES:
         # 다른 엔진은 따로 파일로 (무거운 라이브러리를 엔진을 쓸 때만 불러온다)
         import align_engines

@@ -13,6 +13,8 @@ from pathlib import Path
 
 import numpy as np
 
+from . import ko_phones
+
 HFA_URL = "https://github.com/wolfgitpr/HubertFA/releases/download/v0.0.7/1218_hfa_model_new_dict.zip"
 HFA_SHA256 = "48bd6dbcc293e47cc6cbcc556baf575e3d91d61d0ac88ddeccd6098f8f346fa2"
 HFA_MAX = 400 << 20
@@ -37,6 +39,10 @@ WIN_BEFORE, WIN_AFTER = 0.4, 0.3  # 초. 프레이즈 앞뒤로 모델에 더 �
 KO_FINALS = "ja"
 KO_EO = "ja"
 VOWELS = {"a", "i", "u", "e", "o", "N", "zh/e"}
+# 한국어 모델 (GTSinger 한국어로 배운 것, 음소 앞에 ko/): 한글을 노래할 때 소리 나는 대로(ko_phones) 그대로 준다.
+# 모델에 없는 음소는 가까운 것으로
+KO_NEAR = {"ɕʰ": "sʰ", "ɕ͈": "s͈", "ç": "h", "ɦ": "h", "ɲ": "n", "ɭ": "ɾ", "ɡ": "k", "d": "t", "b": "p", "dʑ": "tɕ",
+           "ɥ": "w", "ɰ": "ɨ"}
 LAST = []  # 마지막 조교의 프레이즈마다 {확신, 맞춤 여부, 옮긴 거리} (시험 기록용)
 
 
@@ -217,9 +223,12 @@ class Aligner:
         opts = ort.SessionOptions()
         opts.log_severity_level = 3
         self.sess = ort.InferenceSession(str(folder / "model.onnx"), opts, providers=["CPUExecutionProvider"])
-        self.prefix = "ja/" if self.vocab.get("language_prefix") else ""
+        dicts = self.vocab.get("dictionaries") or {}
+        self.lang = "ko" if "ko" in dicts else "ja"
+        self.prefix = f"{self.lang}/" if self.vocab.get("language_prefix") else ""
+        self.vowels = ko_phones.VOWELS if self.lang == "ko" else VOWELS
         self.dict = {}
-        dpath = folder / (self.vocab.get("dictionaries") or {}).get("ja", "")
+        dpath = folder / dicts.get("ja", "")
         if dpath.is_file():
             for line in dpath.read_text(encoding="utf-8").splitlines():
                 if "\t" in line:
@@ -250,8 +259,25 @@ class Aligner:
                 out.append(q)
         return out or None
 
+    def _ko_id(self, p):
+        for q in (p, KO_NEAR.get(p)):
+            if q and self.prefix + q in self.ids:
+                return self.prefix + q
+        return None
+
     def sequence(self, syls):
         """음절 목록 → (음소 순서 (앞뒤 · 사이에 SP), 음소마다 음절 번호 (SP는 −1)) 또는 None (모르는 음절)."""
+        if self.lang == "ko":  # 한국어 모델: 한글만 (연음 · 비음화 …는 이어 부르는 음절들로 정한다)
+            if not syls or not all(ko_phones.is_hangul(s) for s in syls):
+                return None
+            ph_seq, ph_word = ["SP"], [-1]
+            for i, ph in enumerate(ko_phones.phrase(syls)):
+                q = [self._ko_id(p) for p in ph]
+                if None in q:
+                    return None
+                ph_seq += q + ["SP"]
+                ph_word += [i] * len(q) + [-1]
+            return ph_seq, ph_word
         ph_seq, ph_word, prev = ["SP"], [-1], None
         for i, s in enumerate(syls):
             ph = self.phones(s, prev)
@@ -275,10 +301,10 @@ class Aligner:
         res = dict(zip([o.name for o in self.sess.get_outputs()], outs))
         ph_times, conf = _decode(self.vocab, self.hop, self.sr, len(wav), res["ph_frame_logits"],
                                  res["ph_edge_logits"], ph_seq)
-        return _syllable_times(ph_times, ph_seq, ph_word, len(syls), self.prefix), conf
+        return _syllable_times(ph_times, ph_seq, ph_word, len(syls), self.prefix, self.vowels), conf
 
 
-def _syllable_times(ph_times, ph_seq, ph_word, n, prefix=""):
+def _syllable_times(ph_times, ph_seq, ph_word, n, prefix="", vowels=VOWELS):
     """디코더 결과 [(시작, 끝, 음소 번호)] → 음절마다 (시작, 모음 시작, 끝). 한 음절이라도 빠지면 None."""
     out = [None] * n
     for a, b, k in ph_times:
@@ -288,7 +314,7 @@ def _syllable_times(ph_times, ph_seq, ph_word, n, prefix=""):
         name = ph_seq[k][len(prefix):] if prefix and ph_seq[k].startswith(prefix) else ph_seq[k]
         cur = out[w] or [a, None, b]
         cur[2] = b
-        if cur[1] is None and (name in VOWELS or name == "cl"):
+        if cur[1] is None and (name in vowels or name == "cl"):
             cur[1] = a
         out[w] = cur
     if any(x is None for x in out):
