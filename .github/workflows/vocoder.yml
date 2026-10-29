@@ -1,0 +1,249 @@
+name: 테토 보코더 미세 조정 실험
+
+# 신경망 렌더(hifisampler)가 쓰는 보코더 pc-nsf-hifigan 2025.02를 테토 음원 녹음으로 조금 더 배워서, 같은 조교 결과를
+# 원래 보코더 · 테토 보코더로 렌더해 견줘요 (소리는 재생하지 않고 숫자만). 앱에 넣을 만큼 좋아지는지 보는 실험이에요.
+# 테토 약관이 테토 목소리로 학습한 것의 배포를 금지해서, 배운 보코더 · 테토 렌더 · 테토 녹음 특징은 이 Mac 작업의
+# teto_only 폴더에만 두고 끝날 때 지워요. 캐시에는 아무것도 넣지 않고, 아티팩트에는 숫자(results 폴더)만 올려요.
+# vocadito · CSD 노래는 이 실행의 캐시에만 둬요 (CSD는 CC BY-NC-SA). 작업이 도는 동안 진행은 커밋 상태 "보코더 실험"에.
+# 브랜치 이름에 smoke가 있으면 곡 4개 · 학습 8분으로 끝까지 한 번 돌아 보기만 해요.
+on:
+  push:
+    branches: ["claude/vocoder*"]
+    paths:
+      - ".github/workflows/vocoder.yml"
+      - "devtools/vocoder_ft.py"
+      - "devtools/vocoder_ab.py"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  statuses: write  # 진행 알림 (devtools/ci_status.py)
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  TETOTUNE_MODELS: ${{ github.workspace }}/models
+  SMOKE: ${{ contains(github.ref_name, 'smoke') && '1' || '' }}
+  SV_COMMIT: 4d0889c4c180c75ad3000cc565864656344f8190  # openvpi/SingingVocoders 학습 코드
+  VOC: pc_nsf_hifigan_44.1k_hop512_128bin_2025.02
+
+jobs:
+  songs:
+    name: 시험 노래 · 모델 준비
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements.txt -r requirements-extra.txt
+      - name: vocadito 받기 (사람 노래 40곡 + 사람이 표시한 음 높이 · 음표, CC BY 4.0)
+        run: |
+          url=$(curl -fsSL https://zenodo.org/api/records/5578807 | python -c 'import json,sys; print([f["links"]["self"] for f in json.load(sys.stdin)["files"] if f["key"].endswith(".zip")][0])')
+          curl -fL --retry 3 -o vocadito.zip "$url"
+          mkdir -p vocadito && unzip -q vocadito.zip -d vocadito && rm -rf vocadito/__MACOSX vocadito.zip
+      - name: CSD 받기 (accuracy.yml과 같은 앞 곡들만 남겨요, CC BY-NC-SA 4.0, 숫자만 써요)
+        run: |
+          curl -fL --retry 3 -o CSD.zip "https://zenodo.org/records/4916302/files/CSD.zip?download=1"
+          python -c "import hashlib,sys; h=hashlib.md5(open('CSD.zip','rb').read()).hexdigest(); print(h); sys.exit(h != '74d121dd8706fded26a15526a379f7a2')"
+          mkdir -p csdfull && unzip -q CSD.zip "*korean/*" -d csdfull && rm CSD.zip
+          python - <<'PY'
+          import shutil, sys
+          from pathlib import Path
+          sys.path.insert(0, "devtools")
+          from accuracy import csd_songs
+          for name, wav, rows in csd_songs("csdfull", 4):
+              base = wav.parent.parent
+              for sub, ext in (("wav", ".wav"), ("csv", ".csv"), ("lyric", ".txt")):
+                  src = base / sub / (name + ext)
+                  if src.exists():
+                      dst = Path("csd/korean") / sub / src.name
+                      dst.parent.mkdir(parents=True, exist_ok=True)
+                      shutil.copy(src, dst)
+              print(name, len(rows))
+          PY
+      - name: 모델 받기 (앱이 처음 조교할 때 받는 것과 같은 판)
+        run: |
+          python -c "from tetotune import game; d = game.ensure_model(print); print(d); assert d"
+          python -c "from tetotune import f0models; print(f0models.ensure_rmvpe(print))"
+          python -c "from tetotune import align_fa; d = align_fa.ensure_model(print); print(d); assert d"
+      - uses: actions/cache/save@v4
+        with:
+          path: |
+            vocadito
+            csd
+            models
+          key: vocoder-songs-${{ github.run_id }}-${{ github.run_attempt }}
+
+  vocoder:
+    name: 테토 보코더 배우기 · 견주기 (Mac 한 작업 안에서만)
+    needs: songs
+    runs-on: macos-latest
+    timeout-minutes: 355
+    env:
+      W: ${{ github.workspace }}/teto_only  # 테토 녹음 특징 · 배운 보코더 · 테토 렌더 (이 기계에만, 끝날 때 지워요)
+      R: ${{ github.workspace }}/results    # 올리는 숫자만
+    steps:
+      - name: 시작 시각 · 기계
+        run: |
+          echo "T0=$(date +%s)" >> "$GITHUB_ENV"
+          echo "DEP=$HOME/Library/OpenUtau/Dependencies/$VOC" >> "$GITHUB_ENV"
+          sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize; sw_vers -productVersion; df -h "$GITHUB_WORKSPACE"
+          mkdir -p "$W" "$R"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: 도구 설치 (앱 조교 · 학습 · 내보내기 · 자연스러움 채점)
+        run: |
+          python -m pip install -r requirements.txt -r requirements-extra.txt mir_eval "torch==2.5.1" "torchaudio==2.5.1" \
+            "lightning==2.4.0" torchmetrics tensorboard matplotlib einops click praat-parselmouth librosa onnx "s3prl==0.4.18"
+          python -m pip install --only-binary :all: onnxsim || echo "onnxsim 바퀴가 없어요 (ONNX를 줄이지 않고 내보내요)"
+          python -c "import torch; print('torch', torch.__version__, '스레드', torch.get_num_threads(), 'MPS', torch.backends.mps.is_available())"
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            vocadito
+            csd
+            models
+          key: vocoder-songs-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
+      - name: OpenUtau (Mac) + 렌더 엔진 패키지 (hnsep · pc-nsf-hifigan, OpenUtau 패키지 목록에서)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          devtools/openutau_harness/get_openutau.sh hnsep_240512 "$VOC"
+          ls "$DEP"
+          test -f "$DEP/$VOC.onnx"
+      - name: 테토 음원 받기 (공식 배포, 이 실험에만 쓰고 올리지 않아요)
+        run: |
+          curl -fL --retry 3 -o "$W/teto.zip" https://kasaneteto.jp/assets/download/utau/TETO-OUset240323.zip
+          python devtools/install_voicebank.py "$W/teto.zip"
+          rm "$W/teto.zip"
+      - name: 학습 코드 (SingingVocoders, 판 고정) · 미세 조정 시작점 (pc-nsf-hifigan 2025.02, CC BY-NC-SA 4.0)
+        run: |
+          git init -q "$W/sv"
+          git -C "$W/sv" fetch -q --depth 1 https://github.com/openvpi/SingingVocoders.git "$SV_COMMIT"
+          git -C "$W/sv" checkout -q FETCH_HEAD
+          curl -fL --retry 3 -o "$W/ft.zip" "https://github.com/openvpi/SingingVocoders/releases/download/v1.0.0/$VOC.zip"
+          mkdir -p "$W/ft" && unzip -q "$W/ft.zip" -d "$W/ft" && rm "$W/ft.zip"
+          find "$W/ft" -type f -exec ls -l {} \; | sed "s|$W/||"
+          ck=$(find "$W/ft" -name "*.ckpt" | head -1)
+          test -n "$ck"
+          echo "FT_CKPT=$ck" >> "$GITHUB_ENV"
+      - name: 테토 녹음 → 학습 파일 (렌더하기 전에, 렌더가 음원 폴더에 캐시를 만들어서)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          val=$([ -n "$SMOKE" ] && echo 30 || echo 200)
+          python devtools/vocoder_ft.py prep --sv "$W/sv" --voicebank "$HOME/Library/OpenUtau/Singers" --data "$W/data" \
+            --pretrained "$FT_CKPT" --val "$val"
+      - name: 내보내기 확인 (미세 조정 시작점을 내보내면 OpenUtau가 받은 보코더와 같은 소리)
+        run: |
+          python devtools/vocoder_ft.py export --sv "$W/sv" --ckpt "$FT_CKPT" --out "$W/base_export.onnx"
+          python devtools/vocoder_ft.py check "$DEP/$VOC.onnx" "$W/base_export.onnx" --data "$W/data" --require-snr 40 \
+            | tee "$R/export_check.json"
+      - name: 테토 정답 노래 렌더 (accuracy.yml과 같은 곡, WORLDLINE-R)
+        run: |
+          export CSC=$(ls -d "$DOTNET_ROOT"/sdk/*/Roslyn/bincore/csc.dll | tail -1)
+          ou="$PWD/OpenUtau.app/Contents/MacOS"
+          if [ -n "$SMOKE" ]; then ja="1"; ko="10"; else ja="1 11 13"; ko="10 12 2"; fi
+          for seed in $ja; do
+            d="$W/refs/ref$seed"; mkdir -p "$d"
+            python devtools/make_reference_song.py "$d/ref.ustx" "$d/truth.json" $seed --teto --lyrics "$d/lyrics.txt" > /dev/null
+            devtools/openutau_harness/render.sh "$ou" "$PWD/ourun" "$d/ref.ustx" "$d/ref.wav" > "$d/harness_ref.txt"
+          done
+          for seed in $ko; do
+            d="$W/refs/kref$seed"; mkdir -p "$d"
+            python devtools/make_reference_song.py "$d/ref.ustx" "$d/truth.json" $seed --teto --korean --lyrics "$d/lyrics.txt" > /dev/null
+            devtools/openutau_harness/render.sh "$ou" "$PWD/ourun" "$d/ref.ustx" "$d/ref.wav" > "$d/harness_ref.txt"
+          done
+      - name: 조교 → 원래 보코더로 렌더해 고치기 3번 (앱 기본과 같게) → 결과 폴더 남기기
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          export CSC=$(ls -d "$DOTNET_ROOT"/sdk/*/Roslyn/bincore/csc.dll | tail -1)
+          export TETOTUNE_OPENUTAU="$PWD/OpenUtau.app"  # 앱처럼: 이 OpenUtau에 hifisampler가 있는지 보고 렌더러를 고른다
+          export ACC_KEEP_PROJECTS="$W/projects"
+          if [ -n "$SMOKE" ]; then songs=10; nv=1; n=1; else songs=10,14,22; nv=3; n=3; fi
+          python devtools/ci_status.py "보코더 실험" "조교 · 고치기 시작 (vocadito $nv · 테토 정답 $((n * 2)) · CSD $n곡)"
+          set -o pipefail
+          python -W ignore devtools/accuracy.py --refs "$W"/refs/ref* --refs-ko "$W"/refs/kref* --vocadito vocadito \
+            --render "$PWD/OpenUtau.app/Contents/MacOS" "$PWD/ourun" --render-songs "$songs" --render-refs "$n" \
+            --csd csd --csd-n "$n" --render-csd "$n" --render-only --only "새 기본" --json "$R/acc.json" | tee "$W/accuracy.txt"
+          ls "$W/projects"/*/*
+      - name: 같은 결과를 원래 보코더로 다시 렌더 (캐시 비우고)
+        run: |
+          echo "AB_START=$(date +%s)" >> "$GITHUB_ENV"
+          export CSC=$(ls -d "$DOTNET_ROOT"/sdk/*/Roslyn/bincore/csc.dll | tail -1)
+          rm -rf "$HOME/Library/Caches/OpenUtau"
+          python -W ignore devtools/vocoder_ab.py run "$W/projects" --render "$PWD/OpenUtau.app/Contents/MacOS" "$PWD/ourun" \
+            --label "원래 보코더" --json "$R/ab_base.json" --keep "$W/keep"
+          echo "AB_END=$(date +%s)" >> "$GITHUB_ENV"
+      - name: 한 걸음 시간 재기 (CPU · MPS)
+        run: python devtools/vocoder_ft.py bench --sv "$W/sv" --data "$W/data" --out "$W/device.txt"
+      - name: 테토 보코더 배우기 (남은 시간에서 다시 렌더 · 채점 시간을 빼고)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "$SMOKE" ]; then until=$(( $(date +%s) + 480 )); else until=$(( T0 + 355 * 60 - (AB_END - AB_START) - 30 * 60 )); fi
+          echo "다시 렌더 $(( (AB_END - AB_START) / 60 ))분, 배우기는 $(( (until - $(date +%s)) / 60 ))분"
+          python -W ignore devtools/vocoder_ft.py train --sv "$W/sv" --data "$W/data" --device "$(cat "$W/device.txt")" --until "$until"
+          ls -l "$W/sv/experiments/teto_ft/final.ckpt"
+      - name: 테토 보코더 내보내기 · 바꿔 끼우기 (OpenUtau가 쓰는 자리에, 렌더 캐시 비우고)
+        run: |
+          python devtools/vocoder_ft.py export --sv "$W/sv" --ckpt "$W/sv/experiments/teto_ft/final.ckpt" --out "$W/teto.onnx"
+          cp "$DEP/$VOC.onnx" "$W/base.onnx"
+          python devtools/vocoder_ft.py check "$W/base.onnx" "$W/teto.onnx" --data "$W/data" | tee "$R/teto_vs_base.json"
+          cp "$W/teto.onnx" "$DEP/$VOC.onnx"
+          rm -rf "$HOME/Library/Caches/OpenUtau"
+      - name: 같은 결과를 테토 보코더로 다시 렌더
+        run: |
+          export CSC=$(ls -d "$DOTNET_ROOT"/sdk/*/Roslyn/bincore/csc.dll | tail -1)
+          python -W ignore devtools/vocoder_ab.py run "$W/projects" --render "$PWD/OpenUtau.app/Contents/MacOS" "$PWD/ourun" \
+            --label "테토 보코더" --json "$R/ab_teto.json" --keep "$W/keep"
+          cp "$W/base.onnx" "$DEP/$VOC.onnx"
+          python - <<'PY'
+          import json, os
+          rows = [r for v in json.load(open(os.environ["R"] + "/ab_teto.json")).values() for s in v.values() for r in s]
+          same = [r["snr_vs_preview_db"] for r in rows if r["snr_vs_preview_db"] >= 60]
+          print(f"고치기 렌더와 거의 같은 곡 {len(same)}/{len(rows)}")
+          if len(same) == len(rows):
+              raise SystemExit("테토 보코더로 바꿔 끼웠는데 렌더가 그대로예요 (보코더를 안 읽었어요)")
+          PY
+      - name: 배우지 않은 테토 녹음 다시 만들기 · 음 높이 바꿔 부르기
+        run: |
+          set -o pipefail
+          python devtools/vocoder_ft.py copysyn "원래 보코더=$W/base.onnx" "테토 보코더=$W/teto.onnx" --data "$W/data" \
+            --json "$R/copysyn.json" | tee "$W/copysyn.txt"
+          sed -n '/^### /,$p' "$W/copysyn.txt" >> "$GITHUB_STEP_SUMMARY"
+      - name: 자연스러움 AI 채점 (SingMOS-Pro · SingMOS v1 · UTMOS) · 표
+        run: |
+          set -o pipefail
+          python -W ignore devtools/mos.py "$W/keep" --json "$R/mos.json" | tee "$W/mos.txt"
+          python devtools/vocoder_ab.py table "$R/ab_base.json" "$R/ab_teto.json" --mos "$R/mos.json" | tee "$R/table.md"
+          { cat "$R/table.md"; sed -n '/^### /,$p' "$W/mos.txt"; echo; sed -n '/^|/,$p' "$W/accuracy.txt"; } >> "$GITHUB_STEP_SUMMARY"
+      - name: 테토로 배운 것 · 렌더 지우기 (실패해도)
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f "$W/base.onnx" ]; then cp "$W/base.onnx" "$DEP/$VOC.onnx"; fi
+          rm -rf "$W" ourun "$HOME/Library/Caches/OpenUtau"
+          ls -la "$R"
+          python devtools/ci_status.py "보코더 실험" "끝 (${{ job.status }})" "$([ '${{ job.status }}' = success ] && echo success || echo failure)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vocoder-numbers
+          path: results/
+          retention-days: 14

@@ -466,8 +466,8 @@ def csd_songs(root, count=0):
         if sum(map(_hangul, syl)) < len(syl) / 2:  # 발음 기호
             lab, rate = csd_align(text, syl)
             if lab is None or rate < 0.9:
-                print(f"CSD {wav.stem}: 가사 {len(text)}음절 · 음표 {len(rows)}개를 맞추지 못해서 뺌 (모음 {rate:.2f}), "
-                      f"처음 {syl[:6]} {''.join(text[:12])}", flush=True)
+                print(f"CSD {wav.stem}: 가사 {len(text)}음절 · 음표 {len(rows)}개를 맞추지 못해서 뺌 (모음 {rate:.2f})",
+                      flush=True)  # 가사는 찍지 않는다 (CC BY-NC-SA)
                 continue
             for r, x in zip(rows, lab):
                 r[3] = x
@@ -654,6 +654,19 @@ def _keep(src, *parts):
         shutil.copy(src, dst)
 
 
+KEEP_PROJECTS = os.environ.get("ACC_KEEP_PROJECTS")  # 있으면 고치기까지 끝난 폴더를 <여기>/<방식>/<모음>/<곡>/에 (vocoder_ab.py, 올리지 않음)
+
+
+def _keep_project(folder, truth, f0_truth, *parts):
+    """보코더만 바꿔 같은 project.ustx를 다시 렌더해 볼 수 있게 폴더째 남기고, 견줄 정답 보컬 경로를 meta.json에."""
+    dst = Path(KEEP_PROJECTS, *parts)
+    shutil.rmtree(dst, ignore_errors=True)
+    shutil.copytree(folder, dst, ignore=shutil.ignore_patterns("_r"))
+    meta = {"truth": str(Path(truth).resolve()) if truth else None,
+            "f0_truth": str(Path(f0_truth[0]).resolve()) if f0_truth else None}
+    (dst / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+
+
 def render_set(name, items, patches, args, key=""):
     """items: [(이름, 보컬, 가사, 비교할 정답 보컬 또는 None[, 사람이 표시한 음 높이 csv])] → 곡마다 비교 결과.
     음 높이 csv가 있으면 그것을 기준으로 잰 결과도 c["by_f0"]에 (Harvest 기준은 Harvest 곡선이 유리하다)."""
@@ -673,6 +686,8 @@ def render_set(name, items, patches, args, key=""):
                     if KEEP:
                         _keep(folder / "teto_preview.wav", name, key, label)
                         _keep(wav, "원래 보컬", key, label)
+                    if KEEP_PROJECTS:
+                        _keep_project(folder, truth, f0_truth, name, key, label)
                 else:
                     c = render_compare(Path(args.render[0]), Path(args.render[1]), folder, truth)
             except (RuntimeError, subprocess.CalledProcessError) as e:
