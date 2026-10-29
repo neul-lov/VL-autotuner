@@ -5,10 +5,16 @@ CPU · 32비트, 학습 시간 한도(--until), 그림 안 그리기, 한국어 
 내보내기는 인코더(chinese-hubert-base) + FA를 한 ONNX로 묶어 앱의 align_fa.Aligner가 읽는 모양
 (model.onnx · vocab.json · config.json)으로 둔다. 숨 소리 모델(NLL)은 앱이 쓰지 않아서 배우지 않는다.
 
+처음부터 배우면 GTSinger(6.7시간, 세 사람)로는 지금 모델(여러 말 노래로 배운 것)보다 못해서 (CSD 모음 시작 50ms 안 0.70 vs 0.81),
+지금 모델 무게에서 시작해 이어 배울 수 있게 했다 (official → train --init): 지금 모델은 ONNX로만 공개돼 있어서
+같은 모양 HubertFA 모델을 똑같이 내보낸 ONNX와 짝지어 무게를 꺼내고, 마지막 층(음소마다 한 줄)은 한국어 음소마다
+지금 모델이 쓰는 일본어 음소 줄(KO_INIT, align_fa.hangul_phones와 같은 뜻)에서 시작한다.
+
 사용 (gtsinger_hfa.py 결과 폴더 data에 train/ · eval/ · ko_phones.txt):
+  python hfa_train.py official --hfa HubertFA --src models/hfa --out official_fa.pt
   python hfa_train.py binarize --hfa HubertFA --data data [--binary 폴더 --batch 100 --steps 6000 --val 500]
-  python hfa_train.py train --hfa HubertFA [--until 유닉스초]
-  python hfa_train.py export --hfa HubertFA --out out/hfa_ko [--ckpt best|last]
+  python hfa_train.py train --hfa HubertFA [--until 유닉스초] [--init official_fa.pt --lr 0.0001]
+  python hfa_train.py export --hfa HubertFA --out out/hfa_ko [--ckpt best|last|init]
 """
 import argparse
 import json
@@ -16,10 +22,20 @@ import os
 import shutil
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 CONFIG = "configs/fa_ko.yaml"
 NAME = "ko_fa"
+OUTS = ["ph_frame_logits", "ph_edge_logits", "ctc_logits"]
+PARTS = ("backbone.", "curves_edge_fusion.", "head.")  # FA 무게 (손실 함수 것은 빼고)
+# 한국어 음소 → 지금 모델의 일본어 음소 (마지막 층을 이 줄에서 시작한다). 받침 막힘은 쉼(cl = SP)
+KO_INIT = {"ɐ": "a", "ɛ": "e", "e": "e", "ʌ": "o", "o": "o", "u": "u", "ɨ": "u", "i": "i",
+           "j": "y", "w": "w", "ɥ": "w", "ɰ": "u",
+           "k": "k", "kʰ": "k", "k͈": "k", "ɡ": "g", "t": "t", "tʰ": "t", "t͈": "t", "d": "d",
+           "p": "p", "pʰ": "p", "p͈": "p", "b": "b", "sʰ": "s", "s͈": "s", "ɕʰ": "sh", "ɕ͈": "sh",
+           "h": "h", "ç": "h", "ɦ": "h", "tɕ": "ch", "tɕʰ": "ch", "tɕ͈": "ch", "dʑ": "j",
+           "n": "n", "m": "m", "ŋ": "N", "ɲ": "ny", "ɾ": "r", "ɭ": "r", "k̚": "cl", "t̚": "cl", "p̚": "cl"}
 
 
 def note(title, msg):
@@ -83,9 +99,229 @@ def binarize(args):
     note("미리 계산", f"{time.time() - t:.0f}초")
 
 
+def _consts(m):
+    """그래프의 상수 무게 (initializer · Constant 노드) 이름 → TensorProto."""
+    out = {i.name: i for i in m.graph.initializer}
+    for n in m.graph.node:
+        if n.op_type == "Constant":
+            for a in n.attribute:
+                if a.name == "value":
+                    out[n.output[0]] = a.t
+    return out
+
+
+def _sigs(nodes, consts):
+    """상수 이름 → (처음 쓰는 노드 종류, 모양, 같은 둘 중 몇 번째). 같은 코드로 내보낸 두 그래프에서 짝을 찾는다
+    (입력 자리는 보지 않는다: torch 판에 따라 Mul(x, w) · Mul(w, x)가 다를 수 있어서)."""
+    out, count = {}, Counter()
+    for n in nodes:
+        for x in n.input:
+            if x in consts and x not in out:
+                key = (n.op_type, tuple(consts[x].dims))
+                out[x] = key + (count[key],)
+                count[key] += 1
+    return out
+
+
+def official(args):
+    """지금 앱의 가사 맞추기 모델(HubertFA v0.0.7, ONNX로만 공개)에서 FA 무게를 꺼내 HubertFA 모델 모양으로 저장한다.
+    같은 모양 모델에 무게마다 다른 값을 넣어 똑같이 내보낸 ONNX와 짝지어 (이름, 없으면 쓰는 노드 순서) 어느 상수가
+    어느 무게인지 찾고, 꺼낸 무게로 PyTorch에서 돌린 값이 지금 모델 ONNX와 같은지 확인한다 (다르면 멈춘다)."""
+    src = Path(args.src).resolve()
+    out = Path(args.out) if Path(args.out).is_absolute() else Path(args.cwd) / args.out
+    hfa = enter(args.hfa)
+    import hashlib
+
+    import numpy as np
+    import onnx
+    import onnxruntime as ort
+    import onnxsim
+    import torch
+    import yaml
+    from onnx import numpy_helper
+    from networks.task.forced_alignment_task import LitForcedAlignmentTask
+
+    vocab = json.loads((src / "vocab.json").read_text(encoding="utf-8"))
+    cfg = yaml.safe_load((hfa / "configs/force_alignment.yaml").read_text(encoding="utf-8"))
+    cfg.update({k: v for k, v in json.loads((src / "config.json").read_text(encoding="utf-8")).items()
+                if k in ("hubert_config", "mel_spec_config")})
+    cfg["aug_num"] = 1
+    ch = int(cfg["hubert_config"]["channel"])
+    big = onnx.load(str(src / "model.onnx"))
+    nodes = list(big.graph.node)
+    prod = {o: k for k, n in enumerate(nodes) for o in n.output}
+    bound = {"encoder/units_aligned", "encoder/curves"}
+    by_name = bound <= set(prod)  # 인코더와 FA 사이 값 이름이 남아 있으면 거기서 끊는다 (없으면 predict/ 접두 노드만)
+    keep, todo = set(), list(OUTS)
+    while todo:
+        k = prod.get(todo.pop())
+        if k is None or k in keep or (by_name and set(nodes[k].output) & bound) or \
+                (not by_name and not nodes[k].name.startswith("predict/")):
+            continue
+        keep.add(k)
+        todo += [x for x in nodes[k].input if x]
+    fa = [n for k, n in enumerate(nodes) if k in keep]
+    cb = _consts(big)
+    made = {o for n in fa for o in n.output}
+    ext = sorted({x for n in fa for x in n.input if x and x not in made and x not in cb})
+    print(f"지금 모델: FA 노드 {len(fa)}개 / 전체 {len(nodes)}, 밖에서 받는 값 {ext}, 음소 {vocab['vocab_size']}개",
+          flush=True)
+    head = next((cb[x] for x in cb if x.endswith("fa.head.weight")), None)
+    if head is not None:
+        cfg["fa_arg"]["hidden_dims"] = int(head.dims[1])
+        assert int(head.dims[0]) == vocab["vocab_size"] + 2, f"마지막 층 모양이 음소 수와 다름: {list(head.dims)}"
+    print(f"FA 크기 {cfg['fa_arg']}", flush=True)
+
+    torch.manual_seed(0)
+    model = LitForcedAlignmentTask(vocab, cfg).eval()
+    with torch.no_grad():
+        for p in model.parameters():  # 무게마다 다른 값 (내보낸 상수를 값으로 찾는다)
+            p.copy_(torch.randn_like(p))
+
+    class FA(torch.nn.Module):
+        def __init__(self, m):
+            super().__init__()
+            self.fa = m  # 이름 fa.… (지금 모델을 내보낸 onnx_exporter.PredictModel과 같게)
+
+        def forward(self, x, curves):
+            return self.fa(x, curves)
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = str(out.parent / "same_shape_fa.onnx")
+    n = 1000  # onnx_exporter와 같은 길이로 (UNet이 길이에 따라 다르게 내보내지지 않게)
+    with torch.no_grad():
+        torch.onnx.export(FA(model), (torch.randn(1, ch, n), torch.randn(1, 1, n)), tmp,
+                          input_names=["input_feature", "curves"], output_names=OUTS,
+                          dynamic_axes={"input_feature": {2: "n_samples"}, "curves": {2: "n_samples"},
+                                        "ph_frame_logits": {2: "n_samples"}, "ph_edge_logits": {1: "n_samples"},
+                                        "ctc_logits": {2: "n_samples"}},
+                          opset_version=17)
+    ours, ok = onnxsim.simplify(tmp, include_subgraph=True)
+    assert ok
+    os.remove(tmp)
+    co = _consts(ours)
+    so, sb = _sigs(list(ours.graph.node), co), _sigs(fa, cb)
+    by_sig = {s: x for x, s in sb.items()}
+
+    def h(a):
+        return hashlib.sha1(np.ascontiguousarray(a, dtype=np.float32).tobytes()).hexdigest()
+
+    ours_hash = {}
+    for x, t in co.items():
+        a = numpy_helper.to_array(t)
+        if a.dtype.kind == "f":
+            ours_hash.setdefault(h(a), x)
+    sd, new, how, missing = model.state_dict(), {}, Counter(), []
+    for k, p in sd.items():
+        if not k.startswith(PARTS):
+            continue
+        a = p.numpy()
+        named = "predict/fa." + k
+        if named in sb:  # 지금 모델에 무게 이름이 남아 있으면 그것 (Conv · 정규화는 모양 그대로, 2차원은 뒤집혔을 수도)
+            b = numpy_helper.to_array(cb[named])
+            if b.size != a.size:
+                missing.append(k)
+                continue
+            b = b.T if a.ndim == 2 and b.shape != a.shape and b.shape == a.T.shape else b
+            how["이름"] += 1
+        else:  # 같은 모양 모델 ONNX에서 값으로 찾고, 쓰는 노드 순서로 지금 모델의 상수와 짝짓는다
+            x, tr = ours_hash.get(h(a)), False
+            if x is None and a.ndim == 2:
+                x, tr = ours_hash.get(h(a.T)), True
+            y = by_sig.get(so.get(x)) if x else None
+            if y is None or tuple(cb[y].dims) != tuple(co[x].dims):
+                missing.append(k)
+                continue
+            b = numpy_helper.to_array(cb[y])
+            b = b.T if tr else b
+            how["순서"] += 1
+        new[k] = torch.from_numpy(np.ascontiguousarray(b).reshape(a.shape).astype(np.float32))
+    print(f"무게 {len(new)}개 짝 찾음 ({dict(how)}), 못 찾음 {missing}", flush=True)
+    model.load_state_dict(new, strict=False)
+
+    # 지금 모델을 소리 하나로 돌려 FA가 받는 값(인코더 출력)과 FA 출력을 같이 꺼내 PyTorch 결과와 견준다
+    try:
+        vi = {v.name: v for v in onnx.shape_inference.infer_shapes(big).graph.value_info}
+    except Exception as e:  # 모양을 못 알아내면 float로 둔다 (인코더 출력은 float)
+        print(f"모양 추론 못 함: {type(e).__name__}", flush=True)
+        vi = {}
+    for x in ext:
+        big.graph.output.append(vi[x] if x in vi else onnx.helper.make_tensor_value_info(x, onnx.TensorProto.FLOAT, None))
+    opts = ort.SessionOptions()
+    opts.log_severity_level = 3
+    sess = ort.InferenceSession(big.SerializeToString(), opts, providers=["CPUExecutionProvider"])
+    sr = int(cfg["mel_spec_config"]["sample_rate"])
+    t = np.arange(sr * 6) / sr
+    rng = np.random.default_rng(0)
+    wav = 0.3 * np.sin(2 * np.pi * np.cumsum(220 + 110 * np.sin(2 * np.pi * 0.5 * t)) / sr) * (t % 1.5 < 1.2)
+    wav = (wav + 0.01 * rng.standard_normal(len(t))).astype(np.float32)
+    res = dict(zip([o.name for o in sess.get_outputs()], sess.run(None, {"waveform": wav[None, :]})))
+    units = next(res[x] for x in ext if res[x].ndim == 3 and res[x].shape[1] == ch)
+    curves = next(res[x] for x in ext if res[x].ndim == 3 and res[x].shape[1] == 1)
+    with torch.no_grad():
+        mine = model(torch.from_numpy(units).float(), torch.from_numpy(curves).float())
+    worst = 0.0
+    for name, a in zip(OUTS, mine):
+        ref = res[name]
+        d = float(np.abs(a.numpy() - ref).max()) / max(1.0, float(np.abs(ref).max()))
+        worst = max(worst, d)
+        print(f"{name}: 모양 {list(ref.shape)}, 가장 큰 차이 {d:.2e} (값 크기에 견줘)", flush=True)
+    if missing or worst > 1e-3:
+        raise SystemExit("지금 모델 무게를 제대로 꺼내지 못했어요 (위 차이 · 못 찾은 무게)")
+    torch.save({"state_dict": new, "vocab": vocab, "fa_arg": cfg["fa_arg"]}, out)
+    note("지금 모델 무게", f"FA 무게 {len(new)}개, PyTorch와 ONNX 차이 {worst:.1e} → {out.name}")
+
+
+def load_init(model, path):
+    """official이 꺼낸 지금 모델 무게를 한국어 모델에 넣는다. 마지막 층은 한국어 음소마다 KO_INIT의 일본어 음소 줄로."""
+    import torch
+
+    ck = torch.load(path, map_location="cpu", weights_only=False)
+    sd, ids = ck["state_dict"], ck["vocab"]["vocab"]
+    own = model.state_dict()
+    new = {k: v for k, v in sd.items() if not k.startswith("head.") and k in own and own[k].shape == v.shape}
+    skip = [k for k in sd if not k.startswith("head.") and k not in new]
+    w, b = sd["head.weight"], sd["head.bias"]
+    hw, hb = own["head.weight"].clone(), own["head.bias"].clone()
+    hw[:2], hb[:2] = w[:2], b[:2]  # 0: 음소 경계, 1: CTC 빈칸
+    done, miss = set(), []
+    for name, i in sorted(model.vocab["vocab"].items(), key=lambda kv: kv[1]):
+        if i in done:
+            continue
+        p = name.split("/", 1)[1] if "/" in name else name
+        q = "SP" if i == 0 else KO_INIT.get(p)
+        j = next((ids[x] for x in (f"ja/{q}", q) if q and x in ids), None)
+        if j is None:
+            miss.append(p)
+            continue
+        hw[i + 2], hb[i + 2] = w[j + 2], b[j + 2]
+        done.add(i)
+    new["head.weight"], new["head.bias"] = hw, hb
+    r = model.load_state_dict(new, strict=False)
+    left = [k for k in r.missing_keys if k.startswith(PARTS)]
+    if skip or left:
+        raise SystemExit(f"지금 모델 무게가 한국어 모델과 모양이 달라요: 뺀 것 {skip}, 빈 것 {left}")
+    note("이어 배우기", f"지금 모델 무게 {len(new)}개에서 시작, 마지막 층 음소 {len(done)}/{model.vocab['vocab_size']}개"
+         + (f" (일본어 음소 없음: {' '.join(miss)})" if miss else ""))
+
+
 def train(args):
-    enter(args.hfa)
+    if args.init and not Path(args.init).is_absolute():
+        args.init = str(Path(args.cwd) / args.init)
+    hfa = enter(args.hfa)
     import lightning
+    import yaml
+
+    if args.init or args.lr:  # 이어 배우기: FA 크기는 지금 모델과 같게, 학습률은 낮게
+        cfg = yaml.safe_load(Path(CONFIG).read_text(encoding="utf-8"))
+        if args.init:
+            import torch
+
+            cfg["fa_arg"].update(torch.load(args.init, map_location="cpu", weights_only=False)["fa_arg"])
+        if args.lr:
+            cfg["optimizer_config"]["lr"] = args.lr
+        Path(CONFIG).write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        print(json.dumps({"fa_arg": cfg["fa_arg"], "lr": cfg["optimizer_config"]["lr"]}, ensure_ascii=False), flush=True)
 
     if args.until:
         left = int(args.until - time.time())
@@ -137,7 +373,15 @@ def train(args):
 
     hfa_train.StepProgressBar = Log  # train.py가 넣는 진행 막대 대신 (진행 막대를 껐다)
     t = time.time()
-    hfa_train.ForcedAlignmentTrainer(CONFIG).train()
+    trainer = hfa_train.ForcedAlignmentTrainer(CONFIG)
+    if args.init:
+        import torch
+
+        load_init(trainer.model, args.init)
+        torch.save({"state_dict": trainer.model.state_dict(), "hyper_parameters": dict(trainer.model.hparams),
+                    "pytorch-lightning_version": lightning.__version__},
+                   hfa / "ckpt" / NAME / "init.ckpt")  # 배우기 전 (내보내 견주기용, --ckpt init)
+    trainer.train()
     note("학습 끝", f"{time.time() - t:.0f}초")
 
 
@@ -145,6 +389,8 @@ def pick_ckpt(hfa, which):
     folder = hfa / "ckpt" / NAME
     if which == "last":
         return hfa / "ckpt" / f"{NAME}.ckpt"
+    if which == "init":
+        return folder / "init.ckpt"
     best = sorted(folder.glob("best-step=*.ckpt"), key=lambda p: float(p.stem.split("=")[-1]))
     return best[0] if best else hfa / "ckpt" / f"{NAME}.ckpt"
 
@@ -214,7 +460,7 @@ def export(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["binarize", "train", "export"])
+    ap.add_argument("cmd", choices=["official", "binarize", "train", "export"])
     ap.add_argument("--hfa", required=True)
     ap.add_argument("--data")
     ap.add_argument("--binary", help="미리 계산한 특징을 둘 폴더 (크다: 소리 1시간에 2GB쯤)")
@@ -222,11 +468,14 @@ def main():
     ap.add_argument("--steps", type=int, default=6000)
     ap.add_argument("--val", type=int, default=500)
     ap.add_argument("--until", type=float, help="유닉스 초. 이때까지만 배운다")
+    ap.add_argument("--src", help="official: 지금 가사 맞추기 모델 폴더 (model.onnx · vocab.json · config.json)")
+    ap.add_argument("--init", help="train: official이 꺼낸 무게에서 시작")
+    ap.add_argument("--lr", type=float, help="train: 학습률 (HubertFA 기본 0.0003)")
     ap.add_argument("--out")
-    ap.add_argument("--ckpt", default="best", choices=["best", "last"])
+    ap.add_argument("--ckpt", default="best", choices=["best", "last", "init"])
     args = ap.parse_args()
     args.cwd = os.getcwd()
-    {"binarize": binarize, "train": train, "export": export}[args.cmd](args)
+    {"official": official, "binarize": binarize, "train": train, "export": export}[args.cmd](args)
 
 
 if __name__ == "__main__":
