@@ -7,6 +7,8 @@
 
 엔진 (--engines, 쉼표로):
   hfa   지금 쓰는 HubertFA (일본어 노래 모델, 한글은 일본어 음소로), 모음 시작 + align_fa.OFFSET
+  hfa@<방식>  같은 모델, 한글을 한국어 발음으로도 맞추는 방식만 바꿔서 (align_fa.KO_DECODE, 예: hfa@ko/vowel+p,
+              hfa@none = 일본어 음소로만). hfa 엔진들은 조각마다 모델을 한 번만 돌리고 출력을 함께 쓴다
   mfa   Montreal Forced Aligner 한국어 모델 (말소리로 배운 HMM, korean_mfa). PATH에 mfa가 있어야 한다
   mms   torchaudio MMS_FA (여러 말 wav2vec2 CTC, 한글은 uroman으로 로마자)
 합치기: 엔진이 셋 이상이면 음절마다 가운데 값, 둘이면 평균도 같이 잰다. 엔진마다 치우침(다른 곡들에서 잰 것)을 빼고 합친 것도 잰다.
@@ -56,7 +58,9 @@ def items_for(name, wav, rows, joint):
             j += 1
         a, b = window(i, j)
         syl = [r for p in phrases[i:j + 1] for r in p if r[3] != "+"]
-        out.append({"song": name, "wav": str(wav), "a": a, "b": b, "syls": [r[3] for r in syl], "truth": [r[0] for r in syl]})
+        counts = np.cumsum([sum(r[3] != "+" for r in p) for p in phrases[i:j + 1]])
+        out.append({"song": name, "wav": str(wav), "a": a, "b": b, "syls": [r[3] for r in syl], "truth": [r[0] for r in syl],
+                    "breaks": [int(c) for c in counts[:-1]]})
         i = j + 1
     return out
 
@@ -79,21 +83,31 @@ def clip(item, sr=None):
 
 # ---------------------------------------------------------------- 엔진
 class HFA:
-    """지금 앱이 쓰는 가사 맞추기 (align_fa.Aligner)."""
+    """지금 앱이 쓰는 가사 맞추기 (align_fa.Aligner). mode: 한글을 한국어 발음으로도 맞추는 방식 (None = 앱 기본)."""
     name = "hfa"
+    shared = None  # (Aligner, 조각마다 모델 출력): hfa@… 엔진들이 함께 쓴다
 
-    def __init__(self):
-        folder = align_fa.model_dir() or align_fa.ensure_model(print)
-        if folder is None:
-            raise RuntimeError("HubertFA 모델 없음")
-        self.al = align_fa.Aligner(folder)
+    def __init__(self, mode=None):
+        if HFA.shared is None:
+            folder = align_fa.model_dir() or align_fa.ensure_model(print)
+            if folder is None:
+                raise RuntimeError("HubertFA 모델 없음")
+            HFA.shared = (align_fa.Aligner(folder), {})
+        self.al, self.memo = HFA.shared
+        self.mode = align_fa.KO_DECODE if mode is None else mode
 
     def prepare(self, items):
         pass
 
     def align(self, item):
-        y, sr = clip(item)
-        times, conf = self.al.align(y, sr, item["syls"])
+        if self.al.sequence(item["syls"]) is None:
+            return None
+        key = (item["wav"], item["a"], item["b"])
+        if key not in self.memo:
+            res, n = self.al.forward(*clip(item))
+            self.memo[key] = ({k: res[k] for k in ("ph_frame_logits", "ph_edge_logits")}, n)
+        self.al.ko_mode = self.mode
+        times, conf = self.al.times(*self.memo[key], item["syls"], item["breaks"])
         if times is None:
             return None
         return [(item["a"] + s, item["a"] + v + align_fa.OFFSET) for s, v, _ in times]
@@ -103,6 +117,9 @@ ENGINES = {"hfa": HFA}
 
 
 def engine(name):
+    if name.startswith("hfa@"):
+        mode = name[len("hfa@"):]
+        return HFA("" if mode == "none" else mode)
     if name not in ENGINES:
         # 다른 엔진은 따로 파일로 (무거운 라이브러리를 엔진을 쓸 때만 불러온다)
         import align_engines
