@@ -5,7 +5,8 @@
 10ms 단위로 준다. 그 시각으로 음표 경계를 옮기거나 음표를 나눈다 (UTAU처럼 음표 시작 = 모음 시작, 자음은 그 앞).
 
 모델: wolfgitpr/HubertFA v0.0.7 일본어 노래 모델 (처음 쓸 때 한 번 받는다, 판 고정 + SHA-256). 한글은 OpenUtau KO→JA처럼
-일본어 음소로 바꿔서 맞춘다. 디코더는 HubertFA(Apache-2.0)의 tools/decoder.py를 옮겼다.
+일본어 음소로 바꿔서 맞춘다. 한국어 모델(GTSinger 한국어로 이 저장소 CI가 배운 HubertFA)이 있으면 한글만인 프레이즈는
+그것으로 한국어 음소 그대로 맞춘다. 디코더는 HubertFA(Apache-2.0)의 tools/decoder.py를 옮겼다.
 """
 import importlib.util
 import json
@@ -43,6 +44,12 @@ VOWELS = {"a", "i", "u", "e", "o", "N", "zh/e"}
 # 모델에 없는 음소는 가까운 것으로
 KO_NEAR = {"ɕʰ": "sʰ", "ɕ͈": "s͈", "ç": "h", "ɦ": "h", "ɲ": "n", "ɭ": "ɾ", "ɡ": "k", "d": "t", "b": "p", "dʑ": "tɕ",
            "ɥ": "w", "ɰ": "ɨ"}
+# 한국어 모델: GTSinger 한국어(사람이 고친 음소 시각)로 .github/workflows/train.yml이 배운 것 (CC BY-NC-SA 4.0).
+# 주소가 비어 있으면 받지 않는다 (CI 시험은 models_home()/hfa-ko에 직접 둔다)
+HFA_KO_URL = ""
+HFA_KO_SHA256 = ""
+USE_KO = True  # 한국어 모델이 있으면 한글만인 프레이즈에 쓴다 (CI 시험에서 끄고 켜서 비교)
+KO_OFFSET = 0.0  # 초. 한국어 모델이 찾은 모음 시작에 더한다 (OFFSET 대신)
 LAST = []  # 마지막 조교의 프레이즈마다 {확신, 맞춤 여부, 옮긴 거리} (시험 기록용)
 
 
@@ -61,24 +68,40 @@ def model_dir():
     return d if _ort() and _complete(d) else None
 
 
-def ensure_model(progress=lambda s: None):
+def ko_model_dir():
+    from .game import models_home
+
+    d = models_home() / "hfa-ko"
+    return d if _ort() and _complete(d) else None
+
+
+def ensure_model(progress=lambda s: None, korean=False):
+    """일본어 노래 모델 (없으면 처음 한 번 받는다) → 폴더 또는 None. korean이면 한국어 모델도 받는다
+    (한국어 모델을 받지 못해도 일본어 모델은 돌려준다: 한글도 일본어 음소로 맞출 수 있다)."""
+    if not _ort():
+        return None
+    found = model_dir() or _fetch(HFA_URL, HFA_SHA256, "hfa", "가사 맞추기 모델(HubertFA)", progress)
+    if korean and USE_KO and HFA_KO_URL and ko_model_dir() is None:
+        try:
+            _fetch(HFA_KO_URL, HFA_KO_SHA256, "hfa-ko", "한국어 가사 맞추기 모델", progress)
+        except Exception as e:
+            print(f"한국어 가사 맞추기 모델을 받지 못했어요 (일본어 모델로 맞춰요): {e}", flush=True)
+    return found
+
+
+def _fetch(url, sha256, name, label, progress):
     import shutil
     import tempfile
     import zipfile
 
     from .game import _download, models_home
 
-    if not _ort():
-        return None
-    found = model_dir()
-    if found:
-        return found
-    dest = models_home() / "hfa"
+    dest = models_home() / name
     dest.parent.mkdir(parents=True, exist_ok=True)
-    progress("가사 맞추기 모델(HubertFA) 받는 중 (처음 한 번)")
+    progress(f"{label} 받는 중 (처음 한 번)")
     with tempfile.TemporaryDirectory(dir=dest.parent) as tmp:
         zpath = Path(tmp) / "hfa.zip"
-        _download(HFA_URL, zpath, HFA_SHA256, HFA_MAX, "가사 맞추기 모델(HubertFA)")
+        _download(url, zpath, sha256, HFA_MAX, label)
         out = Path(tmp) / "hfa"
         with zipfile.ZipFile(zpath) as z:
             _check_zip(z)
@@ -421,6 +444,12 @@ def refine(notes, y, sr):
     if folder is None:
         return notes, 0
     al = Aligner(folder)
+    kdir = ko_model_dir() if USE_KO else None
+    if kdir is not None:
+        try:
+            al = _Pick(al, Aligner(kdir))
+        except Exception as e:  # 한국어 모델이 깨졌으면 일본어 모델로만
+            print(f"한국어 가사 맞추기 모델을 쓰지 못해요: {e}", flush=True)
     groups = nt._phrases(notes)
 
     def window(i, j):  # 프레이즈 i..j의 소리 구간 (앞뒤 조금 여유, 이웃 프레이즈와 겹치지 않게)
@@ -463,6 +492,9 @@ def _fit(al, g, a, b, y, sr, tag):
     if not syls or b - a > MAX_PHRASE:
         LAST.append({"phrase": tag, "syls": syls, "skip": "long" if syls else "empty"})
         return None
+    if hasattr(al, "for_syls"):
+        al = al.for_syls(syls)
+    shift = KO_OFFSET - OFFSET if getattr(al, "lang", "ja") == "ko" else 0.0  # _place가 OFFSET을 더한다
     if al.sequence(syls) is None:
         LAST.append({"phrase": tag, "syls": syls, "unknown": "".join(syls)[:40]})
         return None
@@ -472,14 +504,16 @@ def _fit(al, g, a, b, y, sr, tag):
         times, conf = None, 0.0
         LAST.append({"phrase": tag, "error": str(e)[:200]})
     why = []
-    new = _place(core_g, [a + v for _, v, _ in times], syls, why=why) if times is not None and conf >= MIN_CONF else None
+    new = _place(core_g, [a + v + shift for _, v, _ in times], syls, why=why) \
+        if times is not None and conf >= MIN_CONF else None
     if new is not None and closures:
         new = nt._insert_closures(new, closures)
     old = [x.start for x in g if x.lyric != "+"]
     moved = [abs(x.start - o) for x, o in zip([x for x in new if x.lyric != "+"], old)] if new else []
     if MAX_MOVE > 0 and moved and max(moved) > MAX_MOVE:  # 음절이 통째로 다른 자리로 가는 것은 모델이 틀릴 때가 많다
         new = None
-    LAST.append({"phrase": tag, "conf": round(float(conf), 3), "n": len(syls), "placed": new is not None,
+    LAST.append({"phrase": tag, "model": getattr(al, "lang", "ja"), "conf": round(float(conf), 3), "n": len(syls),
+                 "placed": new is not None,
                  "moved_ms": round(1000 * float(np.median(moved)), 1) if moved else None,
                  "moved_max_ms": round(1000 * float(np.max(moved)), 1) if moved else None,
                  "before": old, "after": [x.start for x in new if x.lyric != "+"] if new else None,
@@ -487,6 +521,16 @@ def _fit(al, g, a, b, y, sr, tag):
                  "raw_start": [a + t for t, _, _ in times] if times is not None else None,
                  "why": why[0] if why else ("align" if times is None else ("conf" if conf < MIN_CONF else ""))})
     return new
+
+
+class _Pick:
+    """프레이즈마다 맞출 모델: 한글만이면 한국어 모델, 가나가 섞이면 일본어 모델."""
+
+    def __init__(self, ja, ko):
+        self.ja, self.ko = ja, ko
+
+    def for_syls(self, syls):
+        return self.ko if self.ko.sequence(syls) is not None else self.ja
 
 
 def _align_tta(al, y, sr, a, b, syls):

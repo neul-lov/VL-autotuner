@@ -313,3 +313,46 @@ def test_tta_takes_median_per_syllable(monkeypatch):
     times, conf = fa._align_tta(Al(), np.zeros(44100), 44100, 0.0, 1.0, ["か", "き"])
     assert conf == pytest.approx(0.6)
     assert times[1][1] == pytest.approx(0.45 + 2 * 0.01 / 3, abs=1e-3)  # 가운데 값 (밀어 돌린 만큼 더한 뒤)
+
+
+class _KoFake(_FakeAligner):
+    lang = "ko"
+
+    def sequence(self, syls):
+        return (["SP"], [-1]) if all(ko.is_hangul(s) for s in syls) else None
+
+
+def test_korean_phrases_use_korean_model_with_its_offset(monkeypatch):
+    """한글만인 프레이즈는 한국어 모델로 (모음 시작 + KO_OFFSET), 가나가 섞이면 일본어 모델로 (+ OFFSET)."""
+    monkeypatch.setattr(fa, "OFFSET", -0.005)
+    monkeypatch.setattr(fa, "KO_OFFSET", 0.02)
+    ja = _FakeAligner({"가": 9.0, "나": 9.0, "か": 0.0})
+    kof = _KoFake({"가": 0.0, "나": 0.5})
+    ja.offset = kof.offset = 0.0
+    pick = fa._Pick(ja, kof)
+    assert pick.for_syls(["가", "나"]) is kof
+    assert pick.for_syls(["가", "か"]) is ja
+    g = [_n(0.0, 0.5, 60, "가"), _n(0.5, 1.0, 62, "나", 3.0)]
+    out = fa._fit(pick, g, 0.0, 1.0, np.zeros(100), 100, 0)
+    assert [round(x.start, 3) for x in out if x.lyric != "+"] == [0.02, 0.52]
+    assert fa.LAST[-1]["model"] == "ko" and kof.calls and not ja.calls
+
+
+def test_ensure_model_fetches_korean_model_only_for_korean_lyrics(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(fa, "_ort", lambda: True)
+    monkeypatch.setattr(fa, "model_dir", lambda: tmp_path / "hfa")
+    monkeypatch.setattr(fa, "ko_model_dir", lambda: None)
+    monkeypatch.setattr(fa, "_fetch", lambda url, sha, name, label, progress: calls.append(name))
+    monkeypatch.setattr(fa, "HFA_KO_URL", "")
+    assert fa.ensure_model(korean=True) == tmp_path / "hfa" and calls == []  # 주소가 없으면 받지 않는다
+    monkeypatch.setattr(fa, "HFA_KO_URL", "https://example.invalid/hfa_ko.zip")
+    fa.ensure_model(korean=False)
+    assert calls == []
+    fa.ensure_model(korean=True)
+    assert calls == ["hfa-ko"]
+
+    def boom(*a):
+        raise OSError("끊김")
+    monkeypatch.setattr(fa, "_fetch", boom)
+    assert fa.ensure_model(korean=True) == tmp_path / "hfa"  # 한국어 모델을 못 받아도 일본어 모델은 쓴다

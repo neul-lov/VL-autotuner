@@ -107,6 +107,19 @@ jobs:
           cat models/hfa/VERSION || true
           python -c "import json; v=json.load(open('models/hfa/vocab.json')); print({k: (len(x) if k == 'vocab' else x) for k, x in v.items()}); print(sorted(v['vocab']))" || true
           python -c "import json; print(json.load(open('models/hfa/config.json')).get('mel_spec_config'))" || true
+      - name: 한국어 가사 맞추기 모델 (이 브랜치의 train.yml이 배워 캐시에 둔 것)
+        uses: actions/cache/restore@v4
+        with:
+          path: models/hfa_ko
+          key: hfa-ko-model-none
+          restore-keys: hfa-ko-model-
+      - name: 한국어 가사 맞추기 모델 자리에 (앱이 받는 곳 models/hfa-ko)
+        run: |
+          if [ -f "models/hfa_ko/$KO_PICK/model.onnx" ]; then rm -rf models/hfa-ko; mv "models/hfa_ko/$KO_PICK" models/hfa-ko; fi
+          rm -rf models/hfa_ko
+          python -c "from tetotune import align_fa; print('한국어 모델:', align_fa.ko_model_dir())"
+        env:
+          KO_PICK: best
       - name: 준비한 것 캐시에 (이 실행에서만 씀, 올리지 않아요)
         uses: actions/cache/save@v4
         with:
@@ -214,7 +227,7 @@ jobs:
       matrix:
         include:  # 새 방식 vs 예전 방식: Mac 자리를 먼저 받게 따로 둔다
           - {id: 1, only: "새 기본"}
-          - {id: 2, only: "예전 기본 (WORLDLINE-R)"}
+          - {id: 2, only: "− 한국어 가사 맞추기 모델"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -308,7 +321,7 @@ jobs:
       max-parallel: 1  # Mac은 한 번에 5대: 새 방식 vs 예전 방식 둘 · 음표만 보는 둘 다음
       matrix:
         include:  # 렌더해야 차이가 보이는 것 (devtools/accuracy.py variants)
-          - {id: 3, only: "hifisampler − 숨 · 힘 곡선"}
+          - {id: 3, only: "예전 기본 (WORLDLINE-R)"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -466,8 +479,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:  # 렌더 없이 보이는 것 (이번에 바꾼 렌더러와는 상관없어서 새 기본만)
+        include:  # 렌더 없이 보이는 것 (사람 노래 CSD · 분리한 보컬 · vocadito)
           - {id: 1, only: "새 기본"}
+          - {id: 2, only: "− 한국어 가사 맞추기 모델"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
