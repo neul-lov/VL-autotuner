@@ -28,6 +28,12 @@ GAP_NOTE = 0.05  # 초. 음표 안 빈 곳이 이보다 길면 가운데는 음�
 JITTER_HZ = 12.0  # 음 가운데 PITD에서 이보다 빠른 떨림을 뺀다 (Harvest 프레임 잡음이 거친 소리로 났다). 0 = 끔
 CORRECT_GATE = 40.0  # 센트. 음표와 이만큼 넘게 다르면 바로잡는 힘을 줄여 2배에서 0 (틀린 음표로 끌고 가지 않게). 0 = 늘 같게
 OU_EXACT = True  # PITD를 OpenUtau가 음표로 만드는 음 높이(oupitch.py) 그대로를 기준으로. False = 예전 (초 단위 계단: 경계마다 튐)
+# UTAU 음원을 부를 OpenUtau 렌더러 (WORLDLINE-R · WORLDLINE-R1.1 · CLASSIC)와 CLASSIC일 때 리샘플러 (OpenUtau 안에 든
+# worldline · hifisampler, None = OpenUtau 설정). hifisampler = 신경망 보코더(pc-nsf-hifigan)로 부르는 리샘플러:
+# 실제 테토 렌더 비교에서 자연스러움 AI 점수가 WORLDLINE-R보다 모든 곡 묶음에서 높았다 (README "렌더 엔진")
+RENDERER = "CLASSIC"
+RESAMPLER = "hifisampler"
+FALLBACK_RENDERER = "WORLDLINE-R"  # hifisampler를 쓸 수 없을 때 (OpenUtau가 0.1.576보다 예전이거나 모델을 못 받았을 때)
 
 
 @dataclass
@@ -44,6 +50,7 @@ class Options:
     breath_volume: float = 1.0
     pitch_method: str = "auto"   # auto (로컬 AI 둘 + Harvest 합치기, 모델이 없으면 Harvest) · fusion · harvest · rmvpe
     refine: str = "auto"         # auto (OpenUtau가 있으면 테토로 불러 보고 곡선을 다듬는다) · off
+    renderer: str = "auto"       # auto (신경망 렌더 hifisampler, 쓸 수 없으면 WORLDLINE-R) · worldline (늘 WORLDLINE-R)
     singer: str = ""             # 음원 폴더 경로 (비우면 테토를 찾는다)
     default_lyric: str = "ら"
 
@@ -500,7 +507,7 @@ def tune(vocal, out_dir, lyrics_text="", notes_file=None, backing=None, options=
         waves.append(("숨소리 (원래 보컬)", "breaths.wav", len(y) / sr * 1000, False, -2))
     name = title or Path(vocal).stem
     _write_ustx(out / "project.ustx", name, bpm, qnotes, pdata, curves, waves, singer_id, phonemizer,
-                info.get("classic", True))
+                info.get("classic", True), o.renderer)
 
     preview = {
         "hop": HOP, "bpm": bpm, "shift": shift,
@@ -567,8 +574,45 @@ def _breath_track(y, sr, breaths, gain):
     return out
 
 
-def _write_ustx(path, name, bpm, qnotes, pdata, curves, waves, singer, phonemizer, classic=True):
-    """qnotes: _quantize 결과. pdata: 음표마다 피치 점 (oupitch.pitch_data, None이면 예전 방식)."""
+def hifisampler_ready():
+    """hifisampler로 부를 수 있는지: 사용자의 OpenUtau에 들어 있고(0.1.576부터) 모델 둘을 받아 두었을 때 (oudeps.py)."""
+    from . import openutau, oudeps
+
+    return not oudeps.missing() and openutau.has_hifisampler()
+
+
+def prepare_renderer(progress=lambda s: None, choice="auto"):
+    """앱 · 명령줄이 조교하기 전에: 사용자의 OpenUtau가 hifisampler를 갖고 있으면 그 모델 둘을 처음 한 번 받는다.
+    choice: Options.renderer. → 예전 렌더러(FALLBACK_RENDERER)로 부르게 될 때 알릴 말 또는 None
+    (OpenUtau가 없거나 WORLDLINE-R을 골랐으면 None)."""
+    from . import openutau, oudeps
+
+    if choice == "worldline" or RENDERER != "CLASSIC" or RESAMPLER != "hifisampler" or openutau.app_dir() is None:
+        return None
+    if not openutau.has_hifisampler():
+        return f"OpenUtau를 0.1.576 이상으로 올리면 더 자연스러운 신경망 렌더(hifisampler)로 불러요 (지금은 {FALLBACK_RENDERER})"
+    try:
+        oudeps.ensure(progress)
+    except Exception as e:
+        print(f"신경망 렌더 모델을 받지 못했어요: {e}", flush=True)
+        return f"신경망 렌더(hifisampler) 모델을 받지 못해서 {FALLBACK_RENDERER}로 불렀어요 ({e})"
+    return None
+
+
+def renderer_settings(choice="auto"):
+    """UTAU 음원 트랙의 renderer_settings. choice: Options.renderer ("worldline"이면 늘 FALLBACK_RENDERER).
+    hifisampler를 쓸 수 없으면 FALLBACK_RENDERER로."""
+    if choice == "worldline" or (RENDERER == "CLASSIC" and RESAMPLER == "hifisampler" and not hifisampler_ready()):
+        return {"renderer": FALLBACK_RENDERER}
+    out = {"renderer": RENDERER}
+    if RENDERER == "CLASSIC" and RESAMPLER:
+        out["resampler"] = RESAMPLER
+    return out
+
+
+def _write_ustx(path, name, bpm, qnotes, pdata, curves, waves, singer, phonemizer, classic=True, renderer="auto"):
+    """qnotes: _quantize 결과. pdata: 음표마다 피치 점 (oupitch.pitch_data, None이면 예전 방식).
+    renderer: Options.renderer."""
     import yaml
 
     vnotes = []
@@ -588,8 +632,8 @@ def _write_ustx(path, name, bpm, qnotes, pdata, curves, waves, singer, phonemize
         raise ValueError("음표가 너무 짧아서 프로젝트를 만들지 못했어요 (빠르기를 확인해 주세요)")
     end = max(n["position"] + n["duration"] for n in vnotes)
     track = {"singer": singer or "", "phonemizer": phonemizer}
-    if classic:  # UTAU 음원만 WORLDLINE-R. DiffSinger · ENUNU 등은 비워서 OpenUtau가 그 가수의 기본 렌더러를 고르게
-        track["renderer_settings"] = {"renderer": "WORLDLINE-R"}
+    if classic:  # UTAU 음원만 RENDERER. DiffSinger · ENUNU 등은 비워서 OpenUtau가 그 가수의 기본 렌더러를 고르게
+        track["renderer_settings"] = renderer_settings(renderer)
     tracks = [{**track, "track_name": "테토 (자동 조교)", "track_color": "Red", "mute": False, "solo": False,
                "volume": 0, "pan": 0}]
     wave_parts = []

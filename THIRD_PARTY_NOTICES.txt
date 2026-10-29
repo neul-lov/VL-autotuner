@@ -322,3 +322,15 @@ the app downloads it from the HubertFA v0.0.7 release on first use.
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+
+----------------------------------------------------------------------
+Neural renderer models (OpenUtau packages, downloaded on first use)
+----------------------------------------------------------------------
+These are not part of the app. When the user's OpenUtau has the built-in hifisampler
+(0.1.576 and later), the app downloads two OpenUtau packages from their official releases
+into OpenUtau's own Dependencies folder, the same place OpenUtau's package manager uses:
+- pc_nsf_hifigan_44.1k_hop512_128bin_2025.02 (https://github.com/openvpi/vocoders), the
+  DiffSinger Community Vocoder by the OpenVPI Team, under CC BY-NC-SA 4.0
+  (https://creativecommons.org/licenses/by-nc-sa/4.0/): non-commercial use only. Its NOTICE.txt
+  is kept next to the model.
+- hnsep_240512 (https://github.com/yxlllc/vocal-remover), harmonic/noise separation, MIT.

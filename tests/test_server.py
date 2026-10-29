@@ -41,6 +41,9 @@ def test_options_are_clamped():
     import server
     o = server._options({"pitch_follow": 5, "vibrato": -1, "transpose": "7.4", "unknown": 1})
     assert o.pitch_follow == 1.0 and o.vibrato == 0.0 and o.transpose == "7"
+    assert o.renderer == "auto" and server._options({"renderer": "worldline"}).renderer == "worldline"
+    with pytest.raises(ValueError):
+        server._options({"renderer": "CLASSIC"})
 
 
 def test_result_paths_stay_inside_output(client):
