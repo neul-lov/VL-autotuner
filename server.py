@@ -190,8 +190,9 @@ def _run(job_id, vocal, song, lyrics, notes, backing, opts):
                 except Exception as e:
                     print(f"GAME 모델을 받지 못했어요: {e}", flush=True)
                 if (lyrics or "").strip():  # 가사 맞추기 모델 (HubertFA): 가사가 있을 때만, 처음 한 번 받는다
-                    try:
-                        align_fa.ensure_model(lambda s: job.update(step=s, progress=0.01))
+                    try:  # 한글 가사면 한국어 모델도
+                        align_fa.ensure_model(lambda s: job.update(step=s, progress=0.01),
+                                              korean=any("가" <= c <= "힣" for c in lyrics))
                     except Exception as e:
                         print(f"가사 맞추기 모델을 받지 못했어요: {e}", flush=True)
             for name in ("vocals", "dereverb"):  # 분석용 보컬 깨끗하게 하는 모델 (보컬 다시 분리는 반주가 있을 때만)

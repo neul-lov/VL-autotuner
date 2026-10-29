@@ -53,6 +53,8 @@ OFF = {
     "이웃 프레이즈 함께 맞추기": [(align_fa, "JOINT", 0.0)],
     "가사 맞추기 시간 보정 · 덜 버리기": [(align_fa, "OFFSET", 0.0), (align_fa, "SOFT_SPLIT", False),
                                 (align_fa, "GAP_EXTEND", False)],
+    # 한글 가사는 GTSinger 한국어로 배운 가사 맞추기 모델로 (models_home()/hfa-ko가 있을 때, train.yml)
+    "한국어 가사 맞추기 모델": [(align_fa, "USE_KO", False)],
 }
 PR10 = OFF["이웃 프레이즈 함께 맞추기"] + OFF["가사 맞추기 시간 보정 · 덜 버리기"]
 OLD_RENDER = [(tune_mod, "RENDERER", "WORLDLINE-R"), (tune_mod, "RESAMPLER", None)]  # PR12까지 (main) 렌더러

@@ -179,7 +179,7 @@ jobs:
     # 다른 사람 저장소(포크)에서 온 PR에서는 테토 음원을 받지 않아요
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 75  # 신경망 렌더(hifisampler)가 1.5배쯤 오래 걸려서 45분에 끊긴 적이 있다
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
