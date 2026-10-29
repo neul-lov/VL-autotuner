@@ -175,7 +175,7 @@ jobs:
           export TETOTUNE_OPENUTAU="$PWD/OpenUtau.app"  # 앱처럼: 이 OpenUtau에 hifisampler가 있는지 보고 렌더러를 고른다
           export ACC_KEEP_PROJECTS="$W/projects"
           if [ -n "$SMOKE" ]; then songs=10; nv=1; n=1; else songs=10,14,22; nv=3; n=3; fi
-          python devtools/ci_status.py "보코더 실험" "조교 · 고치기 시작 (vocadito $nv · 테토 정답 $((n * 2)) · CSD $n곡)"
+          python devtools/ci_status.py "보코더 실험" "조교 · 고치기 시작 (vocadito ${nv} · 테토 정답 $((n * 2)) · CSD ${n}곡)" || true
           set -o pipefail
           python -W ignore devtools/accuracy.py --refs "$W"/refs/ref* --refs-ko "$W"/refs/kref* --vocadito vocadito \
             --render "$PWD/OpenUtau.app/Contents/MacOS" "$PWD/ourun" --render-songs "$songs" --render-refs "$n" \
@@ -240,7 +240,7 @@ jobs:
           if [ -f "$W/base.onnx" ]; then cp "$W/base.onnx" "$DEP/$VOC.onnx"; fi
           rm -rf "$W" ourun "$HOME/Library/Caches/OpenUtau"
           ls -la "$R" || true
-          python devtools/ci_status.py "보코더 실험" "끝 (${{ job.status }})" "$([ '${{ job.status }}' = success ] && echo success || echo failure)"
+          python devtools/ci_status.py "보코더 실험" "끝 (${{ job.status }})" "$([ '${{ job.status }}' = success ] && echo success || echo failure)" || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
