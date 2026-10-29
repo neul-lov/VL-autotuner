@@ -171,9 +171,9 @@ def bench(args):
             break
         cmd = [sys.executable, os.path.abspath(__file__), "bench1", "--sv", str(args.sv), "--device", dev, "--batch", str(b)]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         except subprocess.TimeoutExpired:
-            print(f"{dev} 배치 {b}: 10분 안에 네 걸음을 못 함 (메모리가 모자라 디스크로 넘치는 듯)", flush=True)
+            print(f"{dev} 배치 {b}: 5분 안에 네 걸음을 못 함 (메모리가 모자라 디스크로 넘치는 듯)", flush=True)
             continue
         line = next((x for x in r.stdout.splitlines()[::-1] if x.startswith("{")), None)
         if r.returncode or not line:
@@ -185,10 +185,13 @@ def bench(args):
         ok.append((b / res["sec"], dev, b, res["sec"]))
     if not ok:
         raise SystemExit("MPS · CPU 어느 쪽으로도 한 걸음을 못 했어요")
-    _, dev, b, sec = max(ok)
+    rate, dev, b, sec = max(ok)
     print(f"고른 장치: {dev} 배치 {b}", flush=True)
     progress("보코더 실험", f"고른 장치 {dev} 배치 {b}: 한 걸음 {sec:.1f}초 ("
              + ", ".join(f"{d} {bb}: {s:.1f}초" for _, d, bb, s in sorted(ok, key=lambda x: -x[2])) + ")")
+    if args.min_rate and rate < args.min_rate:  # 느린 맥에 걸리면 몇 시간 배워도 몇백 걸음뿐이라, 일찍 멈추고 다시 돌린다
+        raise SystemExit(f"이 맥은 1초에 조각 {rate:.2f}개밖에 못 배워요 (기준 {args.min_rate}). "
+                         "잡을 다시 돌리면 다른 맥에서 돌아요")
     if args.out:
         Path(args.out).write_text(f"{dev} {b}\n", encoding="utf-8")
 
@@ -206,6 +209,8 @@ def train(args):
             cfg["pl_trainer_accelerator"] = args.device
         if args.batch:
             cfg["batch_size"] = args.batch
+        if cfg["pl_trainer_accelerator"] == "mps":  # 검증은 녹음을 통째로 넣는데 MPS conv1d는 길이 65536을 못 넘는다
+            cfg["num_sanity_val_steps"], cfg["val_check_interval"] = 0, 10 ** 9  # 배우지 않은 녹음 채점은 copysyn이 한다
         Path(CONFIG).write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8")
         print("장치 · 배치:", cfg["pl_trainer_accelerator"], cfg["batch_size"], flush=True)
     left = int(args.until - time.time()) if args.until else None
@@ -260,6 +265,15 @@ def train(args):
             if v is not None:
                 self.val.append(float(v))
                 print(f"걸음 {self.n} 검증 손실 {float(v):.4f}", flush=True)
+
+        def on_exception(self, trainer, pl_module, exception):  # 정리 단계가 멈추지 않게 바로 끝낸다 (실패로)
+            import traceback
+
+            traceback.print_exception(exception)
+            progress("보코더 실험", f"학습 실패: {type(exception).__name__}: {str(exception)[:90]}")
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(1)
 
         def on_train_end(self, trainer, pl_module):  # 시간 한도로 멈춰도 마지막 것을 남긴다
             trainer.save_checkpoint(str(work / "final.ckpt"))
@@ -458,6 +472,7 @@ def main():
     ap.add_argument("--out")
     ap.add_argument("--json")
     ap.add_argument("--require-snr", type=float, help="check: 두 ONNX 출력 SNR이 이보다 낮으면 실패 (dB)")
+    ap.add_argument("--min-rate", type=float, help="bench: 1초에 배우는 조각이 이보다 적으면 실패 (느린 맥)")
     args = ap.parse_args()
     if args.cmd == "copysyn" and args.onnx and "=" not in args.onnx[0]:
         ap.error("copysyn은 이름=경로.onnx 로")

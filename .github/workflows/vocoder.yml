@@ -117,6 +117,7 @@ jobs:
             csd
             models
           key: vocoder-songs-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: vocoder-songs-${{ github.run_id }}-  # 맥 잡만 다시 돌릴 때 (느린 맥이었을 때)
           fail-on-cache-miss: true
       - name: OpenUtau (Mac) + 렌더 엔진 패키지 (hnsep · pc-nsf-hifigan, OpenUtau 패키지 목록에서)
         env:
@@ -141,6 +142,12 @@ jobs:
           ck=$(find "$W/ft" -name "*.ckpt" | head -1)
           test -n "$ck"
           echo "FT_CKPT=$ck" >> "$GITHUB_ENV"
+      - name: 한 걸음 시간 재기 (MPS 배치 10 · 6 · 4 중 메모리에 맞고 가장 빠른 것, 느린 맥이면 일찍 멈춤)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          rate=$([ -n "$SMOKE" ] && echo 0 || echo 0.5)  # 빠른 맥은 1초에 조각 2.4개쯤, 느린 맥은 0.1개
+          python devtools/vocoder_ft.py bench --sv "$W/sv" --out "$W/device.txt" --min-rate "$rate"
       - name: 테토 녹음 → 학습 파일 (렌더하기 전에, 렌더가 음원 폴더에 캐시를 만들어서)
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -190,21 +197,15 @@ jobs:
           python -W ignore devtools/vocoder_ab.py run "$W/projects" --render "$PWD/OpenUtau.app/Contents/MacOS" "$PWD/ourun" \
             --label "원래 보코더" --json "$R/ab_base.json" --keep "$W/keep"
           echo "AB_END=$(date +%s)" >> "$GITHUB_ENV"
-      - name: 한 걸음 시간 재기 (MPS 배치 10 · 6 · 4 중 메모리에 맞고 가장 빠른 것, 안 되면 CPU)
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          pkill -f torch_shm_manager || true  # 앞 단계에서 남은 파이썬 일꾼 (메모리를 덜 쓰게)
-          pkill -f "multiprocessing" || true
-          ps -axo pid,rss,etime,comm -m | head -8 || true
-          vm_stat | head -6 || true
-          python devtools/vocoder_ft.py bench --sv "$W/sv" --data "$W/data" --out "$W/device.txt"
       - name: 테토 보코더 배우기 (남은 시간에서 다시 렌더 · 채점 시간을 빼고)
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           if [ -n "$SMOKE" ]; then until=$(( $(date +%s) + 480 )); else until=$(( T0 + 355 * 60 - (AB_END - AB_START) - 40 * 60 )); fi
           echo "다시 렌더 $(( (AB_END - AB_START) / 60 ))분, 배우기는 $(( (until - $(date +%s)) / 60 ))분"
+          pkill -f torch_shm_manager || true  # 앞 단계에서 남은 파이썬 일꾼 (메모리를 덜 쓰게)
+          pkill -f "multiprocessing" || true
+          ps -axo pid,rss,etime,comm -m | head -6 || true
           read -r dev batch < "$W/device.txt" || true
           test -n "$dev" && test -n "$batch"
           python -W ignore devtools/vocoder_ft.py train --sv "$W/sv" --data "$W/data" --device "$dev" --batch "$batch" --until "$until"
