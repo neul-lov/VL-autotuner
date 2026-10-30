@@ -764,7 +764,8 @@ def measure(sess, items):
     import numpy as np
 
     dist, cents = {512: [], 2048: []}, {k: [] for k in (-7, -4, 4, 7)}
-    for mel, f0, audio, uv in items:
+    missed = []
+    for i, (mel, f0, audio, uv) in enumerate(items):
         y = run_onnx(sess, mel, f0)
         n = min(len(y), len(audio))
         for n_fft in dist:
@@ -778,9 +779,16 @@ def measure(sess, items):
             m = min(len(got), len(target))
             ok = (got[:m] > 0) & ~uv[:m]  # 녹음에서 소리 나는(유성) 틀만
             if ok.sum() > 10:
-                cents[k].append(float(np.median(np.abs(1200 * np.log2(got[:m][ok] / target[:m][ok])))))
+                err = 1200 * np.log2(got[:m][ok] / target[:m][ok])
+                cents[k].append(float(np.median(np.abs(err))))
+                if cents[k][-1] > 50:  # 평균 하나로는 녹음 하나가 한 옥타브 어긋난 것인지 모두 조금씩인지 모른다
+                    missed.append(f"{i}번 {k:+d}반음: 중앙값 {np.median(err):+.0f}센트, 반 옥타브 넘게 어긋난 틀 "
+                                  f"{np.mean(np.abs(err) > 600):.0%} (위로 {np.mean(err > 600):.0%})")
+    if missed:
+        print("  음 높이를 못 따라간 녹음 (센트 오차 중앙값 50 넘음): " + "; ".join(missed), flush=True)
     return {"logspec_512": float(np.mean(dist[512])), "logspec_2048": float(np.mean(dist[2048])),
-            **{f"cents_{k:+d}": float(np.mean(v)) for k, v in cents.items() if v}}
+            **{f"cents_{k:+d}": float(np.mean(v)) for k, v in cents.items() if v},
+            **{f"missed_{k:+d}": sum(c > 50 for c in v) for k, v in cents.items() if v}}
 
 
 def table(res, first):
