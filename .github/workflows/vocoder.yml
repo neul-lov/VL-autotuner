@@ -29,7 +29,7 @@ defaults:
 
 env:
   TETOTUNE_MODELS: ${{ github.workspace }}/models
-  SMOKE: ${{ contains(github.ref_name, 'smoke') && '1' || '' }}
+  SMOKE: "1"  # 이 브랜치는 짧게 끝까지 돌아 보기만
   SV_COMMIT: 4d0889c4c180c75ad3000cc565864656344f8190  # openvpi/SingingVocoders 학습 코드
   VOC: pc_nsf_hifigan_44.1k_hop512_128bin_2025.02
 
