@@ -32,10 +32,11 @@ from ci_status import post as progress  # devtools/ (이 파일 옆)
 CONFIG = "configs/teto_ft.yaml"
 NAME = "teto_ft"
 HOP, SR = 512, 44100
-LADDER = [(2, 16, True), (4, 16, True), (4, 16, False)]
-# 배울 설정 (배치, 조각 길이 mel 틀, 생성기 중간값 다시 계산하기). 앞일수록 메모리를 덜 쓰고, 뒤로 갈수록 빠르다.
-# probe는 앞에서부터 올라가며 재고, train은 메모리가 모자라면 한 칸 앞으로 내려가 이어서 배운다.
-# 공식 미세 조정 설정(배치 10 · 32틀)은 7GB CI 맥에 안 맞는다: 배치 4 · 32틀도 실제 학습 중 GPU 메모리 7.2GB를 넘겨
+LADDER = [(2, 16, True), (4, 16, True), (4, 16, False), (4, 32, True), (4, 32, False)]
+# 배울 설정 (배치, 조각 길이 mel 틀, 생성기 중간값 다시 계산하기). 앞일수록 메모리를 덜 쓴다.
+# probe는 앞에서부터 올라가며 재고 (메모리 오류 · 디스크 넘침이 나면 멈춘다) 그중 가장 빠른 것을 고르고,
+# train은 메모리가 모자라면 한 칸 앞으로 내려가 이어서 배운다.
+# 공식 미세 조정 설정(배치 10 · 32틀)은 7GB CI 맥에 안 맞는다: 배치 4 · 32틀도 GPU 메모리 한도 없이 배우니 7.2GB를 넘겨
 # 멈췄다 (CPU 프로세스 최대 메모리로 재면 배치 4 · 32틀 7.8GB, 4 · 16틀 5.7GB, 다시 계산하면 5.0GB, 2 · 16틀 4.2GB,
 # 설정과 상관없는 몫이 3.4GB쯤). 판별기 중간값이 많아서 생성기만 다시 계산하면 3할쯤 준다.
 # pc 증강(음 높이를 바꿔 부르는 학습, 배치보다 생성기를 1.5배 더 돌린다)은 hifisampler가 바로 그렇게 쓰므로 끄지 않는다.
@@ -197,7 +198,7 @@ def run_child(args, plan, extra, timeout, quiet=False, limit=True):
 
 def probe(args):
     """LADDER를 작은 설정부터 실제 학습 몇 걸음씩 돌려 보며 올라간다 (따로 띄운 프로세스, GPU 메모리 한도를 걸고).
-    메모리에 맞고 디스크로 넘치지 않은 가장 큰 설정을 고른다. 1초에 배우는 녹음이 --min-rate초보다 짧으면
+    메모리에 맞고 디스크로 넘치지 않은 것 중 1초에 녹음을 가장 많이 배우는 설정을 고른다. 그게 --min-rate초보다 짧으면
     실패한다: 느린 맥에 걸리면 몇 시간 배워도 조금뿐이라, 잡을 다시 돌려 다른 맥에서 돈다.
     CI 맥은 같은 설정도 기계마다 10배 넘게 달랐다 (배치 4 · 32틀 한 걸음 1.7초 · 15초 · 39초).
     이 프로세스는 torch를 올리지 않는다 (메모리를 재는 학습 프로세스 몫을 덜 뺏게)."""
@@ -205,7 +206,7 @@ def probe(args):
 
     print(f"메모리 {os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES') / 2 ** 30:.1f}GB, 스왑 {swap_mb():.0f}MB, "
           f"GPU 메모리 한도 {MPS_LIMIT}", flush=True)
-    best, limit = None, True
+    best, limit, done = None, True, []
     for i, plan in enumerate(LADDER):
         for again in (False, True):
             rc, tail = run_child(args, plan, ["--probe", "6"], timeout=600, quiet=True, limit=limit)
@@ -231,9 +232,11 @@ def probe(args):
             best = best or r
             break
         best = r
+        done.append(r)
     if best is None:
         progress("보코더 실험", f"가장 작은 설정({describe(LADDER[0])})으로도 몇 걸음을 못 배움")
         raise SystemExit("가장 작은 설정으로도 몇 걸음을 못 배웠어요")
+    best = max((r for r in done if r["swap_mb"] < 300), key=lambda r: r["rate"], default=best)  # 가장 빠른 것
     plan = LADDER[best["index"]]
     print(f"고른 설정: {describe(plan)}", flush=True)
     progress("보코더 실험", f"고른 설정 {describe(plan)}: 한 걸음 {best['sec']:.1f}초, 1초에 녹음 {best['rate']:.2f}초, "
