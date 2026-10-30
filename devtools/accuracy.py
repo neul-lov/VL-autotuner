@@ -53,8 +53,10 @@ OFF = {
     "이웃 프레이즈 함께 맞추기": [(align_fa, "JOINT", 0.0)],
     "가사 맞추기 시간 보정 · 덜 버리기": [(align_fa, "OFFSET", 0.0), (align_fa, "SOFT_SPLIT", False),
                                 (align_fa, "GAP_EXTEND", False)],
+    # PR13 뒤: 받침 뒤 ㅇ 음절(먹어 → 머거)은 한국어 발음으로도 맞춘 결과로 (같은 모델, align_fa.KO_DECODE)
+    "한국어 발음으로 맞추기": [(align_fa, "KO_DECODE", "")],
 }
-PR10 = OFF["이웃 프레이즈 함께 맞추기"] + OFF["가사 맞추기 시간 보정 · 덜 버리기"]
+PR10 = OFF["이웃 프레이즈 함께 맞추기"] + OFF["가사 맞추기 시간 보정 · 덜 버리기"] + OFF["한국어 발음으로 맞추기"]
 OLD_RENDER = [(tune_mod, "RENDERER", "WORLDLINE-R"), (tune_mod, "RESAMPLER", None)]  # PR12까지 (main) 렌더러
 FUSION = [(None, "pitch_method", "fusion")]
 # 기본값을 바꾸면 어떨지 (새 기본에 더해서)
