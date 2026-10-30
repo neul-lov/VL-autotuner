@@ -244,6 +244,13 @@ jobs:
           python -W ignore devtools/mos.py "$W/keep" --json "$R/mos.json" | tee "$W/mos.txt"
           python devtools/vocoder_ab.py table "$R/ab_base.json" "$R/ab_teto.json" --mos "$R/mos.json" | tee "$R/table.md"
           { cat "$R/table.md"; sed -n '/^### /,$p' "$W/mos.txt"; echo; sed -n '/^|/,$p' "$W/accuracy.txt"; } >> "$GITHUB_STEP_SUMMARY"
+      - name: 배우는 동안 남긴 테토 보코더 견주기 (250 · 500 · 1000 … 걸음, 녹음 다시 만들기만, 시간이 남으면)
+        continue-on-error: true  # 덤이라 실패해도 위 결과는 그대로
+        run: |
+          set -o pipefail
+          python devtools/vocoder_ft.py trend --sv "$W/sv" --data "$W/data" --copysyn "$R/copysyn.json" \
+            --deadline $(( T0 + 355 * 60 - 12 * 60 )) --out "$W/trend_onnx" --json "$R/trend.json" | tee "$W/trend.txt"
+          sed -n '/^### /,$p' "$W/trend.txt" >> "$GITHUB_STEP_SUMMARY"
       - name: 테토로 배운 것 · 렌더 지우기 (실패해도)
         if: always()
         env:
