@@ -610,6 +610,54 @@ def renderer_settings(choice="auto"):
     return out
 
 
+# 막히는 받침(ㄱ · ㄷ · ㅂ 소리)의 막힘을 음표 끝 몇 ms로 (0 = OpenUtau KO to JA 그대로). KO to JA는 받침 VC를 음표 끝
+# 180틱(다음 음표가 붙어 있으면, 아니면 120틱) 앞에 두는데, 템포가 느리면 200ms 넘게 소리가 막혀 사람 노래보다 끊겨 들린다.
+KO_CODA_CLOSE_MS = 0
+_KO_STOP_FINALS = {1, 2, 3, 7, 17, 18, 19, 20, 22, 23, 24, 25, 26, 27}  # KOtoJAPhonemizer finals 중 k · t · p
+
+
+def _ko_coda_index(vnotes, i):
+    """받침 음소의 번호: 바로 앞에 붙은 음절이 받침 없음 · ㄴ(n) 받침이고 이 음절이 자음으로 시작하면 KO to JA가
+    앞 음절 쪽에 VC 음소를 하나 더 넣어서 [VC, CV, 받침] → 2, 아니면 [CV, 받침] → 1."""
+    x = vnotes[i]
+    if i == 0 or (ord(x["lyric"][-1]) - 0xAC00) // 588 == 11:  # 첫 음표 · ㅇ으로 시작
+        return 1
+    last = vnotes[i - 1]
+    if last["position"] + last["duration"] < x["position"]:
+        return 1
+    k = i - 1
+    while k > 0 and vnotes[k]["lyric"] == "+":
+        k -= 1
+    c = vnotes[k]["lyric"]
+    if len(c) != 1 or not ("가" <= c <= "힣"):
+        return 1
+    return 2 if (ord(c) - 0xAC00) % 28 in (0, 4, 5, 6, 21) else 1
+
+
+def _ko_coda_overrides(vnotes, bpm):
+    """KO to JA 받침 음소(두 번째 음소)를 음표 끝 KO_CODA_CLOSE_MS 앞으로 옮기는 phoneme_overrides를 음표에 넣는다 → 옮긴 수."""
+    if KO_CODA_CLOSE_MS <= 0:
+        return 0
+    tps = TICKS * bpm / 60
+    close = int(round(KO_CODA_CLOSE_MS / 1000 * tps))
+    moved = 0
+    for i, x in enumerate(vnotes):
+        c = x["lyric"][-1:] if x["lyric"] else ""
+        if not ("가" <= c <= "힣") or (ord(c) - 0xAC00) % 28 not in _KO_STOP_FINALS:
+            continue
+        j, length = i + 1, x["duration"]
+        while j < len(vnotes) and vnotes[j]["lyric"] == "+" and vnotes[j]["position"] == vnotes[j - 1]["position"] + vnotes[j - 1]["duration"]:
+            length += vnotes[j]["duration"]
+            j += 1
+        nxt = j < len(vnotes) and vnotes[j]["position"] == vnotes[j - 1]["position"] + vnotes[j - 1]["duration"]
+        default = max(length - (180 if nxt else 120), length // 2)
+        want = max(length - close, length // 2)
+        if want > default:
+            x["phoneme_overrides"] = [{"index": _ko_coda_index(vnotes, i), "offset": int(want - default)}]
+            moved += 1
+    return moved
+
+
 def _write_ustx(path, name, bpm, qnotes, pdata, curves, waves, singer, phonemizer, classic=True, renderer="auto"):
     """qnotes: _quantize 결과. pdata: 음표마다 피치 점 (oupitch.pitch_data, None이면 예전 방식).
     renderer: Options.renderer."""
@@ -628,6 +676,8 @@ def _write_ustx(path, name, bpm, qnotes, pdata, curves, waves, singer, phonemize
             "vibrato": {"length": 0, "period": 175, "depth": 25, "in": 10, "out": 10, "shift": 0, "drift": 0, "vol_link": 0},
             "phoneme_expressions": exps, "phoneme_overrides": [],
         })
+    if phonemizer == voicebank.KO_TO_JA:
+        _ko_coda_overrides(vnotes, bpm)
     if not vnotes:
         raise ValueError("음표가 너무 짧아서 프로젝트를 만들지 못했어요 (빠르기를 확인해 주세요)")
     end = max(n["position"] + n["duration"] for n in vnotes)

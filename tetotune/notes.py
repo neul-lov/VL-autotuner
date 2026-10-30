@@ -24,7 +24,6 @@ GAME_EVIDENCE = False  # True면 GAME이 나눈 곳마다 자음 틈 · 크기 �
 # 한 모음을 여러 음으로 부르는 곳은 가사 맞추기 모델(align_fa)이 음절 시작을 다시 잡는다
 GAME_MERGE = 0.09  # 초. GAME 음표가 이보다 짧으면 이웃에 합친다 (미끄러짐 · 비브라토 조각). 0 = 안 함
 CLOSURE = True  # っ는 음절 시작 자리를 차지하지 않고 앞 음절 끝의 짧은 음표로 (다음 자음 앞 막힘)
-CLOSURE_MAX = 0.09  # っ 음표 길이 한도 (초)
 TONE_FROM_F0 = True  # GAME 음표 높이가 그 음표 가운데에서 읽은 음 높이와 1~2반음 다르면 읽은 쪽으로 (읽은 음이 고를 때만)
 PLUS_FIX = True  # 앞 음표에 붙지 않은 "+"(소리 없이 남는다)는 앞 음표를 늘이거나 앞 모음으로 부른다
 
@@ -498,11 +497,10 @@ def _align_group(notes, syls):
     return notes
 
 
-def _insert_closures(notes, closures, most=None):
+def _insert_closures(notes, closures, most=0.09):
     """っ: 그 앞 음절이 끝나는 음표의 마지막 조금(most초, 음표 절반까지)을 っ 음표로 나눈다. OpenUtau(presamp)는 っ를
     앞 모음 + 다음 자음(VC)으로 불러서 다음 자음 앞에서 소리가 막힌다. 예전에는 っ도 음절 하나라서 음표 경계를 하나
     차지했다 (きっと가 き · っ · と로 나뉘어 と가 늦게)."""
-    most = CLOSURE_MAX if most is None else most
     starts = [i for i, x in enumerate(notes) if x.lyric != "+"]
     for j in sorted(closures, reverse=True):
         if j >= len(starts):
