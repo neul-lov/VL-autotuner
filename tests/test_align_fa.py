@@ -225,7 +225,7 @@ class _FakeAligner:
     def sequence(self, syls):
         return ["SP"], [-1]
 
-    def align(self, y, sr, syls):
+    def align(self, y, sr, syls, breaks=()):
         a = self.offset
         self.calls.append(list(syls))
         return [(self.vowel_at[s] - a - 0.05, self.vowel_at[s] - a, self.vowel_at[s] - a + 0.1) for s in syls], 0.7
@@ -263,9 +263,99 @@ def test_tta_takes_median_per_syllable(monkeypatch):
     class Al:
         sr, hop = 44100, 441
 
-        def align(self, y, sr, syls):
+        def align(self, y, sr, syls, breaks=()):
             return next(answers), 0.6
     monkeypatch.setattr(fa, "TTA", 3)
     times, conf = fa._align_tta(Al(), np.zeros(44100), 44100, 0.0, 1.0, ["か", "き"])
     assert conf == pytest.approx(0.6)
     assert times[1][1] == pytest.approx(0.45 + 2 * 0.01 / 3, abs=1e-3)  # 가운데 값 (밀어 돌린 만큼 더한 뒤)
+
+
+# ---------------------------------------------------------------- 한국어 발음으로 맞추기 (KO_DECODE)
+def _ko_aligner(ko_mode=""):
+    """모델 없이: 실제 v0.0.7처럼 ja/… 음소 + 쉼 무리 0번, 디코더가 쓰는 값만."""
+    al = _aligner()
+    al.vocab = {"vocab": al.ids, "vocab_size": max(al.ids.values()) + 1}
+    al.sr, al.hop, al.ko_mode = 44100, 441, ko_mode
+    return al
+
+
+def _fake_outputs(al, T, seed=0):
+    rng = np.random.default_rng(seed)
+    return {"ph_frame_logits": rng.normal(0, 3, (1, al.vocab["vocab_size"], T)).astype(np.float32),
+            "ph_edge_logits": rng.normal(-2, 2, (1, T)).astype(np.float32)}
+
+
+def test_ko_phones_all_borrow_known_japanese_rows():
+    al = _ko_aligner()
+    for p in set(fa.KO_JA):
+        assert al._ja_name(p) is not None, p
+    for code in range(0xAC00, 0xD7A4, 7):  # 받침 · 연음이 다 나오게 여러 음절을 이어서
+        syls = [chr(code), "아", chr(0xD7A3 - (code - 0xAC00)), "이"]
+        for how in ("ko", "g2p"):
+            ph_seq, ph_word = al.ko_sequence(syls, how=how)
+            assert set(ph_word) == {-1, 0, 1, 2, 3}, (syls, how)
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_ko_decode_equals_korean_head_model(seed):
+    """한국어 음소마다 빌린 일본어 줄 = 마지막 층을 그 줄로 채운 한국어 모델 (hfa_train load_init)과 같은 결과:
+    한국어 모델의 음소 줄은 쉼 0번 + ko/… 이름 순서, 문장에 없는 음소 줄도 있다 (디코더가 가린다)."""
+    al = _ko_aligner()
+    T = 300
+    res = _fake_outputs(al, T, seed)
+    syls = ["먹", "어", "요", "강", "아", "지", "꽃", "잎"]
+    got = al.ko_times(res, T * al.hop, syls)
+    names = sorted("ko/" + p for p in fa.KO_JA)
+    kvocab = {"vocab": {"SP": 0, **{p: i + 1 for i, p in enumerate(names)}}, "vocab_size": len(names) + 1}
+    rows = [0] + [al.ids[al._ja_name(p[3:])] for p in names]
+    k_logits = res["ph_frame_logits"][:, rows]
+    ph_seq, ph_word = al.ko_sequence(syls)
+    kseq = [p if p == "SP" else "ko/" + p for p in ph_seq]
+    ph_times, conf = fa._decode(kvocab, al.hop, al.sr, T * al.hop, k_logits, res["ph_edge_logits"], kseq)
+    want = fa._syllable_times(ph_times, kseq, ph_word, len(syls), "ko/", fa.ko_phones.VOWELS)
+    assert got == (want, conf)
+
+
+def test_ko_mode_picks_vowel_onset_syllables():
+    syls = ["먹", "어", "아", "이", "강", "아"]
+    assert fa._ko_pick(syls, "vowel") == {1, 5}  # 받침 뒤 ㅇ 음절 (아 · 이는 모음 뒤)
+    assert fa._ko_pick(["아", "기"], "vowel") == {0}
+    assert fa._ko_pick(syls, "onset") == {1, 2, 3, 5}
+    assert fa._ko_pick(syls, "all") == set(range(6))
+
+
+def test_merge_ko_keeps_order():
+    ja = [(0.0, 0.1, 0.3), (0.3, 0.5, 0.7), (0.7, 0.9, 1.0)]
+    ko = [(0.0, 0.12, 0.3), (0.3, 0.42, 0.7), (0.7, 0.95, 1.0)]
+    assert fa._merge_ko(ja, ko, {1}) == [ja[0], ko[1], ja[2]]
+    far = [(0.0, 0.1, 0.3), (0.8, 0.88, 0.9), (0.9, 0.95, 1.0)]  # 한국어 발음 결과가 다음 음절 바로 앞: 그대로
+    assert fa._merge_ko(ja, far, {1}) == ja
+
+
+def test_times_uses_korean_result_only_for_picked_syllables():
+    al = _ko_aligner()
+    T = 300
+    res = _fake_outputs(al, T, 3)
+    syls = ["먹", "어", "요"]
+    ja, _ = al.times(res, T * al.hop, syls)
+    al.ko_mode = "ko/all"
+    ko, _ = al.times(res, T * al.hop, syls)
+    assert ko == al.ko_times(res, T * al.hop, syls)[0]
+    al.ko_mode = "ko/vowel"
+    mixed, _ = al.times(res, T * al.hop, syls)
+    assert mixed[0] == ja[0] and mixed[2] == ja[2]
+    assert mixed[1] in (ja[1], ko[1])
+    al.ko_mode = "ko/vowel"
+    assert al.times(res, T * al.hop, ["か", "き"])[0] == al.times(res, T * al.hop, ["か", "き"])[0]  # 가나는 그대로
+
+
+def test_ko_sequence_breaks_stop_liaison():
+    """프레이즈가 바뀌는 곳(쉼)에서는 받침이 다음 음절로 넘어가지 않는다 (먹 | 어 ≠ 머거)."""
+    al = _ko_aligner()
+    joined, _ = al.ko_sequence(["먹", "어"])
+    split, _ = al.ko_sequence(["먹", "어"], breaks=[1])
+    assert joined == ["SP", "m", "ʌ", "SP", "ɡ", "ʌ", "SP"]
+    assert split == ["SP", "m", "ʌ", "k̚", "SP", "ʌ", "SP"]
+    g2p, _ = al.ko_sequence(["먹", "어"], breaks=[1], how="g2p")
+    assert g2p == ["SP", "ja/m", "ja/o", "SP", "ja/o", "SP"]  # 막힘(cl)은 쉼과 같은 음소라서 빠진다

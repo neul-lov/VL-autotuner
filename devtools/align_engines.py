@@ -18,8 +18,8 @@ from pathlib import Path
 
 import numpy as np
 
-import ko_g2p
 from tetotune import audio
+from tetotune import ko_phones as ko_g2p
 
 ab = None  # align_bench 모듈 (register)
 
