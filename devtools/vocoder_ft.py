@@ -21,6 +21,7 @@ SingingVocoders(openvpi, 학습 코드)를 --sv 폴더에 받아 두고 그 코�
 import argparse
 import inspect
 import json
+import math
 import os
 import random
 import sys
@@ -46,6 +47,12 @@ LADDER = [(2, 16, True), (4, 16, True), (4, 16, False), (4, 32, True), (4, 32, F
 MPS_LIMIT = {"PYTORCH_MPS_HIGH_WATERMARK_RATIO": "0.9", "PYTORCH_MPS_LOW_WATERMARK_RATIO": "0.7"}
 # 맥 GPU가 권장 메모리의 0.9배(7GB 기계에서 4.2GB쯤)보다 더 쓰려 하면 바로 메모리 오류가 나게 한다: 그 위로는
 # 디스크로 넘쳐 한 걸음이 몇 분씩 걸렸다.
+GPU_ERROR = ("command buffer exited with error status", "kIOGPUCommandBufferCallbackError")
+# 맥 GPU(Metal) 오류 줄. 한 번 나면 GPU가 그 프로세스의 계산을 무시해서 손실이 0이 되고 가중치가 망가지는데 학습은
+# 멈추지 않는다 (2026-10-30 실행: 30분쯤 배운 뒤 오류가 나서 4시간을 헛배우고 소리 없는 보코더가 나왔다). 그래서 보이면
+# 바로 멈추고, 그 뒤로 손실이 멀쩡한 것을 본(확인된) 저장점에서 새 프로세스로 이어서 배운다.
+BAD_LOSS = 3  # train1이 손실이 0 · NaN인 것을 보면 이 종료 코드로 끝난다
+CONFIRM = 30  # 저장점 · 생성기를 남기고 이 초가 지나 손실이 멀쩡하면 확인된 것으로 친다
 
 
 def enter(sv):
@@ -168,9 +175,21 @@ def brief(tail, n=12):
     return keep[-n:]
 
 
+def gpu_reason(tail):
+    """맥 GPU 오류 줄의 까닭 (예: Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory))."""
+    import re
+
+    for x in tail:
+        m = re.search(r"^\s*(.*?)\s*\((\w+:kIOGPU\w+)\)", x)
+        if m:
+            return f"{m.group(1)} ({m.group(2)})".strip()
+    return "까닭 줄 없음"
+
+
 def run_child(args, plan, extra, timeout, quiet=False, limit=True):
     """train1을 따로 띄운 프로세스에서 돌린다 (GPU 메모리 한도 MPS_LIMIT를 걸고, 죽으면 파이썬 위치를 찍게,
-    os._exit로 끝나도 기록이 남게 버퍼 없이). (종료 코드, 마지막 줄들); timeout초가 지나 멈췄으면 None."""
+    os._exit로 끝나도 기록이 남게 버퍼 없이). 맥 GPU 오류 줄(GPU_ERROR)이 보이면 까닭 줄까지 받고 3초 뒤 멈춘다.
+    (종료 코드, 마지막 줄들, GPU 오류가 처음 보인 시각 또는 None); timeout초가 지나 멈췄으면 종료 코드가 None."""
     import collections
     import subprocess
     import threading
@@ -189,14 +208,21 @@ def run_child(args, plan, extra, timeout, quiet=False, limit=True):
     timer = threading.Timer(timeout, stop)
     timer.daemon = True
     timer.start()
-    tail = collections.deque(maxlen=300)
+    tail, gpu, kill = collections.deque(maxlen=300), None, None
     for line in p.stdout:
         tail.append(line.rstrip("\n"))
         if not quiet:
             print(line, end="", flush=True)
+        if gpu is None and any(s in line for s in GPU_ERROR):
+            gpu = time.time()
+            kill = threading.Timer(3, p.kill)
+            kill.daemon = True
+            kill.start()
     p.wait()
     timer.cancel()
-    return (None if fired.is_set() else p.returncode), list(tail)
+    if kill:
+        kill.cancel()
+    return (None if fired.is_set() else p.returncode), list(tail), gpu
 
 
 def probe(args):
@@ -212,18 +238,19 @@ def probe(args):
     best, limit, done = None, True, []
     for i, plan in enumerate(LADDER):
         for again in (False, True):
-            rc, tail = run_child(args, plan, ["--probe", "6"], timeout=600, quiet=True, limit=limit)
+            rc, tail, gpu = run_child(args, plan, ["--probe", "6"], timeout=600, quiet=True, limit=limit)
             shutil.rmtree(Path(args.sv) / "experiments" / "teto_probe", ignore_errors=True)
             line = next((x for x in tail[::-1] if x.startswith('{"sec"')), None)
-            if line and not rc:
+            if line and not rc and not gpu:
                 break
-            print(f"{describe(plan)}{'' if limit else ' (메모리 한도 없이)'}: 못 씀 ({why(rc)}), 기록 끝:", flush=True)
+            how = f"맥 GPU 오류: {gpu_reason(tail)}" if gpu else why(rc)
+            print(f"{describe(plan)}{'' if limit else ' (메모리 한도 없이)'}: 못 씀 ({how}), 기록 끝:", flush=True)
             for x in brief(tail):
                 print("    " + x[:300], flush=True)
-            if again or not limit or rc is None or any("out of memory" in x for x in tail):
+            if again or not limit or rc is None or gpu or any("out of memory" in x for x in tail):
                 break
             limit = False  # 메모리 오류 말고 다른 까닭으로 죽었으면, 한도가 문제인지 한도 없이 한 번 더 본다
-        if not line or rc:
+        if not line or rc or gpu:
             break
         r = {**json.loads(line), "index": i, "limit": limit}
         r["rate"] = plan[0] * plan[1] * HOP / SR / r["sec"]
@@ -250,16 +277,73 @@ def probe(args):
     Path(args.out).write_text(f"{best['index']} {'limit' if best['limit'] else 'nolimit'}\n", encoding="utf-8")
 
 
+def book_of(work):
+    """저장점마다 배운 걸음 · 조각 수 · 녹음 길이(초) · 남긴 시각 · 확인됐는지 (experiments/teto_ft/done.json)."""
+    try:
+        return json.loads((Path(work) / "done.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def write_book(work, book):
+    tmp = Path(work) / "done.json.tmp"
+    tmp.write_text(json.dumps(book), encoding="utf-8")
+    tmp.replace(Path(work) / "done.json")
+
+
+def confirm_snaps(work, before=float("inf")):
+    """학습 중 남긴 생성기 snap/gen_N.pt.tmp → gen_N.pt (before 시각보다 먼저 남긴 것만)."""
+    for q in (Path(work) / "snap").glob("*.pt.tmp"):
+        if q.stat().st_mtime < before:
+            q.replace(q.with_suffix(""))
+
+
+def drop_unconfirmed(work):
+    """GPU 오류 · 손실 이상으로 멈춘 뒤: 확인되지 않은 저장점 · 생성기 · final.ckpt를 지운다 (망가졌을 수 있어서).
+    다음 프로세스는 남은 저장점 중 가장 늦은 것에서 (없으면 미세 조정 시작점에서) 배운다."""
+    work = Path(work)
+    book = book_of(work)
+    for q in work.glob("model_ckpt_steps_*.ckpt"):
+        if not book.get(q.name, {}).get("ok"):
+            q.unlink()
+            book.pop(q.name, None)
+            print(f"확인 안 된 저장점 지움: {q.name}", flush=True)
+    write_book(work, book)
+    for q in [*(work / "snap").glob("*.tmp"), *(work / "snap").glob("*.part"), *work.glob("*.part")]:
+        q.unlink()
+    (work / "final.ckpt").unlink(missing_ok=True)
+
+
+def ckpt_ok(path):
+    """저장점의 생성기 가중치가 모두 유한하고, 절반 넘게 0뿐이지는 않은지 (CPU에서 읽어서)."""
+    import torch
+
+    try:
+        ck = torch.load(str(path), map_location="cpu", weights_only=False)
+    except Exception as e:  # 없거나 덜 써진 파일
+        print(f"{Path(path).name}: 못 읽음 ({type(e).__name__}: {str(e)[:100]})", flush=True)
+        return False
+    gen = [v for k, v in ck.get("state_dict", {}).items() if k.startswith("generator.") and v.is_floating_point()]
+    bad = sum(1 for v in gen if not bool(torch.isfinite(v).all()))
+    zero = sum(1 for v in gen if not bool(v.abs().sum() > 0))
+    ok = bool(gen) and not bad and zero <= len(gen) // 2
+    print(f"{Path(path).name}: 생성기 텐서 {len(gen)}개 중 유한하지 않은 것 {bad}개 · 0뿐인 것 {zero}개 → "
+          f"{'멀쩡' if ok else '망가짐'}", flush=True)
+    return ok
+
+
 def train(args):
-    """probe가 고른 설정으로 배운다 (따로 띄운 프로세스). 도중에 GPU 메모리가 모자라거나 프로세스가 죽으면
-    LADDER의 한 칸 작은 설정으로 마지막 저장점(--ckpt-every초마다 남긴다)에서 이어서 배운다.
-    --until이 되면 final.ckpt를 남기고 끝난다. 이어서 배울 시간이 없으면 마지막 저장점을 final.ckpt로 쓴다."""
+    """probe가 고른 설정으로 배운다 (따로 띄운 프로세스). 저장점은 --ckpt-every초마다 남기고, 그 뒤 손실이 멀쩡하면
+    확인된 것으로 친다. 도중에 GPU 메모리가 모자라거나 프로세스가 죽으면 LADDER의 한 칸 작은 설정으로 마지막
+    저장점에서, 맥 GPU 오류 · 손실 이상이면 확인 안 된 것을 지우고 같은 설정으로 한 번 더 (같은 설정에서 또 나면 한 칸
+    작은 설정으로) 확인된 저장점에서 이어서 배운다. --until이 되면 final.ckpt를 남기고 끝난다. 이어서 배울 시간이
+    없으면 멀쩡한 마지막 저장점을 final.ckpt로 쓴다."""
     import shutil
 
     i, how = Path(args.plan).read_text(encoding="utf-8").split()[:2]
     i, limit = int(i), how == "limit"
     work = Path(args.sv) / "experiments" / NAME
-    fake, first = args.fake_oom, True
+    fake_oom, fake_gpu, first, gpu_errors = args.fake_oom, args.fake_gpu, True, {}
     while True:
         left = args.until - time.time()
         if left < (300 if first else 90):
@@ -267,33 +351,55 @@ def train(args):
                 raise SystemExit(f"배울 시간이 모자라요 ({left:.0f}초)")
             break
         extra = ["--until", str(args.until), "--ckpt-every", str(args.ckpt_every)]
-        if fake and i > 0:  # 짧은 시험: 이어서 배우기가 되는지 한 번 일부러 멈춰 본다
-            extra += ["--fake-oom", str(fake)]
-        fake, first = 0, False
+        if fake_oom and i > 0:  # 짧은 시험: 이어서 배우기가 되는지 한 번 일부러 멈춰 본다
+            extra += ["--fake-oom", str(fake_oom)]
+            fake_oom = 0
+        elif fake_gpu and not first:  # 짧은 시험: 그다음 프로세스는 맥 GPU 오류 줄을 일부러 찍어 본다
+            extra += ["--fake-gpu", str(fake_gpu)]
+            fake_gpu = 0
+        first = False
         print(f"배울 설정: {describe(LADDER[i])}, 남은 {left / 60:.0f}분", flush=True)
-        rc, tail = run_child(args, LADDER[i], extra, timeout=min(left + 1800, 86400), limit=limit)
-        if rc == 0:
-            for q in work.glob("model_ckpt_steps_*.ckpt"):  # 하나에 1GB쯤, final.ckpt만 남긴다
-                q.unlink()
-            return
-        oom = any("out of memory" in x for x in tail)
-        if not oom and (rc is None or rc > 0):
+        rc, tail, gpu = run_child(args, LADDER[i], extra, timeout=min(left + 1800, 86400), limit=limit)
+        bad = gpu is not None or rc == BAD_LOSS
+        if rc == 0 and not bad:
+            if ckpt_ok(work / "final.ckpt"):
+                confirm_snaps(work)
+                for q in work.glob("model_ckpt_steps_*.ckpt"):  # 하나에 1GB쯤, final.ckpt만 남긴다
+                    q.unlink()
+                return
+            bad = True  # 오류 줄 없이 마지막 가중치가 망가졌으면 확인된 저장점으로
+        oom = not bad and any("out of memory" in x for x in tail)
+        if not (oom or bad) and (rc is None or rc > 0):
             raise SystemExit(f"학습이 멈췄어요 ({why(rc)}: {error_line(tail)})")
-        how = "GPU 메모리가 모자라" if oom else why(rc)
-        print(f"{describe(LADDER[i])}: {how} 멈춤", flush=True)
-        if not oom:
-            for x in brief(tail):
-                print("    " + x[:300], flush=True)
-        progress("보코더 실험", f"{describe(LADDER[i])}: {how} 멈춤, 한 칸 작은 설정으로 이어서")
+        if bad:
+            drop_unconfirmed(work)
+            gpu_errors[i] = gpu_errors.get(i, 0) + 1
+            again = gpu_errors[i] < 2
+            how = (f"맥 GPU 오류 ({gpu_reason(tail)})" if gpu else "손실 이상 (0 · NaN)" if rc == BAD_LOSS
+                   else "마지막 가중치가 망가짐")
+            then = "같은 설정으로 한 번 더" if again else "한 칸 작은 설정으로"
+            print(f"::warning::보코더 학습 {describe(LADDER[i])}: {how}, 확인된 저장점에서 {then}", flush=True)
+            progress("보코더 실험", f"{describe(LADDER[i])}: {how[:80]}, 확인된 저장점에서 {then}")
+            if again:
+                continue
+        else:
+            how = "GPU 메모리가 모자라" if oom else why(rc)
+            print(f"{describe(LADDER[i])}: {how} 멈춤", flush=True)
+            if not oom:
+                for x in brief(tail):
+                    print("    " + x[:300], flush=True)
+            confirm_snaps(work)  # 메모리 오류 · 프로세스가 죽은 것은 가중치를 망가뜨리지 않는다
+            progress("보코더 실험", f"{describe(LADDER[i])}: {how} 멈춤, 한 칸 작은 설정으로 이어서")
         if i == 0:
             break
         i -= 1
-    saved = sorted(work.glob("model_ckpt_steps_*.ckpt"), key=lambda q: int(q.stem.rsplit("_", 1)[1]))
-    if not saved:
-        raise SystemExit("학습이 멈췄고, 남은 저장점도 없어요")
-    shutil.copy(saved[-1], work / "final.ckpt")
-    done = json.loads((work / "done.json").read_text(encoding="utf-8")) if (work / "done.json").exists() else {}
-    summary = (f"학습 끝 (마지막 저장점 {saved[-1].name}): {done.get('steps', '?')}걸음, "
+    saved = sorted(work.glob("model_ckpt_steps_*.ckpt"), key=lambda q: int(q.stem.rsplit("_", 1)[1]), reverse=True)
+    good = next((q for q in saved if ckpt_ok(q)), None)
+    if good is None:
+        raise SystemExit("학습이 멈췄고, 멀쩡한 저장점도 없어요")
+    shutil.copy(good, work / "final.ckpt")
+    done = book_of(work).get(good.name, {})
+    summary = (f"학습 끝 (마지막 저장점 {good.name}): {done.get('steps', '?')}걸음, "
                f"배운 녹음 {done.get('audio', 0) / 60:.0f}분어치")
     print(summary, flush=True)
     progress("보코더 실험", summary)
@@ -321,7 +427,7 @@ def train1(args):
     from utils.training_utils import get_latest_checkpoint_path
 
     resume = get_latest_checkpoint_path(work)
-    done = json.loads((work / "done.json").read_text(encoding="utf-8")) if resume and (work / "done.json").exists() else {}
+    done = book_of(work).get(Path(resume).name, {}) if resume else {}
     n_train = sum(1 for x in (Path(args.data) / "index" / "train").read_text(encoding="utf-8").splitlines() if x.strip())
     plan = (args.batch, args.crop, args.recompute)
     rec_gb = torch.mps.recommended_max_memory() / 2 ** 30 if dev == "mps" else 0.0
@@ -369,12 +475,18 @@ def train1(args):
         ResBlock1.forward = recompute
     clip = args.crop * HOP / SR  # 한 조각 녹음 길이 (초)
 
+    def save(trainer, path):  # 쓰다가 꺼져도 반쪽 저장점이 남지 않게 (이어서 배울 때 그걸 읽다 멈춘다)
+        part = path.with_name(path.name + ".part")
+        trainer.save_checkpoint(str(part))
+        part.replace(path)
+
     class Log(Callback):  # CI 기록에 50걸음마다 한 줄 (진행 막대 대신), 커밋 상태에 10분마다, 저장점은 --ckpt-every초마다
         def __init__(self):
             self.t0 = self.saved = time.time()
             self.last, self.times, self.said, self.mem, self.swap = None, [], 0.0, [0, 0], 0.0
             # 이어서 배우면 저장점까지 배운 걸음 · 조각 수 · 녹음 길이(초)부터 센다
             self.steps, self.items, self.audio = done.get("steps", 0), done.get("items", 0), done.get("audio", 0.0)
+            self.faked = False
 
         def on_train_start(self, trainer, pl_module):  # 준비 시간은 빼고 잰다
             self.last = time.time()
@@ -405,32 +517,66 @@ def train1(args):
                 loss = trainer.callback_metrics.get("loss")
                 print(f"걸음 {n} · {now - self.t0:.0f}초 · 한 걸음 {sec:.2f}초 · GPU {self.mem[0] / 2 ** 30:.1f}GB"
                       + (f" · 손실 {float(loss):.4f}" if loss is not None else ""), flush=True)
+                self.check(trainer, now)
             if now - self.saved > args.ckpt_every:
                 self.saved = now
+                self.check(trainer, now)
                 path = work / f"model_ckpt_steps_{trainer.global_step}.ckpt"
-                trainer.save_checkpoint(str(path))
-                (work / "done.json").write_text(json.dumps({"steps": n, "items": self.items, "audio": self.audio}), encoding="utf-8")
-                for old in work.glob("model_ckpt_steps_*.ckpt"):
-                    if old != path:
-                        old.unlink()
+                save(trainer, path)
+                book = book_of(work)
+                book[path.name] = {"steps": n, "items": self.items, "audio": self.audio, "time": time.time(), "ok": False}
+                write_book(work, book)
                 print(f"걸음 {n}: 저장점 {path.name} ({time.time() - now:.0f}초)", flush=True)
             if n % SNAP == 0 and (n // SNAP) & (n // SNAP - 1) == 0:  # 250 · 500 · 1000 · 2000 … 걸음
                 self.snapshot(pl_module, n)
             if args.fake_oom and now - self.t0 > args.fake_oom:
                 raise RuntimeError("MPS backend out of memory (연습: 이어서 배우기 시험)")
+            if args.fake_gpu and not self.faked and now - self.t0 > args.fake_gpu:
+                self.faked = True  # 맥 GPU 오류가 날 때 찍히는 줄과 같게 (train이 보고 이 프로세스를 멈추는지 시험)
+                print("Error: command buffer exited with error status.\n\tThe Metal Performance Shaders operations "
+                      "encoded on it may not have completed.\n\tError: \n\t(null)\n\tInsufficient Memory "
+                      "(00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory) (연습)", file=sys.stderr, flush=True)
             if now > args.until:
                 trainer.should_stop = True
             if len(self.times) == 5 or now - self.said > 600:
                 self.said = now
-                progress("보코더 실험", f"학습 걸음 {n} · 한 걸음 {sec:.1f}초 ({describe(plan)}), "
+                mem = (f" · GPU {torch.mps.current_allocated_memory() / 2 ** 30:.1f}GB"
+                       f" (드라이버 {torch.mps.driver_allocated_memory() / 2 ** 30:.1f}GB)" if dev == "mps" else "")
+                progress("보코더 실험", f"학습 걸음 {n} · 한 걸음 {sec:.1f}초 ({describe(plan)}){mem}, "
                          f"남은 {(args.until - now) / 60:.0f}분")
 
+        def check(self, trainer, now):
+            """손실이 0 · NaN이면 GPU가 계산을 무시하고 있다 (맥 GPU 오류 뒤): 바로 끝낸다 (BAD_LOSS).
+            멀쩡하면 CONFIRM초 넘게 지난 저장점 · 생성기를 확인된 것으로 치고, 그보다 앞선 저장점은 지운다 (하나에 1GB쯤)."""
+            loss = trainer.callback_metrics.get("loss")
+            if loss is None:
+                return
+            loss = float(loss)
+            if not math.isfinite(loss) or abs(loss) < 1e-6:
+                print(f"손실 이상 ({loss}): GPU가 계산을 무시하고 있어요", flush=True)
+                sys.stderr.flush()
+                os._exit(BAD_LOSS)
+            book = book_of(work)
+            new = [k for k, v in book.items() if not v.get("ok") and now - v["time"] > CONFIRM]
+            if new:
+                for k in new:
+                    book[k]["ok"] = True
+                last = max(book[k]["steps"] for k in new)
+                for q in work.glob("model_ckpt_steps_*.ckpt"):
+                    if book.get(q.name, {}).get("ok") and book[q.name]["steps"] < last:
+                        q.unlink()
+                        book.pop(q.name)
+                write_book(work, book)
+            confirm_snaps(work, before=now - CONFIRM)
+
         def snapshot(self, pl_module, n):  # 생성기만 따로 남긴다 (60MB쯤): 학습 뒤 trend가 걸음마다 얼마나 나아졌는지 잰다
-            try:
+            try:  # 확인되면 (check) .tmp를 뗀다
                 (work / "snap").mkdir(exist_ok=True)
                 gen = {k[len("generator."):]: v.detach().cpu() for k, v in pl_module.state_dict().items()
                        if k.startswith("generator.")}
-                torch.save({"generator": gen}, str(work / "snap" / f"gen_{n:06d}.pt"))
+                part = work / "snap" / f"gen_{n:06d}.pt.part"  # 쓰다가 꺼져도 반쪽 파일이 남지 않게
+                torch.save({"generator": gen}, str(part))
+                part.replace(part.with_suffix(".tmp"))
             except Exception as e:  # 덤이라 학습은 멈추지 않는다
                 print(f"걸음 {n}: 생성기 따로 남기기 실패 ({type(e).__name__}: {e})", flush=True)
 
@@ -448,7 +594,8 @@ def train1(args):
             if args.probe:
                 print(f"잴 걸음을 다 하기 전에 학습이 끝났어요 ({len(self.times)}걸음)", flush=True)
                 os._exit(1)
-            trainer.save_checkpoint(str(work / "final.ckpt"))
+            self.check(trainer, time.time())
+            save(trainer, work / "final.ckpt")
             n = self.steps
             sec = sorted(self.times[-50:])[len(self.times[-50:]) // 2] if self.times else 0.0
             print(f"배운 걸음 {n} → {work / 'final.ckpt'}", flush=True)
@@ -562,6 +709,11 @@ def check(args):
     worst, snr = 0.0, []
     for mel, f0, _, _ in valid_items(args.data, 3):
         ya, yb = run_onnx(a, mel, f0), run_onnx(b, mel, f0)
+        for p, y in zip(args.onnx, (ya, yb)):  # 망가진 보코더로 몇십 분씩 렌더하지 않게 (OpenUtau는 NaN을 소리 없음으로 쓴다)
+            if not np.isfinite(y).all():
+                raise SystemExit(f"{Path(p).name}: 출력에 NaN · 무한대가 있어요")
+            if np.abs(y).max() < 1e-4:
+                raise SystemExit(f"{Path(p).name}: 출력에 소리가 없어요")
         n = min(len(ya), len(yb))
         d = np.abs(ya[:n] - yb[:n])
         worst = max(worst, float(d.max()))
@@ -650,9 +802,16 @@ def trend(args):
     if len(snaps) > args.max_snaps:  # 마지막 것은 늘 넣고 앞에서 고르게
         idx = sorted({round(i * (len(snaps) - 1) / (args.max_snaps - 1)) for i in range(args.max_snaps)})
         snaps = [snaps[i] for i in idx]
-    old = json.loads(Path(args.cwd, args.copysyn).read_text(encoding="utf-8")) if args.copysyn else {}
-    res = {"원래 보코더 (0걸음)": old["원래 보코더"]} if "원래 보코더" in old else {}
+    old = Path(args.cwd, args.copysyn or "-")
+    old = json.loads(old.read_text(encoding="utf-8")) if args.copysyn and old.exists() else {}
     items = valid_items(Path(args.cwd, args.data), 10)
+    if "원래 보코더" in old:
+        res = {"원래 보코더 (0걸음)": old["원래 보코더"]}
+    elif args.base:  # copysyn을 못 했으면 (테토 보코더가 망가졌으면) 원래 보코더는 여기서 잰다
+        base = ort.InferenceSession(str(Path(args.cwd, args.base)), providers=["CPUExecutionProvider"])
+        res = {"원래 보코더 (0걸음)": measure(base, items)}
+    else:
+        res = {}
     tmp, per, skipped = Path(args.cwd, args.out or "trend_onnx").resolve(), 60.0, []
     tmp.mkdir(parents=True, exist_ok=True)
     for q in snaps:
@@ -661,9 +820,15 @@ def trend(args):
             continue
         t = time.time()
         out = tmp / (q.stem + ".onnx")
-        export_onnx(sv, q.resolve(), out)
-        res[f"{int(q.stem.split('_')[1])}걸음"] = r = measure(ort.InferenceSession(str(out), providers=["CPUExecutionProvider"]), items)
-        out.unlink()
+        try:
+            export_onnx(sv, q.resolve(), out)
+            r = measure(ort.InferenceSession(str(out), providers=["CPUExecutionProvider"]), items)
+        except Exception as e:  # 망가진 생성기 하나 때문에 나머지를 못 재지 않게
+            print(q.stem, f"못 잼 ({type(e).__name__}: {str(e)[:150]})", flush=True)
+            continue
+        finally:
+            out.unlink(missing_ok=True)
+        res[f"{int(q.stem.split('_')[1])}걸음"] = r
         per = time.time() - t
         print(q.stem, json.dumps({k: round(v, 4) for k, v in r.items()}), f"({per:.0f}초)", flush=True)
     if "테토 보코더" in old:
@@ -690,8 +855,10 @@ def main():
     ap.add_argument("--recompute", action="store_true", help="train1: 생성기 중간값을 거꾸로 갈 때 다시 계산")
     ap.add_argument("--probe", type=int, default=0, help="train1: 이만큼 걸음만 재고 끝 (저장하지 않음)")
     ap.add_argument("--plan", help="train: probe가 고른 설정 (LADDER 번호)")
-    ap.add_argument("--ckpt-every", type=float, default=1200, help="train: 이 초마다 이어서 배울 저장점")
+    ap.add_argument("--ckpt-every", type=float, default=600, help="train: 이 초마다 이어서 배울 저장점")
     ap.add_argument("--fake-oom", type=float, default=0, help="train: 짧은 시험에서 이 초 뒤 한 번 일부러 멈춰 이어서 배우기 시험")
+    ap.add_argument("--fake-gpu", type=float, default=0,
+                    help="train: 짧은 시험에서 두 번째 프로세스가 이 초 뒤 맥 GPU 오류 줄을 일부러 찍는다")
     ap.add_argument("--val", type=int, default=200, help="prep: 설정에 쓸 검증 간격 (MPS에서는 끈다)")
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--train-mpd", action="store_true", help="MPD도 배운다 (기본은 README 권장대로 고정)")
@@ -702,6 +869,7 @@ def main():
     ap.add_argument("--require-snr", type=float, help="check: 두 ONNX 출력 SNR이 이보다 낮으면 실패 (dB)")
     ap.add_argument("--min-rate", type=float, help="probe: 1초에 배우는 녹음이 이 초보다 짧으면 실패 (느린 맥)")
     ap.add_argument("--copysyn", help="trend: copysyn --json 결과 (원래 보코더 · 마지막 줄로)")
+    ap.add_argument("--base", help="trend: copysyn 결과가 없으면 원래 보코더 줄을 이 ONNX로 잰다")
     ap.add_argument("--max-snaps", type=int, default=8, help="trend: 잴 생성기 수 (고르게 고른다)")
     ap.add_argument("--deadline", type=float, default=float("inf"), help="trend: 유닉스 초. 못 맞출 것은 건너뛴다")
     args = ap.parse_args()

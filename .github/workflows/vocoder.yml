@@ -134,6 +134,7 @@ jobs:
           devtools/openutau_harness/get_openutau.sh hnsep_240512 "$VOC"
           ls "$DEP"
           test -f "$DEP/$VOC.onnx"
+          cp "$DEP/$VOC.onnx" "$W/base.onnx"  # 원래 보코더 (테토 보코더로 바꿔 끼운 뒤 되돌리고, 견줄 때 쓴다)
       - name: 테토 음원 받기 (공식 배포, 이 실험에만 쓰고 올리지 않아요)
         run: |
           curl -fL --retry 3 -o "$W/teto.zip" https://kasaneteto.jp/assets/download/utau/TETO-OUset240323.zip
@@ -206,11 +207,12 @@ jobs:
             --label "원래 보코더" --json "$R/ab_base.json" --keep "$W/keep"
           echo "AB_END=$(date +%s)" >> "$GITHUB_ENV"
       - name: 테토 보코더 배우기 (남은 시간에서 다시 렌더 · 채점 시간을 빼고)
+        id: train
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          # 짧은 시험은 8분만, 1분 반마다 저장하고 한 번 일부러 멈춰서 이어서 배우기까지 본다
-          if [ -n "$SMOKE" ]; then until=$(( $(date +%s) + 480 )); extra="--ckpt-every 90 --fake-oom 200"
+          # 짧은 시험은 10분만, 1분 반마다 저장하고 메모리 오류 · 맥 GPU 오류를 한 번씩 일부러 내서 이어서 배우기까지 본다
+          if [ -n "$SMOKE" ]; then until=$(( $(date +%s) + 600 )); extra="--ckpt-every 90 --fake-oom 200 --fake-gpu 100"
           else until=$(( T0 + 355 * 60 - (AB_END - AB_START) - 40 * 60 )); extra=""; fi
           echo "다시 렌더 $(( (AB_END - AB_START) / 60 ))분, 배우기는 $(( (until - $(date +%s)) / 60 ))분"
           pkill -f torch_shm_manager || true  # 앞 단계에서 남은 파이썬 일꾼 (메모리를 덜 쓰게)
@@ -221,10 +223,15 @@ jobs:
       - name: 테토 보코더 내보내기 · 바꿔 끼우기 (OpenUtau가 쓰는 자리에, 렌더 캐시 비우고)
         run: |
           python devtools/vocoder_ft.py export --sv "$W/sv" --ckpt "$W/sv/experiments/teto_ft/final.ckpt" --out "$W/teto.onnx"
-          cp "$DEP/$VOC.onnx" "$W/base.onnx"
           python devtools/vocoder_ft.py check "$W/base.onnx" "$W/teto.onnx" --data "$W/data" | tee "$R/teto_vs_base.json"
           cp "$W/teto.onnx" "$DEP/$VOC.onnx"
           rm -rf "$HOME/Library/Caches/OpenUtau"
+      - name: 배우지 않은 테토 녹음 다시 만들기 · 음 높이 바꿔 부르기 (렌더보다 먼저, 렌더가 안 돼도 이 숫자는 남게)
+        run: |
+          set -o pipefail
+          python devtools/vocoder_ft.py copysyn "원래 보코더=$W/base.onnx" "테토 보코더=$W/teto.onnx" --data "$W/data" \
+            --json "$R/copysyn.json" | tee "$W/copysyn.txt"
+          sed -n '/^### /,$p' "$W/copysyn.txt" >> "$GITHUB_STEP_SUMMARY"
       - name: 같은 결과를 테토 보코더로 다시 렌더
         run: |
           export CSC=$(ls -d "$DOTNET_ROOT"/sdk/*/Roslyn/bincore/csc.dll | tail -1)
@@ -239,12 +246,6 @@ jobs:
           if len(same) == len(rows):
               raise SystemExit("테토 보코더로 바꿔 끼웠는데 렌더가 그대로예요 (보코더를 안 읽었어요)")
           PY
-      - name: 배우지 않은 테토 녹음 다시 만들기 · 음 높이 바꿔 부르기
-        run: |
-          set -o pipefail
-          python devtools/vocoder_ft.py copysyn "원래 보코더=$W/base.onnx" "테토 보코더=$W/teto.onnx" --data "$W/data" \
-            --json "$R/copysyn.json" | tee "$W/copysyn.txt"
-          sed -n '/^### /,$p' "$W/copysyn.txt" >> "$GITHUB_STEP_SUMMARY"
       - name: 자연스러움 AI 채점 (SingMOS-Pro · SingMOS v1 · UTMOS) · 표
         run: |
           set -o pipefail
@@ -252,10 +253,11 @@ jobs:
           python devtools/vocoder_ab.py table "$R/ab_base.json" "$R/ab_teto.json" --mos "$R/mos.json" | tee "$R/table.md"
           { cat "$R/table.md"; sed -n '/^### /,$p' "$W/mos.txt"; echo; sed -n '/^|/,$p' "$W/accuracy.txt"; } >> "$GITHUB_STEP_SUMMARY"
       - name: 배우는 동안 남긴 테토 보코더 견주기 (250 · 500 · 1000 … 걸음, 녹음 다시 만들기만, 시간이 남으면)
+        if: always() && steps.train.outcome == 'success'  # 마지막 보코더 · 렌더가 잘못돼도 걸음마다 숫자는 남게
         continue-on-error: true  # 덤이라 실패해도 위 결과는 그대로
         run: |
           set -o pipefail
-          python devtools/vocoder_ft.py trend --sv "$W/sv" --data "$W/data" --copysyn "$R/copysyn.json" \
+          python devtools/vocoder_ft.py trend --sv "$W/sv" --data "$W/data" --copysyn "$R/copysyn.json" --base "$W/base.onnx" \
             --deadline $(( T0 + 355 * 60 - 12 * 60 )) --out "$W/trend_onnx" --json "$R/trend.json" | tee "$W/trend.txt"
           sed -n '/^### /,$p' "$W/trend.txt" >> "$GITHUB_STEP_SUMMARY"
       - name: 테토로 배운 것 · 렌더 지우기 (실패해도)
