@@ -32,6 +32,7 @@ from ci_status import post as progress  # devtools/ (이 파일 옆)
 CONFIG = "configs/teto_ft.yaml"
 NAME = "teto_ft"
 HOP, SR = 512, 44100
+SNAP = 250  # 학습 중 생성기를 따로 남기는 걸음 (SNAP · 2 SNAP · 4 SNAP …): 얼마나 배워야 나아지는지 보려고
 LADDER = [(2, 16, True), (4, 16, True), (4, 16, False), (4, 32, True), (4, 32, False)]
 # 배울 설정 (배치, 조각 길이 mel 틀, 생성기 중간값 다시 계산하기). 앞일수록 메모리를 덜 쓴다.
 # probe는 앞에서부터 올라가며 재고 (메모리 오류 · 디스크 넘침이 나면 멈춘다) 그중 가장 빠른 것을 고르고,
@@ -411,6 +412,8 @@ def train1(args):
                     if old != path:
                         old.unlink()
                 print(f"걸음 {n}: 저장점 {path.name} ({time.time() - now:.0f}초)", flush=True)
+            if n % SNAP == 0 and (n // SNAP) & (n // SNAP - 1) == 0:  # 250 · 500 · 1000 · 2000 … 걸음
+                self.snapshot(pl_module, n)
             if args.fake_oom and now - self.t0 > args.fake_oom:
                 raise RuntimeError("MPS backend out of memory (연습: 이어서 배우기 시험)")
             if now > args.until:
@@ -419,6 +422,15 @@ def train1(args):
                 self.said = now
                 progress("보코더 실험", f"학습 걸음 {n} · 한 걸음 {sec:.1f}초 ({describe(plan)}), "
                          f"남은 {(args.until - now) / 60:.0f}분")
+
+        def snapshot(self, pl_module, n):  # 생성기만 따로 남긴다 (60MB쯤): 학습 뒤 trend가 걸음마다 얼마나 나아졌는지 잰다
+            try:
+                (work / "snap").mkdir(exist_ok=True)
+                gen = {k[len("generator."):]: v.detach().cpu() for k, v in pl_module.state_dict().items()
+                       if k.startswith("generator.")}
+                torch.save({"generator": gen}, str(work / "snap" / f"gen_{n:06d}.pt"))
+            except Exception as e:  # 덤이라 학습은 멈추지 않는다
+                print(f"걸음 {n}: 생성기 따로 남기기 실패 ({type(e).__name__}: {e})", flush=True)
 
         def on_exception(self, trainer, pl_module, exception):  # 정리 단계가 멈추지 않게 바로 끝낸다 (실패로)
             import traceback
@@ -491,12 +503,14 @@ def build_onnx_model(sv, ckpt):
 
 
 def export(args):
+    export_onnx(enter(args.sv), Path(args.cwd, args.ckpt).resolve(), Path(args.cwd, args.out).resolve())
+
+
+def export_onnx(sv, ckpt, out):
     import onnx
     import torch
 
-    out = Path(args.out).resolve()
-    sv = enter(args.sv)
-    model = build_onnx_model(sv, Path(args.ckpt).resolve() if Path(args.ckpt).is_absolute() else Path(args.cwd, args.ckpt))
+    model = build_onnx_model(sv, ckpt)
     tmp = out.with_suffix(".raw.onnx")
     out.parent.mkdir(parents=True, exist_ok=True)
     mel = torch.randn(1, 10, 128)
@@ -578,46 +592,91 @@ def f0_of(y, sr=44100, hop=512, lo=65, hi=1100):
 def copysyn(args):
     """배우지 않은 테토 녹음: mel · f0 → 각 보코더 → 원래 녹음과 로그 스펙트럼 거리 (작을수록 원래와 같다).
     음 높이를 ±4 · ±7반음 바꿔 넣으면 그 음 높이로 부르는지 (센트 오차 중앙값; 테토만 배워서 음 높이 따라가기를 잃지 않았는지)."""
-    import numpy as np
     import onnxruntime as ort
 
     items = valid_items(args.data, 10)
     res = {}
     for spec in args.onnx:
         name, path = spec.split("=", 1)
-        sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
-        dist, cents = {512: [], 2048: []}, {k: [] for k in (-7, -4, 4, 7)}
-        for mel, f0, audio, uv in items:
-            y = run_onnx(sess, mel, f0)
-            n = min(len(y), len(audio))
-            for n_fft in dist:
-                a, b = logspec(audio[:n], n_fft, n_fft // 4), logspec(y[:n], n_fft, n_fft // 4)
-                loud = a.max(axis=1) > a.max() - 2  # 소리 나는 틀만 (가장 큰 틀에서 40dB 안)
-                if loud.any():
-                    dist[n_fft].append(float(np.mean(np.abs(a[loud] - b[loud]))))
-            for k in cents:
-                target = f0 * 2 ** (k / 12)
-                got = f0_of(run_onnx(sess, mel, target))
-                m = min(len(got), len(target))
-                ok = (got[:m] > 0) & ~uv[:m]  # 녹음에서 소리 나는(유성) 틀만
-                if ok.sum() > 10:
-                    cents[k].append(float(np.median(np.abs(1200 * np.log2(got[:m][ok] / target[:m][ok])))))
-        res[name] = {"logspec_512": float(np.mean(dist[512])), "logspec_2048": float(np.mean(dist[2048])),
-                     **{f"cents_{k:+d}": float(np.mean(v)) for k, v in cents.items() if v}}
+        res[name] = measure(ort.InferenceSession(path, providers=["CPUExecutionProvider"]), items)
         print(name, json.dumps({k: round(v, 4) for k, v in res[name].items()}, ensure_ascii=False), flush=True)
     print("\n### 테토 녹음 다시 만들기 (배우지 않은 검증용 10개)\n")
-    print("| 보코더 | 로그 스펙트럼 거리 (짧은 창) | (긴 창) | 음 높이 바꿔 부르기 센트 오차 −7 · −4 · +4 · +7반음 |")
-    print("|---|---|---|---|")
-    for name, r in res.items():
-        c = " · ".join(f"{r.get(f'cents_{k:+d}', float('nan')):.1f}" for k in (-7, -4, 4, 7))
-        print(f"| {name} | {r['logspec_512']:.4f} | {r['logspec_2048']:.4f} | {c} |")
+    table(res, "보코더")
     if args.json:
         Path(args.json).write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+def measure(sess, items):
+    import numpy as np
+
+    dist, cents = {512: [], 2048: []}, {k: [] for k in (-7, -4, 4, 7)}
+    for mel, f0, audio, uv in items:
+        y = run_onnx(sess, mel, f0)
+        n = min(len(y), len(audio))
+        for n_fft in dist:
+            a, b = logspec(audio[:n], n_fft, n_fft // 4), logspec(y[:n], n_fft, n_fft // 4)
+            loud = a.max(axis=1) > a.max() - 2  # 소리 나는 틀만 (가장 큰 틀에서 40dB 안)
+            if loud.any():
+                dist[n_fft].append(float(np.mean(np.abs(a[loud] - b[loud]))))
+        for k in cents:
+            target = f0 * 2 ** (k / 12)
+            got = f0_of(run_onnx(sess, mel, target))
+            m = min(len(got), len(target))
+            ok = (got[:m] > 0) & ~uv[:m]  # 녹음에서 소리 나는(유성) 틀만
+            if ok.sum() > 10:
+                cents[k].append(float(np.median(np.abs(1200 * np.log2(got[:m][ok] / target[:m][ok])))))
+    return {"logspec_512": float(np.mean(dist[512])), "logspec_2048": float(np.mean(dist[2048])),
+            **{f"cents_{k:+d}": float(np.mean(v)) for k, v in cents.items() if v}}
+
+
+def table(res, first):
+    print(f"| {first} | 로그 스펙트럼 거리 (짧은 창) | (긴 창) | 음 높이 바꿔 부르기 센트 오차 −7 · −4 · +4 · +7반음 |")
+    print("|---|---|---|---|")
+    for name, r in res.items():
+        c = " · ".join(f"{r.get(f'cents_{k:+d}', float('nan')):.1f}" for k in (-7, -4, 4, 7))
+        print(f"| {name} | {r['logspec_512']:.4f} | {r['logspec_2048']:.4f} | {c} |", flush=True)
+
+
+def trend(args):
+    """배우는 동안 저장점마다 남긴 생성기(experiments/teto_ft/snap/gen_N.pt)를 ONNX로 내보내 copysyn과 같은 잣대로 잰다.
+    몇 걸음쯤부터는 더 배워도 나아지지 않는지 보려고 (앱에서 얼마나 배울지 정할 때). 원래 보코더 · 마지막은 --copysyn 결과를
+    그대로 쓴다. 많으면 --max-snaps개를 고르게 고르고, --deadline(유닉스 초)에 못 맞출 것 같으면 남은 것은 건너뛴다."""
+    import onnxruntime as ort
+
+    sv = enter(args.sv)
+    snaps = sorted((Path("experiments") / NAME / "snap").glob("gen_*.pt"), key=lambda q: int(q.stem.split("_")[1]))
+    if len(snaps) > args.max_snaps:  # 마지막 것은 늘 넣고 앞에서 고르게
+        idx = sorted({round(i * (len(snaps) - 1) / (args.max_snaps - 1)) for i in range(args.max_snaps)})
+        snaps = [snaps[i] for i in idx]
+    old = json.loads(Path(args.cwd, args.copysyn).read_text(encoding="utf-8")) if args.copysyn else {}
+    res = {"원래 보코더 (0걸음)": old["원래 보코더"]} if "원래 보코더" in old else {}
+    items = valid_items(Path(args.cwd, args.data), 10)
+    tmp, per, skipped = Path(args.cwd, args.out or "trend_onnx").resolve(), 60.0, []
+    tmp.mkdir(parents=True, exist_ok=True)
+    for q in snaps:
+        if time.time() + per * 1.5 > args.deadline:
+            skipped.append(q)
+            continue
+        t = time.time()
+        out = tmp / (q.stem + ".onnx")
+        export_onnx(sv, q.resolve(), out)
+        res[f"{int(q.stem.split('_')[1])}걸음"] = r = measure(ort.InferenceSession(str(out), providers=["CPUExecutionProvider"]), items)
+        out.unlink()
+        per = time.time() - t
+        print(q.stem, json.dumps({k: round(v, 4) for k, v in r.items()}), f"({per:.0f}초)", flush=True)
+    if "테토 보코더" in old:
+        res["마지막 (final.ckpt)"] = old["테토 보코더"]
+    if skipped:
+        print(f"시간이 모자라 {len(skipped)}개 건너뜀: {[q.stem for q in skipped]}", flush=True)
+    print("\n### 배우는 동안 테토 녹음 다시 만들기 (걸음마다, 배우지 않은 검증용 10개)\n")
+    table(res, "배운 걸음")
+    if args.json:
+        Path(args.cwd, args.json).write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["prep", "probe", "train", "train1", "export", "check", "copysyn"])
+    ap.add_argument("cmd", choices=["prep", "probe", "train", "train1", "export", "check", "copysyn", "trend"])
     ap.add_argument("onnx", nargs="*")
     ap.add_argument("--sv")
     ap.add_argument("--voicebank")
@@ -640,6 +699,9 @@ def main():
     ap.add_argument("--json")
     ap.add_argument("--require-snr", type=float, help="check: 두 ONNX 출력 SNR이 이보다 낮으면 실패 (dB)")
     ap.add_argument("--min-rate", type=float, help="probe: 1초에 배우는 녹음이 이 초보다 짧으면 실패 (느린 맥)")
+    ap.add_argument("--copysyn", help="trend: copysyn --json 결과 (원래 보코더 · 마지막 줄로)")
+    ap.add_argument("--max-snaps", type=int, default=8, help="trend: 잴 생성기 수 (고르게 고른다)")
+    ap.add_argument("--deadline", type=float, default=float("inf"), help="trend: 유닉스 초. 못 맞출 것은 건너뛴다")
     args = ap.parse_args()
     if args.cmd == "copysyn" and args.onnx and "=" not in args.onnx[0]:
         ap.error("copysyn은 이름=경로.onnx 로")
@@ -647,7 +709,7 @@ def main():
         ap.error("train은 --plan (probe가 고른 것)과 함께")
     args.cwd = os.getcwd()
     {"prep": prep, "probe": probe, "train": train, "train1": train1, "export": export, "check": check,
-     "copysyn": copysyn}[args.cmd](args)
+     "copysyn": copysyn, "trend": trend}[args.cmd](args)
 
 
 if __name__ == "__main__":
