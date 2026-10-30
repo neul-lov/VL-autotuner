@@ -97,6 +97,13 @@ jobs:
           echo "T0=$(date +%s)" >> "$GITHUB_ENV"
           echo "DEP=$HOME/Library/OpenUtau/Dependencies/$VOC" >> "$GITHUB_ENV"
           sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize; sw_vers -productVersion; df -h "$GITHUB_WORKSPACE"
+          # macos-latest는 메모리 7GB 맥과 14GB 맥이 섞여 걸린다. 7GB 맥은 가장 작은 설정(배치 2 · 16틀 · 다시 계산)도
+          # GPU 메모리 한도 4.2GB에 안 맞고(4.3GB) 한도를 풀면 디스크로 넘쳐 몇십 배 느려서, 바로 멈추고 이 잡만 다시 돌린다
+          mem=$(sysctl -n hw.memsize)
+          if [ "$mem" -lt 12000000000 ]; then
+            echo "::error::메모리 $(( mem / 1073741824 ))GB 맥이에요. 14GB 맥이 걸리게 이 잡만 다시 돌려 주세요"
+            exit 1
+          fi
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
