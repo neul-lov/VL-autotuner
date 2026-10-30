@@ -5,13 +5,17 @@
 10ms 단위로 준다. 그 시각으로 음표 경계를 옮기거나 음표를 나눈다 (UTAU처럼 음표 시작 = 모음 시작, 자음은 그 앞).
 
 모델: wolfgitpr/HubertFA v0.0.7 일본어 노래 모델 (처음 쓸 때 한 번 받는다, 판 고정 + SHA-256). 한글은 OpenUtau KO→JA처럼
-일본어 음소로 바꿔서 맞춘다. 디코더는 HubertFA(Apache-2.0)의 tools/decoder.py를 옮겼다.
+일본어 음소로 바꿔서 맞춘다. KO_DECODE를 켜면 한글 프레이즈는 노래할 때 소리 나는 대로의 한국어 발음(ko_phones: 연음 ·
+비음화 …)으로도 맞춰서 고른 음절은 그 결과를 쓴다 (모델은 그대로, 한국어 음소마다 비슷한 일본어 음소 줄을 빌린다).
+디코더는 HubertFA(Apache-2.0)의 tools/decoder.py를 옮겼다.
 """
 import importlib.util
 import json
 from pathlib import Path
 
 import numpy as np
+
+from . import ko_phones
 
 HFA_URL = "https://github.com/wolfgitpr/HubertFA/releases/download/v0.0.7/1218_hfa_model_new_dict.zip"
 HFA_SHA256 = "48bd6dbcc293e47cc6cbcc556baf575e3d91d61d0ac88ddeccd6098f8f346fa2"
@@ -37,6 +41,22 @@ WIN_BEFORE, WIN_AFTER = 0.4, 0.3  # 초. 프레이즈 앞뒤로 모델에 더 �
 KO_FINALS = "ja"
 KO_EO = "ja"
 VOWELS = {"a", "i", "u", "e", "o", "N", "zh/e"}
+# 한글 프레이즈를 한국어 발음으로도 맞추기. "" = 일본어 음소로만. "<발음>/<음절>[+p]":
+#   발음 "ko": 한국어 음소마다 따로 한 줄 (KO_JA의 일본어 줄을 복사해서, 같은 줄을 빌린 음소끼리도 다른 음소로),
+#        "g2p": 한국어 발음을 KO_JA의 일본어 음소 이름으로 (같은 일본어 음소는 한 줄, 막힘은 쉼과 같아서 뺀다)
+#   음절 "all": 모든 음절을 한국어 발음 결과로, "vowel": 맨 앞 · 받침 뒤의 ㅇ 음절만 (먹어 → 머거처럼 연음되는 곳),
+#        "onset": ㅇ 음절 모두. "+p"를 붙이면 발음을 프레이즈마다 따로 정한다 (쉼을 건너 연음 · 울림소리로 잇지 않게)
+# CSD 사람 노래(engines.yml align-ko)에서 모음 시작 정답 50ms 안: 정확도 비교 12곡 0.758 → 0.762, 나머지 38곡 0.823 → 0.834,
+# 분리한 보컬 12곡 0.737 → 0.744 (받침 뒤 ㅇ 음절만 보면 0.749 → 0.842). "ko/all"은 분리한 보컬 0.750 · 나머지 0.835지만
+# 12곡은 0.755로 나빠지고 (울리는 자음 · 반모음이 나빠진다), "+p" · "g2p"는 조금씩 못했다
+KO_DECODE = "ko/vowel"
+# 한국어 음소 (ko_phones) → 빌려 쓸 일본어 음소 (hangul_phones와 같은 뜻). 받침 막힘은 쉼과 같은 cl
+KO_JA = {"ɐ": "a", "ɛ": "e", "e": "e", "ʌ": "o", "o": "o", "u": "u", "ɨ": "u", "i": "i",
+         "j": "y", "w": "w", "ɥ": "w", "ɰ": "u",
+         "k": "k", "kʰ": "k", "k͈": "k", "ɡ": "g", "t": "t", "tʰ": "t", "t͈": "t", "d": "d",
+         "p": "p", "pʰ": "p", "p͈": "p", "b": "b", "sʰ": "s", "s͈": "s", "ɕʰ": "sh", "ɕ͈": "sh",
+         "h": "h", "ç": "h", "ɦ": "h", "tɕ": "ch", "tɕʰ": "ch", "tɕ͈": "ch", "dʑ": "j",
+         "n": "n", "m": "m", "ŋ": "N", "ɲ": "ny", "ɾ": "r", "ɭ": "r", "k̚": "cl", "t̚": "cl", "p̚": "cl"}
 LAST = []  # 마지막 조교의 프레이즈마다 {확신, 맞춤 여부, 옮긴 거리} (시험 기록용)
 
 
@@ -227,6 +247,7 @@ class Aligner:
                     self.dict[k.strip()] = v.strip().split()
         self.ids = self.vocab["vocab"]
         self.sil = self.ids.get("SP", 0)
+        self.ko_mode = KO_DECODE
 
     def phones(self, syl, prev=None):
         """음절 → 모델 음소 목록 (없는 음소가 있으면 None). っ · 받침 막힘(cl)은 모델에서 쉼(SP)과 같은 음소라서
@@ -262,23 +283,104 @@ class Aligner:
             ph_word += [i] * len(ph) + [-1]
         return ph_seq, ph_word
 
-    def align(self, y, sr, syls):
-        """y: 프레이즈 소리 (앞뒤 조금 여유), syls: 음절 목록 → ([(시작, 모음 시작, 끝)] 음절마다 또는 None, 확신)."""
+    def _ja_name(self, p):
+        """한국어 음소 → 빌려 쓸 일본어 음소의 모델 이름 (모델에 없으면 None)."""
+        q = KO_JA.get(p)
+        return next((x for x in (self.prefix + q, q) if x in self.ids), None) if q else None
+
+    def ko_sequence(self, syls, breaks=(), how="ko"):
+        """한글만인 음절 목록 → 한국어 발음 (음소 순서 (앞뒤 · 사이에 SP), 음소마다 음절 번호) 또는 None.
+        breaks: 새 프레이즈가 시작하는 음절 번호 (발음을 따로 정한다). how "ko": 한국어 음소 이름 그대로,
+        "g2p": 빌릴 일본어 음소 이름으로 (막힘 cl은 쉼과 같은 음소라서 빼고, 음절 사이 SP가 맡는다)."""
+        if not syls or not all(ko_phones.is_hangul(s) for s in syls):
+            return None
+        cuts = sorted({0, len(syls), *(k for k in breaks if 0 < k < len(syls))})
+        ph_seq, ph_word = ["SP"], [-1]
+        for i, ph in enumerate(ph for a, b in zip(cuts, cuts[1:]) for ph in ko_phones.phrase(syls[a:b])):
+            q = [self._ja_name(p) for p in ph]
+            if not ph or None in q:
+                return None
+            if how == "g2p":
+                ph = [x for x in q if self.ids[x] != self.sil]
+            ph_seq += ph + ["SP"]
+            ph_word += [i] * len(ph) + [-1]
+        return ph_seq, ph_word
+
+    def forward(self, y, sr):
+        """소리 → (모델 출력 {이름: 값}, 모델에 준 표본 수)."""
         from . import audio
 
-        seq = self.sequence(syls)
+        wav = audio.resample(y, sr, self.sr).astype(np.float32)
+        outs = self.sess.run(None, {"waveform": wav[None, :]})
+        return dict(zip([o.name for o in self.sess.get_outputs()], outs)), len(wav)
+
+    def align(self, y, sr, syls, breaks=()):
+        """y: 프레이즈 소리 (앞뒤 조금 여유), syls: 음절 목록, breaks: 새 프레이즈가 시작하는 음절 번호
+        → ([(시작, 모음 시작, 끝)] 음절마다 또는 None, 확신)."""
+        if self.sequence(syls) is None:
+            return None, 0.0
+        res, n = self.forward(y, sr)
+        return self.times(res, n, syls, breaks)
+
+    def times(self, res, n, syls, breaks=()):
+        """모델 출력 → (음절마다 (시작, 모음 시작, 끝) 또는 None, 확신). ko_mode가 켜져 있고 한글만이면 한국어 발음으로도
+        맞춰서 고른 음절은 그 결과로 (KO_DECODE)."""
+        ph_seq, ph_word = self.sequence(syls)
+        ph_times, conf = _decode(self.vocab, self.hop, self.sr, n, res["ph_frame_logits"], res["ph_edge_logits"],
+                                 ph_seq)
+        ja = _syllable_times(ph_times, ph_seq, ph_word, len(syls), self.prefix)
+        if not self.ko_mode:
+            return ja, conf
+        how, _, which = self.ko_mode.partition("/")
+        ko, ko_conf = self.ko_times(res, n, syls, breaks if which.endswith("+p") else (), how)
+        which = which.removesuffix("+p")
+        if ko is None:
+            return ja, conf
+        if which == "all" or ja is None:
+            return ko, ko_conf
+        return _merge_ko(ja, ko, _ko_pick(syls, which)), conf
+
+    def ko_times(self, res, n, syls, breaks=(), how="ko"):
+        """모델 출력을 한국어 발음으로 맞춘 (음절마다 (시작, 모음 시작, 끝) 또는 None, 확신)."""
+        seq = self.ko_sequence(syls, breaks, how)
         if seq is None:
             return None, 0.0
         ph_seq, ph_word = seq
-        wav = audio.resample(y, sr, self.sr).astype(np.float32)
-        outs = self.sess.run(None, {"waveform": wav[None, :]})
-        res = dict(zip([o.name for o in self.sess.get_outputs()], outs))
-        ph_times, conf = _decode(self.vocab, self.hop, self.sr, len(wav), res["ph_frame_logits"],
-                                 res["ph_edge_logits"], ph_seq)
-        return _syllable_times(ph_times, ph_seq, ph_word, len(syls), self.prefix), conf
+        if how == "g2p":
+            ph_times, conf = _decode(self.vocab, self.hop, self.sr, n, res["ph_frame_logits"], res["ph_edge_logits"],
+                                     ph_seq)
+            return _syllable_times(ph_times, ph_seq, ph_word, len(syls), self.prefix), conf
+        # 한국어 음소마다 빌린 일본어 줄을 한 줄씩 (쉼은 0번, 나머지는 이름 순서: 한국어 음소로 배운 모델의 줄 순서와 같다)
+        names = sorted(set(ph_seq) - {"SP"})
+        rows = [self.sil] + [self.ids[self._ja_name(p)] for p in names]
+        vocab = {"vocab": {"SP": 0, **{p: i + 1 for i, p in enumerate(names)}}, "vocab_size": len(rows)}
+        ph_times, conf = _decode(vocab, self.hop, self.sr, n, res["ph_frame_logits"][:, rows], res["ph_edge_logits"],
+                                 ph_seq)
+        return _syllable_times(ph_times, ph_seq, ph_word, len(syls), "", ko_phones.VOWELS), conf
 
 
-def _syllable_times(ph_times, ph_seq, ph_word, n, prefix=""):
+def _ko_pick(syls, which):
+    """한국어 발음 결과를 쓸 음절 번호: "all" 모두, "vowel" 맨 앞 · 받침 뒤의 ㅇ 음절, "onset" ㅇ 음절 모두."""
+    if which == "all":
+        return set(range(len(syls)))
+    return {k for k, s in enumerate(syls) if (ord(s) - 0xAC00) // 588 == 11
+            and (which == "onset" or k == 0 or (ord(syls[k - 1]) - 0xAC00) % 28)}
+
+
+def _merge_ko(ja, ko, pick):
+    """일본어 발음 결과 ja에서 pick 음절만 한국어 발음 결과 ko로. 그 모음 시작이 이웃 음절 모음 시작과 40ms 안으로 붙거나
+    순서가 바뀌면 그 음절은 일본어 발음 결과 그대로 (두 맞추기가 음절 자리부터 다른 곳)."""
+    out = list(ja)
+    for k in sorted(pick):
+        v = ko[k][1]
+        lo = out[k - 1][1] + 0.04 if k else -np.inf
+        hi = out[k + 1][1] - 0.04 if k + 1 < len(out) else np.inf
+        if lo < v < hi:
+            out[k] = ko[k]
+    return out
+
+
+def _syllable_times(ph_times, ph_seq, ph_word, n, prefix="", vowels=VOWELS):
     """디코더 결과 [(시작, 끝, 음소 번호)] → 음절마다 (시작, 모음 시작, 끝). 한 음절이라도 빠지면 None."""
     out = [None] * n
     for a, b, k in ph_times:
@@ -288,7 +390,7 @@ def _syllable_times(ph_times, ph_seq, ph_word, n, prefix=""):
         name = ph_seq[k][len(prefix):] if prefix and ph_seq[k].startswith(prefix) else ph_seq[k]
         cur = out[w] or [a, None, b]
         cur[2] = b
-        if cur[1] is None and (name in VOWELS or name == "cl"):
+        if cur[1] is None and (name in vowels or name == "cl"):
             cur[1] = a
         out[w] = cur
     if any(x is None for x in out):
@@ -440,8 +542,13 @@ def _fit(al, g, a, b, y, sr, tag):
     if al.sequence(syls) is None:
         LAST.append({"phrase": tag, "syls": syls, "unknown": "".join(syls)[:40]})
         return None
+    breaks, k = [], 0  # 새 프레이즈가 시작하는 음절 번호 (한국어 발음은 쉼을 건너 잇지 않는다)
+    for ph in nt._phrases(core_g):
+        if k:
+            breaks.append(k)
+        k += sum(x.lyric != "+" for x in ph)
     try:
-        times, conf = _align_tta(al, y, sr, a, b, syls)
+        times, conf = _align_tta(al, y, sr, a, b, syls, breaks)
     except Exception as e:  # 모델이 이 소리를 못 다루면 이 프레이즈만 원래대로
         times, conf = None, 0.0
         LAST.append({"phrase": tag, "error": str(e)[:200]})
@@ -463,14 +570,14 @@ def _fit(al, g, a, b, y, sr, tag):
     return new
 
 
-def _align_tta(al, y, sr, a, b, syls):
+def _align_tta(al, y, sr, a, b, syls, breaks=()):
     """al.align을 구간 시작을 조금씩 밀어 TTA번 돌려서 음절마다 (시작, 모음 시작, 끝)의 가운데 값 (구간 시작 a 기준).
     한 번은 틀려도 나머지가 맞으면 가운데 값은 맞는다. 맞춘 번이 없으면 (None, 확신)."""
     hop = getattr(al, "hop", 441) / getattr(al, "sr", 44100)
     runs, confs = [], []
     for k in range(max(1, TTA)):
         d = k * hop / max(1, TTA)
-        times, conf = al.align(y[int((a + d) * sr):int(b * sr)], sr, syls)
+        times, conf = al.align(y[int((a + d) * sr):int(b * sr)], sr, syls, breaks)
         confs.append(conf)
         if times is not None:
             runs.append(np.array(times, dtype=float) + d)

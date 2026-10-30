@@ -53,8 +53,10 @@ OFF = {
     "이웃 프레이즈 함께 맞추기": [(align_fa, "JOINT", 0.0)],
     "가사 맞추기 시간 보정 · 덜 버리기": [(align_fa, "OFFSET", 0.0), (align_fa, "SOFT_SPLIT", False),
                                 (align_fa, "GAP_EXTEND", False)],
+    # PR13 뒤: 받침 뒤 ㅇ 음절(먹어 → 머거)은 한국어 발음으로도 맞춘 결과로 (같은 모델, align_fa.KO_DECODE)
+    "한국어 발음으로 맞추기": [(align_fa, "KO_DECODE", "")],
 }
-PR10 = OFF["이웃 프레이즈 함께 맞추기"] + OFF["가사 맞추기 시간 보정 · 덜 버리기"]
+PR10 = OFF["이웃 프레이즈 함께 맞추기"] + OFF["가사 맞추기 시간 보정 · 덜 버리기"] + OFF["한국어 발음으로 맞추기"]
 OLD_RENDER = [(tune_mod, "RENDERER", "WORLDLINE-R"), (tune_mod, "RESAMPLER", None)]  # PR12까지 (main) 렌더러
 FUSION = [(None, "pitch_method", "fusion")]
 # 기본값을 바꾸면 어떨지 (새 기본에 더해서)
@@ -589,11 +591,11 @@ def fa_check(csd, lines=3):
         a, b = max(0.0, g[0][0] - 0.4), g[-1][1] + 0.3
         times, conf = al.align(y[int(a * sr):int(b * sr)], sr, [r[3] for r in syl])
         if times is None:
-            print(f"  {name} {''.join(r[3] for r in syl)}: 맞추지 못함 (확신 {conf:.3f})", flush=True)
+            print(f"  {name} 음절 {len(syl)}개: 맞추지 못함 (확신 {conf:.3f})", flush=True)
             continue
         cells = []
         for r, (ts, tv, _) in zip(syl, times):
-            cells.append(f"{r[3]} {r[0] * 1000:.0f}/{(a + ts) * 1000:.0f}/{(a + tv) * 1000:.0f}")
+            cells.append(f"{r[0] * 1000:.0f}/{(a + ts) * 1000:.0f}/{(a + tv) * 1000:.0f}")  # CSD 가사는 기록에 남기지 않는다
             errs.append((a + ts - r[0]) * 1000)
         print(f"  {name} 확신 {conf:.3f}: " + ", ".join(cells), flush=True)
     if errs:
@@ -729,7 +731,7 @@ def main():
                    if (Path(args.csd_sep) / f"sep_{name}.wav").exists()]
     for name, wav, rows in csd[:2]:
         print(f"CSD {name}: 음표 {len(rows)}개, 음절 {sum(r[3] != '+' for r in rows)}개, 가사 줄 {len(csd_lyrics(rows).splitlines())}줄, "
-              f"처음: {rows[:4]}", flush=True)
+              f"처음: {[r[:3] for r in rows[:4]]}", flush=True)  # 가사 글자는 빼고 (CSD 사용 조건)
     fa_check(csd)
     vs = variants()
     if args.only:
