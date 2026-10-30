@@ -10,8 +10,9 @@ SingingVocoders(openvpi, 학습 코드)를 --sv 폴더에 받아 두고 그 코�
 
 사용:
   python vocoder_ft.py prep --sv SingingVocoders --voicebank 테토폴더 --data 작업폴더 --pretrained 미세조정용.ckpt
-  python vocoder_ft.py bench --sv SingingVocoders --data 작업폴더 --out 고른것.txt  (MPS 배치 10 · 6 · 4, 안 되면 CPU)
-  python vocoder_ft.py train --sv SingingVocoders --data 작업폴더 [--device mps --batch 6 --until 유닉스초]
+  python vocoder_ft.py probe --sv SingingVocoders --data 작업폴더 --out 고른것.txt [--min-rate 0.3]
+      (LADDER 설정을 실제 학습 몇 걸음씩 재서 메모리에 맞는 첫 설정을 고른다)
+  python vocoder_ft.py train --sv SingingVocoders --data 작업폴더 --plan 고른것.txt --until 유닉스초
   python vocoder_ft.py export --sv SingingVocoders --ckpt 학습결과.ckpt --out 이름.onnx
   python vocoder_ft.py check a.onnx b.onnx --data 작업폴더 [--require-snr 40] (같은 입력에 두 ONNX가 얼마나 같은지)
   python vocoder_ft.py copysyn 이름=a.onnx 이름=b.onnx --data 작업폴더 [--json out.json]
@@ -30,6 +31,16 @@ from ci_status import post as progress  # devtools/ (이 파일 옆)
 
 CONFIG = "configs/teto_ft.yaml"
 NAME = "teto_ft"
+HOP, SR = 512, 44100
+LADDER = [(4, 16, False), (4, 16, True), (2, 16, True)]
+# 배울 설정 (배치, 조각 길이 mel 틀, 생성기 중간값 다시 계산하기). 앞일수록 빠르고, 뒤로 갈수록 메모리를 덜 쓴다.
+# 공식 미세 조정 설정(배치 10 · 32틀)은 7GB CI 맥에 안 맞는다: 배치 4 · 32틀도 실제 학습 중 GPU 메모리 7.2GB를 넘겨
+# 멈췄다 (CPU 프로세스 최대 메모리로 재면 배치 4 · 32틀 7.8GB, 4 · 16틀 5.7GB, 다시 계산하면 5.0GB, 2 · 16틀 4.2GB,
+# 설정과 상관없는 몫이 3.4GB쯤). 판별기 중간값이 많아서 생성기만 다시 계산하면 3할쯤 준다.
+# pc 증강(음 높이를 바꿔 부르는 학습, 배치보다 생성기를 1.5배 더 돌린다)은 hifisampler가 바로 그렇게 쓰므로 끄지 않는다.
+MPS_LIMIT = {"PYTORCH_MPS_HIGH_WATERMARK_RATIO": "0.9", "PYTORCH_MPS_LOW_WATERMARK_RATIO": "0.7"}
+# 맥 GPU가 권장 메모리의 0.9배(7GB 기계에서 4.2GB쯤)보다 더 쓰려 하면 바로 메모리 오류가 나게 한다: 그 위로는
+# 디스크로 넘쳐 한 걸음이 몇 분씩 걸렸다. 오류가 나면 LADDER의 다음 설정으로 간다.
 
 
 def enter(sv):
@@ -108,117 +119,168 @@ def prep(args):
     progress("보코더 실험", f"준비: 테토 녹음 {n}개 {secs / 3600:.2f}시간, 배울 것 {len(lines)} · 검증 {len(valid)}")
 
 
-def bench_one(args):
-    """bench가 부르는 것 (따로 띄운 프로세스에서): 장치 하나 · 배치 하나로 한 걸음(판별기 · 생성기 한 번씩,
-    pc 증강으로 생성기 세 번 더)과 비슷한 계산을 재서 JSON 한 줄로 찍는다. 메모리가 모자라면 실패한다."""
-    import math
-
-    import torch
-
-    enter(args.sv)
-    from models.nsf_HiFigan.models import AttrDict, Generator, MultiPeriodDiscriminator, MultiScaleDiscriminator
-    from utils.config_utils import read_full_config
-
-    cfg = read_full_config(Path("configs/ft_hifigan.yaml"))
-    h = AttrDict({**cfg["model_args"], "sampling_rate": 44100, "num_mels": 128, "hop_size": 512})
-    dev, b, frames = args.device, args.batch or 10, 32
-    k = max(1, math.ceil(b * float(cfg.get("pc_aug_rate", 0.4))))
-    if dev == "mps" and hasattr(torch.mps, "recommended_max_memory"):
-        print(f"MPS 권장 메모리 {torch.mps.recommended_max_memory() / 2 ** 30:.1f}GB", flush=True)
-    g = Generator(h).to(dev)
-    msd, mpd = MultiScaleDiscriminator().to(dev), MultiPeriodDiscriminator(periods=h.discriminator_periods).to(dev)
-    mpd.requires_grad_(False)  # 학습처럼 MPD는 고정
-    d = [msd, mpd]
-    og, od = torch.optim.AdamW(g.parameters(), 1e-5), torch.optim.AdamW(msd.parameters(), 1e-5)
-    mel = torch.randn(b, 128, frames, device=dev)
-    f0 = 200 + 300 * torch.rand(b, frames, device=dev)
-    real = torch.randn(b, 1, frames * 512, device=dev) * 0.1
-    times = []
-    for _ in range(4):
-        t = time.time()
-        fake = torch.cat([g(mel, f0), g(mel[:k], f0[:k] * 1.2), g(mel[:k], f0[:k]), g(mel[:k], f0[:k] * 0.9)])
-        lo = sum(o.mean() for D in d for o in D(fake.detach())[0]) - sum(o.mean() for D in d for o in D(real)[0])
-        od.zero_grad()
-        lo.backward()
-        od.step()
-        lg = -sum(o.mean() for D in d for o in D(fake)[0]) + (fake[:b] - real).abs().mean() * 45
-        og.zero_grad()
-        lg.backward()
-        og.step()
-        if dev == "mps":
-            torch.mps.synchronize()
-        times.append(time.time() - t)
-    print(json.dumps({"device": dev, "batch": b, "sec": sorted(times[1:])[len(times[1:]) // 2],
-                      "first_sec": round(times[0], 1)}), flush=True)
-    sys.stdout.flush()
-    os._exit(0)
+def describe(plan):
+    b, crop, rec = plan
+    return f"배치 {b} · {crop}틀" + (" · 다시 계산" if rec else "")
 
 
-def bench(args):
-    """맥 GPU(MPS)로 배치 10 · 6 · 4를 하나씩 따로 띄운 프로세스에서 재서 (메모리가 모자라면 그 배치는 못 쓴다),
-    1초에 배우는 녹음 조각이 가장 많은 것을 고른다. MPS가 다 안 되면 CPU 배치 4.
-    CI 맥마다 메모리가 달라서: 7GB 기계에서는 배치 10이 GPU 메모리(7.9GB까지)를 넘었고, CPU로는 한 걸음 150~270초였다."""
+def swap_mb():
+    """맥이 메모리를 디스크로 넘긴 양(스왑) MB. 모르면 0."""
+    import re
     import subprocess
+
+    try:
+        out = subprocess.run(["sysctl", "-n", "vm.swapusage"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return 0.0
+    m = re.search(r"used = ([\d.]+)M", out)
+    return float(m.group(1)) if m else 0.0
+
+
+def error_line(tail):
+    err = [x for x in tail if "Error" in x] or tail or ["?"]
+    return err[-1][:200]
+
+
+def run_child(args, plan, extra, timeout, quiet=False):
+    """train1을 따로 띄운 프로세스에서 돌린다 (GPU 메모리 한도 MPS_LIMIT를 걸고). (종료 코드, 마지막 줄들);
+    timeout초가 지나 멈췄으면 종료 코드 대신 None."""
+    import collections
+    import subprocess
+    import threading
+
+    b, crop, rec = plan
+    cmd = [sys.executable, "-W", "ignore", os.path.abspath(__file__), "train1", "--sv", str(args.sv), "--data", str(args.data),
+           "--batch", str(b), "--crop", str(crop), *(["--recompute"] if rec else []), *extra]
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env={**os.environ, **MPS_LIMIT})
+    fired = threading.Event()
+
+    def stop():
+        fired.set()
+        p.kill()
+
+    timer = threading.Timer(timeout, stop)
+    timer.daemon = True
+    timer.start()
+    tail = collections.deque(maxlen=200)
+    for line in p.stdout:
+        tail.append(line.rstrip("\n"))
+        if not quiet:
+            print(line, end="", flush=True)
+    p.wait()
+    timer.cancel()
+    return (None if fired.is_set() else p.returncode), list(tail)
+
+
+def probe(args):
+    """LADDER 설정을 앞에서부터 실제 학습 몇 걸음씩 돌려 본다 (따로 띄운 프로세스, GPU 메모리 한도를 걸고).
+    메모리에 맞고 디스크로 넘치지 않은 첫 설정을 고른다 (다 넘치면 가장 빠른 것). 1초에 배우는 녹음이
+    --min-rate초보다 짧으면 실패한다: 느린 맥에 걸리면 몇 시간 배워도 조금뿐이라, 잡을 다시 돌려 다른 맥에서 돈다.
+    CI 맥은 같은 설정도 기계마다 10배 넘게 달랐다 (배치 4 · 32틀 한 걸음 1.7초 · 15초 · 39초)."""
+    import shutil
 
     import torch
 
     print(f"torch {torch.__version__}, 스레드 {torch.get_num_threads()}, MPS {torch.backends.mps.is_available()}, "
-          f"메모리 {os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES') / 2 ** 30:.1f}GB", flush=True)
-    plans = ([("mps", 10), ("mps", 6), ("mps", 4)] if torch.backends.mps.is_available() else []) + [("cpu", 4)]
-    ok = []
-    for dev, b in plans:
-        if dev == "cpu" and ok:  # MPS가 되면 CPU는 재지 않는다 (훨씬 느리다)
+          f"메모리 {os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES') / 2 ** 30:.1f}GB, 스왑 {swap_mb():.0f}MB", flush=True)
+    if not torch.backends.mps.is_available():
+        raise SystemExit("맥 GPU(MPS)가 없어요 (CPU로는 한 걸음에 몇 분이라 배울 수 없어요)")
+    if hasattr(torch.mps, "recommended_max_memory"):
+        print(f"GPU 권장 메모리 {torch.mps.recommended_max_memory() / 2 ** 30:.1f}GB, 한도 {MPS_LIMIT}", flush=True)
+    results = []
+    for i, plan in enumerate(LADDER):
+        rc, tail = run_child(args, plan, ["--probe", "6"], timeout=600, quiet=True)
+        shutil.rmtree(Path(args.sv) / "experiments" / "teto_probe", ignore_errors=True)
+        line = next((x for x in tail[::-1] if x.startswith('{"sec"')), None)
+        if rc or not line:
+            print(f"{describe(plan)}: 못 씀 ({'10분 안에 못 끝냄' if rc is None else error_line(tail)})", flush=True)
+            continue
+        r = {**json.loads(line), "index": i}
+        r["rate"] = plan[0] * plan[1] * HOP / SR / r["sec"]
+        results.append(r)
+        print(f"{describe(plan)}: 한 걸음 {r['sec']:.2f}초 (처음 {r['first']:.0f}초), 1초에 녹음 {r['rate']:.2f}초, "
+              f"GPU {r['mps_gb']:.1f}GB (드라이버 {r['driver_gb']:.1f}GB), 스왑 {r['swap_mb']:+.0f}MB", flush=True)
+        if r["swap_mb"] < 300:
             break
-        cmd = [sys.executable, os.path.abspath(__file__), "bench1", "--sv", str(args.sv), "--device", dev, "--batch", str(b)]
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        except subprocess.TimeoutExpired:
-            print(f"{dev} 배치 {b}: 5분 안에 네 걸음을 못 함 (메모리가 모자라 디스크로 넘치는 듯)", flush=True)
-            continue
-        line = next((x for x in r.stdout.splitlines()[::-1] if x.startswith("{")), None)
-        if r.returncode or not line:
-            err = [x for x in (r.stderr + r.stdout).splitlines() if "Error" in x] or (r.stderr + r.stdout).splitlines()
-            print(f"{dev} 배치 {b}: 못 씀 ({(err[-1] if err else r.returncode)!s:.200})", flush=True)
-            continue
-        res = json.loads(line)
-        print(f"{dev} 배치 {b}: 한 걸음 {res['sec']:.2f}초 (처음 {res['first_sec']}초), 1초에 조각 {b / res['sec']:.2f}개", flush=True)
-        ok.append((b / res["sec"], dev, b, res["sec"]))
-    if not ok:
-        raise SystemExit("MPS · CPU 어느 쪽으로도 한 걸음을 못 했어요")
-    rate, dev, b, sec = max(ok)
-    print(f"고른 장치: {dev} 배치 {b}", flush=True)
-    progress("보코더 실험", f"고른 장치 {dev} 배치 {b}: 한 걸음 {sec:.1f}초 ("
-             + ", ".join(f"{d} {bb}: {s:.1f}초" for _, d, bb, s in sorted(ok, key=lambda x: -x[2])) + ")")
-    if args.min_rate and rate < args.min_rate:  # 느린 맥에 걸리면 몇 시간 배워도 몇백 걸음뿐이라, 일찍 멈추고 다시 돌린다
-        raise SystemExit(f"이 맥은 1초에 조각 {rate:.2f}개밖에 못 배워요 (기준 {args.min_rate}). "
+    if not results:
+        raise SystemExit("어느 설정으로도 몇 걸음을 못 배웠어요")
+    pick = next((r for r in results if r["swap_mb"] < 300), None) or max(results, key=lambda r: r["rate"])
+    plan = LADDER[pick["index"]]
+    print(f"고른 설정: {describe(plan)}", flush=True)
+    progress("보코더 실험", f"고른 설정 {describe(plan)}: 한 걸음 {pick['sec']:.1f}초, 1초에 녹음 {pick['rate']:.2f}초, "
+             f"GPU {pick['mps_gb']:.1f}GB")
+    if args.min_rate and pick["rate"] < args.min_rate:
+        raise SystemExit(f"이 맥은 1초에 녹음 {pick['rate']:.2f}초어치밖에 못 배워요 (기준 {args.min_rate}). "
                          "잡을 다시 돌리면 다른 맥에서 돌아요")
-    if args.out:
-        Path(args.out).write_text(f"{dev} {b}\n", encoding="utf-8")
+    Path(args.out).write_text(f"{pick['index']}\n", encoding="utf-8")
 
 
 def train(args):
+    """probe가 고른 설정으로 배운다 (따로 띄운 프로세스). 도중에 GPU 메모리가 모자라 멈추면 LADDER의 다음 설정으로
+    마지막 저장점(--ckpt-every초마다 남긴다)에서 이어서 배운다. --until이 되면 final.ckpt를 남기고 끝난다.
+    이어서 배울 시간이 없으면 마지막 저장점을 final.ckpt로 쓴다."""
+    import shutil
+
+    first = int(Path(args.plan).read_text(encoding="utf-8").split()[0])
+    work = Path(args.sv) / "experiments" / NAME
+    fake = args.fake_oom
+    for i in range(first, len(LADDER)):
+        left = args.until - time.time()
+        if left < (300 if i == first else 90):
+            if i == first:
+                raise SystemExit(f"배울 시간이 모자라요 ({left:.0f}초)")
+            break
+        extra = ["--until", str(args.until), "--ckpt-every", str(args.ckpt_every)]
+        if fake and i + 1 < len(LADDER):  # 짧은 시험: 이어서 배우기가 되는지 한 번 일부러 멈춰 본다
+            extra += ["--fake-oom", str(fake)]
+        fake = 0
+        print(f"배울 설정: {describe(LADDER[i])}, 남은 {left / 60:.0f}분", flush=True)
+        rc, tail = run_child(args, LADDER[i], extra, timeout=min(left + 1800, 86400))
+        if rc == 0:
+            for q in work.glob("model_ckpt_steps_*.ckpt"):  # 하나에 1GB쯤, final.ckpt만 남긴다
+                q.unlink()
+            return
+        if not any("out of memory" in x for x in tail):
+            raise SystemExit(f"학습이 멈췄어요 ({'시간 초과' if rc is None else error_line(tail)})")
+        print(f"{describe(LADDER[i])}: GPU 메모리가 모자라 멈춤 → 더 작은 설정으로 이어서 배워요", flush=True)
+        progress("보코더 실험", f"{describe(LADDER[i])}: GPU 메모리가 모자라 더 작은 설정으로 이어서")
+    saved = sorted(work.glob("model_ckpt_steps_*.ckpt"), key=lambda q: int(q.stem.rsplit("_", 1)[1]))
+    if not saved:
+        raise SystemExit("GPU 메모리가 모자라 멈췄고, 남은 저장점도 없어요")
+    shutil.copy(saved[-1], work / "final.ckpt")
+    done = json.loads((work / "done.json").read_text(encoding="utf-8")) if (work / "done.json").exists() else {}
+    summary = (f"학습 끝 (마지막 저장점 {saved[-1].name}): {done.get('steps', '?')}걸음, "
+               f"배운 녹음 {done.get('audio', 0) / 60:.0f}분어치")
+    print(summary, flush=True)
+    progress("보코더 실험", summary)
+
+
+def train1(args):
+    """probe · train이 따로 띄우는 것: SingingVocoders train.py를 설정 하나로 맥 GPU(MPS)에서 돌린다.
+    experiments/teto_ft에 저장점이 있으면 거기서 이어서 배운다. --probe N이면 experiments/teto_probe에서
+    N걸음(처음 두 걸음 빼고)만 재서 JSON 한 줄을 찍고 끝난다 (저장하지 않는다)."""
     enter(args.sv)
     import lightning.pytorch as pl
+    import torch
+    import yaml
     from lightning.pytorch.callbacks import Callback, ProgressBar
 
-    if args.device or args.batch:  # bench가 고른 장치 · 배치로 설정을 다시 쓴다
-        import yaml
+    name = "teto_probe" if args.probe else NAME
+    dev = "mps" if torch.backends.mps.is_available() else "cpu"  # CPU는 이 코드를 맥 밖에서 시험할 때만
+    cfg = yaml.safe_load(Path(CONFIG).read_text(encoding="utf-8"))
+    cfg.update({"pl_trainer_accelerator": dev, "batch_size": args.batch, "crop_mel_frames": args.crop,
+                # 검증은 녹음을 통째로 넣는데 MPS conv1d는 길이 65536을 못 넘는다. 배우지 않은 녹음 채점은 copysyn이 한다
+                "num_sanity_val_steps": 0, "val_check_interval": 10 ** 9})
+    config = f"configs/{name}.yaml"
+    Path(config).write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    work = Path("experiments") / name
+    from utils.training_utils import get_latest_checkpoint_path
 
-        cfg = yaml.safe_load(Path(CONFIG).read_text(encoding="utf-8"))
-        if args.device:
-            cfg["pl_trainer_accelerator"] = args.device
-        if args.batch:
-            cfg["batch_size"] = args.batch
-        if cfg["pl_trainer_accelerator"] == "mps":  # 검증은 녹음을 통째로 넣는데 MPS conv1d는 길이 65536을 못 넘는다
-            cfg["num_sanity_val_steps"], cfg["val_check_interval"] = 0, 10 ** 9  # 배우지 않은 녹음 채점은 copysyn이 한다
-        Path(CONFIG).write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8")
-        print("장치 · 배치:", cfg["pl_trainer_accelerator"], cfg["batch_size"], flush=True)
-    left = int(args.until - time.time()) if args.until else None
-    if left is not None and left < 300:
-        raise SystemExit(f"배울 시간이 모자라요 ({left}초)")
-    work = Path("experiments") / NAME
-    import torch
-
+    resume = get_latest_checkpoint_path(work)
+    done = json.loads((work / "done.json").read_text(encoding="utf-8")) if resume and (work / "done.json").exists() else {}
+    n_train = sum(1 for x in (Path(args.data) / "index" / "train").read_text(encoding="utf-8").splitlines() if x.strip())
+    plan = (args.batch, args.crop, args.recompute)
+    print(f"설정: {describe(plan)}" + (f", 이어서 배움: {Path(resume).name}" if resume else ""), flush=True)
     _load = torch.load
 
     def load_cpu(*a, **k):  # 미세 조정 시작점은 CUDA에서 저장돼 있어서 (맥에는 CUDA가 없다) CPU로 먼저 읽는다
@@ -241,62 +303,117 @@ def train(args):
 
     GanBaseTask.load_finetune_ckpt = load_checked
 
-    class Log(Callback):  # CI 기록에 50걸음마다 한 줄 (진행 막대 대신), 커밋 상태에 10분마다
-        def __init__(self):
-            self.t, self.n, self.said, self.val = time.time(), 0, 0.0, []
+    def train_loader(self):  # 일꾼 프로세스 없이 (일꾼마다 torch를 따로 올려 메모리를 먹는다. 한 걸음 읽기는 몇십 ms)
+        return torch.utils.data.DataLoader(self.train_dataset, collate_fn=self.train_dataset.collater,
+                                           batch_size=self.config["batch_size"], shuffle=True, num_workers=0)
 
-        def on_train_start(self, trainer, pl_module):  # 준비 · 처음 검증 시간은 빼고 잰다
-            self.t = time.time()
+    GanBaseTask.train_dataloader = train_loader
+    if args.recompute:  # 생성기 중간값을 저장하지 않고 거꾸로 갈 때 다시 계산한다 (메모리가 훨씬 적고 계산이 3할쯤 늘어난다)
+        from torch.utils.checkpoint import checkpoint
+
+        from models.nsf_HiFigan.models import ResBlock1
+
+        forward = ResBlock1.forward
+
+        def recompute(self, x):
+            if torch.is_grad_enabled() and x.requires_grad:
+                return checkpoint(forward, self, x, use_reentrant=False)
+            return forward(self, x)
+
+        ResBlock1.forward = recompute
+    clip = args.crop * HOP / SR  # 한 조각 녹음 길이 (초)
+
+    class Log(Callback):  # CI 기록에 50걸음마다 한 줄 (진행 막대 대신), 커밋 상태에 10분마다, 저장점은 --ckpt-every초마다
+        def __init__(self):
+            self.t0 = self.saved = time.time()
+            self.last, self.times, self.said, self.mem, self.swap = None, [], 0.0, [0, 0], 0.0
+            # 이어서 배우면 저장점까지 배운 걸음 · 조각 수 · 녹음 길이(초)부터 센다
+            self.steps, self.items, self.audio = done.get("steps", 0), done.get("items", 0), done.get("audio", 0.0)
+
+        def on_train_start(self, trainer, pl_module):  # 준비 시간은 빼고 잰다
+            self.last = time.time()
 
         def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-            self.n += 1
-            if self.n % 50 == 0:
+            now = time.time()
+            self.times.append(now - self.last)
+            self.last = now
+            self.steps += 1
+            self.items += args.batch
+            self.audio += args.batch * clip
+            if dev == "mps":
+                self.mem = [max(self.mem[0], torch.mps.current_allocated_memory()),
+                            max(self.mem[1], torch.mps.driver_allocated_memory())]
+            if len(self.times) == 2:
+                self.swap = swap_mb()
+            if args.probe:
+                timed = self.times[2:]  # 처음 두 걸음은 GPU 준비(셰이더 만들기)라 뺀다
+                if len(timed) >= args.probe or (len(timed) >= 2 and sum(timed) > 150):
+                    print(json.dumps({"sec": sorted(timed)[len(timed) // 2], "first": self.times[0],
+                                      "mps_gb": self.mem[0] / 2 ** 30, "driver_gb": self.mem[1] / 2 ** 30,
+                                      "swap_mb": swap_mb() - self.swap}), flush=True)
+                    os._exit(0)
+                return
+            n = self.steps
+            sec = sorted(self.times[-20:])[len(self.times[-20:]) // 2]
+            if n % 50 == 0:
                 loss = trainer.callback_metrics.get("loss")
-                print(f"걸음 {self.n} · {time.time() - self.t:.0f}초 · 손실 {float(loss):.4f}" if loss is not None else
-                      f"걸음 {self.n} · {time.time() - self.t:.0f}초", flush=True)
-            if self.n == 5 or time.time() - self.said > 600:
-                self.said = time.time()
-                rest = f", 남은 {(args.until - time.time()) / 60:.0f}분" if args.until else ""
-                val = f", 검증 손실 {self.val[0]:.4f}→{self.val[-1]:.4f}" if self.val else ""
-                progress("보코더 실험", f"학습 걸음 {self.n} · 한 걸음 {(time.time() - self.t) / self.n:.1f}초{val}{rest}")
-
-        def on_validation_end(self, trainer, pl_module):
-            v = trainer.callback_metrics.get("val_loss")
-            if v is not None:
-                self.val.append(float(v))
-                print(f"걸음 {self.n} 검증 손실 {float(v):.4f}", flush=True)
+                print(f"걸음 {n} · {now - self.t0:.0f}초 · 한 걸음 {sec:.2f}초 · GPU {self.mem[0] / 2 ** 30:.1f}GB"
+                      + (f" · 손실 {float(loss):.4f}" if loss is not None else ""), flush=True)
+            if now - self.saved > args.ckpt_every:
+                self.saved = now
+                path = work / f"model_ckpt_steps_{trainer.global_step}.ckpt"
+                trainer.save_checkpoint(str(path))
+                (work / "done.json").write_text(json.dumps({"steps": n, "items": self.items, "audio": self.audio}), encoding="utf-8")
+                for old in work.glob("model_ckpt_steps_*.ckpt"):
+                    if old != path:
+                        old.unlink()
+                print(f"걸음 {n}: 저장점 {path.name} ({time.time() - now:.0f}초)", flush=True)
+            if args.fake_oom and now - self.t0 > args.fake_oom:
+                raise RuntimeError("MPS backend out of memory (연습: 이어서 배우기 시험)")
+            if now > args.until:
+                trainer.should_stop = True
+            if len(self.times) == 5 or now - self.said > 600:
+                self.said = now
+                progress("보코더 실험", f"학습 걸음 {n} · 한 걸음 {sec:.1f}초 ({describe(plan)}), "
+                         f"남은 {(args.until - now) / 60:.0f}분")
 
         def on_exception(self, trainer, pl_module, exception):  # 정리 단계가 멈추지 않게 바로 끝낸다 (실패로)
             import traceback
 
             traceback.print_exception(exception)
-            progress("보코더 실험", f"학습 실패: {type(exception).__name__}: {str(exception)[:90]}")
+            if not args.probe:
+                progress("보코더 실험", f"학습 멈춤: {type(exception).__name__}: {str(exception)[:90]}")
             sys.stdout.flush()
             sys.stderr.flush()
             os._exit(1)
 
-        def on_train_end(self, trainer, pl_module):  # 시간 한도로 멈춰도 마지막 것을 남긴다
+        def on_train_end(self, trainer, pl_module):
+            if args.probe:
+                os._exit(1)  # 몇 걸음도 못 하고 끝났다
             trainer.save_checkpoint(str(work / "final.ckpt"))
-            print(f"배운 걸음 {self.n} ({time.time() - self.t:.0f}초) → {work / 'final.ckpt'}", flush=True)
-            progress("보코더 실험", f"학습 끝: {self.n}걸음, 한 걸음 {(time.time() - self.t) / max(1, self.n):.1f}초"
-                     + (f", 검증 손실 {self.val[0]:.4f}→{self.val[-1]:.4f}" if self.val else ""))
+            n = self.steps
+            sec = sorted(self.times[-50:])[len(self.times[-50:]) // 2] if self.times else 0.0
+            print(f"배운 걸음 {n} → {work / 'final.ckpt'}", flush=True)
+            summary = (f"학습 끝: {n}걸음, 마지막 설정 {describe(plan)} · 한 걸음 {sec:.1f}초, "
+                       f"배운 녹음 {self.audio / 60:.0f}분어치 (학습 파일 {self.items / n_train:.1f}바퀴)")
+            print(summary, flush=True)
+            progress("보코더 실험", summary)
             sys.stderr.flush()
             os._exit(0)  # 저장했으면 바로 끝낸다: 학습 뒤 정리(데이터로더 일꾼 · 공유 메모리)에서 한 시간 넘게 멈춘 적이 있다
 
-    class Trainer(pl.Trainer):  # train.py가 만드는 Trainer에 시간 한도 · 기록만 더한다 (isinstance가 되게 물려받아서)
+    class Trainer(pl.Trainer):  # train.py가 만드는 Trainer에 기록만 더한다 (isinstance가 되게 물려받아서)
         def __init__(self, *a, **k):
-            if left is not None:
-                k["max_time"] = {"seconds": left}
+            k["limit_val_batches"] = 0  # 멈출 때 한 번 하는 검증도 끈다 (녹음 통째로 넣는 검증은 MPS에서 안 된다)
             k["enable_progress_bar"] = False
             k["log_every_n_steps"] = 50
             k["callbacks"] = [c for c in k.get("callbacks", []) if not isinstance(c, ProgressBar)] + [Log()]
             super().__init__(*a, **k)
 
     pl.Trainer = Trainer
-    print(f"배울 시간 한도 {left / 3600:.2f}시간" if left else "시간 한도 없음", flush=True)
     import train as sv_train
 
-    sv_train.train.callback(config=CONFIG, exp_name=NAME, work_dir=None)
+    sv_train.train.callback(config=config, exp_name=name, work_dir=None)
+    raise SystemExit("학습이 끝 기록 없이 끝났어요")
 
 
 def build_onnx_model(sv, ckpt):
@@ -456,30 +573,36 @@ def copysyn(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["prep", "bench", "bench1", "train", "export", "check", "copysyn"])
+    ap.add_argument("cmd", choices=["prep", "probe", "train", "train1", "export", "check", "copysyn"])
     ap.add_argument("onnx", nargs="*")
     ap.add_argument("--sv")
     ap.add_argument("--voicebank")
     ap.add_argument("--data")
     ap.add_argument("--pretrained")
-    ap.add_argument("--device", default="")
-    ap.add_argument("--batch", type=int, help="prep: 설정에 쓸 배치 (기본 10), train: 바꿀 배치")
-    ap.add_argument("--val", type=int, default=200, help="몇 걸음마다 검증 · 저장")
+    ap.add_argument("--device", default="cpu", help="prep: 설정에 쓸 장치 (전처리만 해서 아무거나)")
+    ap.add_argument("--batch", type=int, default=10, help="prep: 설정에 쓸 배치, train1: 배울 배치")
+    ap.add_argument("--crop", type=int, default=32, help="train1: 조각 길이 (mel 틀)")
+    ap.add_argument("--recompute", action="store_true", help="train1: 생성기 중간값을 거꾸로 갈 때 다시 계산")
+    ap.add_argument("--probe", type=int, default=0, help="train1: 이만큼 걸음만 재고 끝 (저장하지 않음)")
+    ap.add_argument("--plan", help="train: probe가 고른 설정 (LADDER 번호)")
+    ap.add_argument("--ckpt-every", type=float, default=1200, help="train: 이 초마다 이어서 배울 저장점")
+    ap.add_argument("--fake-oom", type=float, default=0, help="train: 짧은 시험에서 이 초 뒤 한 번 일부러 멈춰 이어서 배우기 시험")
+    ap.add_argument("--val", type=int, default=200, help="prep: 설정에 쓸 검증 간격 (MPS에서는 끈다)")
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--train-mpd", action="store_true", help="MPD도 배운다 (기본은 README 권장대로 고정)")
-    ap.add_argument("--until", type=float, help="유닉스 초. 이때까지만 배운다")
+    ap.add_argument("--until", type=float, default=float("inf"), help="유닉스 초. 이때까지만 배운다")
     ap.add_argument("--ckpt")
     ap.add_argument("--out")
     ap.add_argument("--json")
     ap.add_argument("--require-snr", type=float, help="check: 두 ONNX 출력 SNR이 이보다 낮으면 실패 (dB)")
-    ap.add_argument("--min-rate", type=float, help="bench: 1초에 배우는 조각이 이보다 적으면 실패 (느린 맥)")
+    ap.add_argument("--min-rate", type=float, help="probe: 1초에 배우는 녹음이 이 초보다 짧으면 실패 (느린 맥)")
     args = ap.parse_args()
     if args.cmd == "copysyn" and args.onnx and "=" not in args.onnx[0]:
         ap.error("copysyn은 이름=경로.onnx 로")
+    if args.cmd == "train" and not args.plan:
+        ap.error("train은 --plan (probe가 고른 것)과 함께")
     args.cwd = os.getcwd()
-    if args.cmd == "prep":
-        args.device, args.batch = args.device or "cpu", args.batch or 10
-    {"prep": prep, "bench": bench, "bench1": bench_one, "train": train, "export": export, "check": check,
+    {"prep": prep, "probe": probe, "train": train, "train1": train1, "export": export, "check": check,
      "copysyn": copysyn}[args.cmd](args)
 
 

@@ -7,6 +7,7 @@ name: 테토 보코더 미세 조정 실험
 # vocadito · CSD 노래는 이 실행의 캐시에만 둬요 (CSD는 CC BY-NC-SA). 작업이 도는 동안 진행은 커밋 상태 "보코더 실험"에.
 # 브랜치 이름에 smoke가 있으면 곡 4개 · 학습 8분으로 끝까지 한 번 돌아 보기만 해요.
 on:
+  workflow_dispatch:  # 짧은 시험이 끝난 뒤 긴 실험만 따로 (두 맥 작업이 같이 돌면 GPU를 나눠 써서 둘 다 느렸다)
   push:
     branches: ["claude/vocoder*"]
     paths:
@@ -142,12 +143,6 @@ jobs:
           ck=$(find "$W/ft" -name "*.ckpt" | head -1)
           test -n "$ck"
           echo "FT_CKPT=$ck" >> "$GITHUB_ENV"
-      - name: 한 걸음 시간 재기 (MPS 배치 10 · 6 · 4 중 메모리에 맞고 가장 빠른 것, 느린 맥이면 일찍 멈춤)
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          rate=$([ -n "$SMOKE" ] && echo 0 || echo 0.5)  # 빠른 맥은 1초에 조각 2.4개쯤, 느린 맥은 0.1개
-          python devtools/vocoder_ft.py bench --sv "$W/sv" --out "$W/device.txt" --min-rate "$rate"
       - name: 테토 녹음 → 학습 파일 (렌더하기 전에, 렌더가 음원 폴더에 캐시를 만들어서)
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -155,6 +150,12 @@ jobs:
           val=$([ -n "$SMOKE" ] && echo 30 || echo 200)
           python devtools/vocoder_ft.py prep --sv "$W/sv" --voicebank "$HOME/Library/OpenUtau/Singers" --data "$W/data" \
             --pretrained "$FT_CKPT" --val "$val"
+      - name: 배울 설정 고르기 (실제 학습 몇 걸음씩, GPU 메모리 한도 안에서 · 느린 맥이면 일찍 멈춤)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          rate=$([ -n "$SMOKE" ] && echo 0 || echo 0.3)  # 1초에 배우는 녹음 초: 빠른 맥은 0.9쯤, 느린 맥은 0.1
+          python devtools/vocoder_ft.py probe --sv "$W/sv" --data "$W/data" --out "$W/plan.txt" --min-rate "$rate"
       - name: 내보내기 확인 (미세 조정 시작점을 내보내면 OpenUtau가 받은 보코더와 같은 소리)
         run: |
           python devtools/vocoder_ft.py export --sv "$W/sv" --ckpt "$FT_CKPT" --out "$W/base_export.onnx"
@@ -201,14 +202,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          if [ -n "$SMOKE" ]; then until=$(( $(date +%s) + 480 )); else until=$(( T0 + 355 * 60 - (AB_END - AB_START) - 40 * 60 )); fi
+          # 짧은 시험은 8분만, 1분 반마다 저장하고 한 번 일부러 멈춰서 이어서 배우기까지 본다
+          if [ -n "$SMOKE" ]; then until=$(( $(date +%s) + 480 )); extra="--ckpt-every 90 --fake-oom 200"
+          else until=$(( T0 + 355 * 60 - (AB_END - AB_START) - 40 * 60 )); extra=""; fi
           echo "다시 렌더 $(( (AB_END - AB_START) / 60 ))분, 배우기는 $(( (until - $(date +%s)) / 60 ))분"
           pkill -f torch_shm_manager || true  # 앞 단계에서 남은 파이썬 일꾼 (메모리를 덜 쓰게)
           pkill -f "multiprocessing" || true
           ps -axo pid,rss,etime,comm -m | head -6 || true
-          read -r dev batch < "$W/device.txt" || true
-          test -n "$dev" && test -n "$batch"
-          python -W ignore devtools/vocoder_ft.py train --sv "$W/sv" --data "$W/data" --device "$dev" --batch "$batch" --until "$until"
+          python -W ignore devtools/vocoder_ft.py train --sv "$W/sv" --data "$W/data" --plan "$W/plan.txt" --until "$until" $extra
           ls -l "$W/sv/experiments/teto_ft/final.ckpt"
       - name: 테토 보코더 내보내기 · 바꿔 끼우기 (OpenUtau가 쓰는 자리에, 렌더 캐시 비우고)
         run: |
