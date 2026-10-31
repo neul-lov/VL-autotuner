@@ -213,6 +213,7 @@ def retune(folder, start, end, options=None, lyrics_text=None, renote=False, pro
                 part.setdefault("curves", []).append(cur[c["abbr"]])
             _splice_curve(cur[c["abbr"]], c, lo, hi)
         p.keep_pitch(grid, held)
+        p.refresh_ko_codas(lo, hi)
         # 바꿀 것을 모두 결과 폴더 안의 임시 파일로 먼저 만들고, 되돌리기 기록(소리 포함)을 남긴 뒤 한 번에 바꿔 넣는다.
         # 중간에 실패하면 기록으로 되돌려서 소리 · 음표 · 미리 보기가 서로 어긋나지 않게
         prev_path = folder / "preview.json"
