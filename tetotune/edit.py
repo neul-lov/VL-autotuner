@@ -80,6 +80,15 @@ class Project:
     def save(self):
         write_text_atomic(self.path, self.dump())
 
+    def refresh_ko_codas(self, lo, hi):
+        """한글(KO to JA) 트랙이면 틱 lo~hi 근처 음표의 받침 위치 옮기기(tune.ko_coda_overrides)를 다시 쓴다: 음표 길이 · 이웃이 바뀌어서."""
+        from . import tune, voicebank
+
+        if (self.data.get("tracks") or [{}])[0].get("phonemizer") != voicebank.KO_TO_JA:
+            return
+        pad = 2 * TICKS
+        tune.ko_coda_overrides(self.notes, self.bpm, (lo - pad, hi + pad))
+
     def dump(self):
         return yaml.safe_dump(self.data, allow_unicode=True, sort_keys=False)
 
@@ -305,6 +314,7 @@ def apply(folder, op, index, **kw):
     x = p.notes[sung[index]]
     span = (x["position"] / p.tps, (x["position"] + x["duration"]) / p.tps)
     OPS[op](p, index, **kw)
+    p.refresh_ko_codas(x["position"], x["position"] + x["duration"])
     snapshot(folder)
     p.save()
     return refresh_preview(folder, p, touched=span)

@@ -612,7 +612,8 @@ def renderer_settings(choice="auto"):
 
 # 막히는 받침(ㄱ · ㄷ · ㅂ 소리)의 막힘을 음표 끝 몇 ms로 (0 = OpenUtau KO to JA 그대로). KO to JA는 받침 VC를 음표 끝
 # 180틱(다음 음표가 붙어 있으면, 아니면 120틱) 앞에 두는데, 템포가 느리면 200ms 넘게 소리가 막혀 사람 노래보다 끊겨 들린다.
-KO_CODA_CLOSE_MS = 0
+# 90ms: 한글 렌더 끊김 CSD 2.23 → 2.08, 분리 CSD 1.69 → 1.38, 한글 정답 1.32 → 0.88회/분 (자연스러움 AI는 ±0.01 안, README)
+KO_CODA_CLOSE_MS = 90
 _KO_STOP_FINALS = {1, 2, 3, 7, 17, 18, 19, 20, 22, 23, 24, 25, 26, 27}  # KOtoJAPhonemizer finals 중 k · t · p
 
 
@@ -634,26 +635,35 @@ def _ko_coda_index(vnotes, i):
     return 2 if (ord(c) - 0xAC00) % 28 in (0, 4, 5, 6, 21) else 1
 
 
-def _ko_coda_overrides(vnotes, bpm):
-    """KO to JA 받침 음소(두 번째 음소)를 음표 끝 KO_CODA_CLOSE_MS 앞으로 옮기는 phoneme_overrides를 음표에 넣는다 → 옮긴 수."""
-    if KO_CODA_CLOSE_MS <= 0:
-        return 0
+def _ko_coda_ours(o):
+    return o.get("index") in (1, 2) and set(o) <= {"index", "offset"}
+
+
+def ko_coda_overrides(vnotes, bpm, span=None):
+    """KO to JA 받침 음소를 음표 끝 KO_CODA_CLOSE_MS 앞으로 옮기는 phoneme_overrides를 음표에 넣는다 → 옮긴 수.
+    span=(lo, hi) 틱이면 그 안에서 시작하는 음표만 (예전에 넣은 것을 지우고) 다시 쓴다: 음표를 고친 뒤 길이 · 이웃이 바뀌어서."""
+    vnotes = sorted(vnotes, key=lambda x: x["position"])
     tps = TICKS * bpm / 60
     close = int(round(KO_CODA_CLOSE_MS / 1000 * tps))
     moved = 0
     for i, x in enumerate(vnotes):
+        if span and not span[0] <= x["position"] <= span[1]:
+            continue
+        ovs = [o for o in x.get("phoneme_overrides") or [] if not _ko_coda_ours(o)]
+        x["phoneme_overrides"] = ovs
         c = x["lyric"][-1:] if x["lyric"] else ""
-        if not ("가" <= c <= "힣") or (ord(c) - 0xAC00) % 28 not in _KO_STOP_FINALS:
+        if KO_CODA_CLOSE_MS <= 0 or len(x["lyric"]) != 1 or not ("가" <= c <= "힣") \
+                or (ord(c) - 0xAC00) % 28 not in _KO_STOP_FINALS:
             continue
         j, length = i + 1, x["duration"]
         while j < len(vnotes) and vnotes[j]["lyric"] == "+" and vnotes[j]["position"] == vnotes[j - 1]["position"] + vnotes[j - 1]["duration"]:
             length += vnotes[j]["duration"]
             j += 1
-        nxt = j < len(vnotes) and vnotes[j]["position"] == vnotes[j - 1]["position"] + vnotes[j - 1]["duration"]
+        nxt = j < len(vnotes) and vnotes[j]["position"] <= vnotes[j - 1]["position"] + vnotes[j - 1]["duration"]
         default = max(length - (180 if nxt else 120), length // 2)
         want = max(length - close, length // 2)
         if want > default:
-            x["phoneme_overrides"] = [{"index": _ko_coda_index(vnotes, i), "offset": int(want - default)}]
+            ovs.append({"index": _ko_coda_index(vnotes, i), "offset": int(want - default)})
             moved += 1
     return moved
 
@@ -677,7 +687,7 @@ def _write_ustx(path, name, bpm, qnotes, pdata, curves, waves, singer, phonemize
             "phoneme_expressions": exps, "phoneme_overrides": [],
         })
     if phonemizer == voicebank.KO_TO_JA:
-        _ko_coda_overrides(vnotes, bpm)
+        ko_coda_overrides(vnotes, bpm)
     if not vnotes:
         raise ValueError("음표가 너무 짧아서 프로젝트를 만들지 못했어요 (빠르기를 확인해 주세요)")
     end = max(n["position"] + n["duration"] for n in vnotes)
