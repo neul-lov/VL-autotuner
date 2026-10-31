@@ -39,6 +39,14 @@ class Harness {
         Console.WriteLine($"notes={part.notes.Count} phonemes={part.phonemes.Count} curves={string.Join(",", part.curves.Select(c => c.abbr + ":" + c.xs.Count))}");
         int errors = part.phonemes.Count(p => p.Error);
         Console.WriteLine($"phoneme_errors={errors}");
+        // 음소 위치를 옮긴 음표(phoneme_overrides offset)가 그 음표의 마지막 음소(받침)를 옮겼는지 센다 (CI 로그에서 확인)
+        int hit = 0, miss = 0;
+        foreach (var p in part.phonemes) {
+            var o = p.Parent?.phonemeOverrides.Find(x => x.index == p.index);
+            if (o?.offset == null) continue;
+            if (part.phonemes.Any(q => q.Parent == p.Parent && q.index > p.index)) miss++; else hit++;
+        }
+        if (hit + miss > 0) Console.Error.WriteLine($"coda_override hit={hit} miss={miss}");
         foreach (var p in part.phonemes.Take(int.Parse(args.Length > 2 ? args[2] : "12"))) {
             Console.WriteLine($"  {p.position} {p.phoneme} oto={(p.oto?.Alias ?? "-")} err={p.Error}");
         }
