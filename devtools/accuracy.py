@@ -55,6 +55,8 @@ OFF = {
                                 (align_fa, "GAP_EXTEND", False)],
     # PR13 뒤: 받침 뒤 ㅇ 음절(먹어 → 머거)은 한국어 발음으로도 맞춘 결과로 (같은 모델, align_fa.KO_DECODE)
     "한국어 발음으로 맞추기": [(align_fa, "KO_DECODE", "")],
+    # PR14 뒤: 한글 막히는 받침을 음표 끝 90ms 앞으로 (OpenUtau KO to JA는 180틱 앞, tune.ko_coda_overrides)
+    "받침 옮기기": [(tune_mod, "KO_CODA_CLOSE_MS", 0)],
 }
 PR10 = OFF["이웃 프레이즈 함께 맞추기"] + OFF["가사 맞추기 시간 보정 · 덜 버리기"] + OFF["한국어 발음으로 맞추기"]
 OLD_RENDER = [(tune_mod, "RENDERER", "WORLDLINE-R"), (tune_mod, "RESAMPLER", None)]  # PR12까지 (main) 렌더러

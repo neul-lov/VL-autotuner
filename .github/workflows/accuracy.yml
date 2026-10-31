@@ -214,7 +214,7 @@ jobs:
       matrix:
         include:  # 새 방식 vs 예전 방식: Mac 자리를 먼저 받게 따로 둔다
           - {id: 1, only: "새 기본"}
-          - {id: 2, only: "− 한국어 발음으로 맞추기"}
+          - {id: 2, only: "− 받침 옮기기"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
